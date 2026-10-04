@@ -7,7 +7,29 @@
 | M7 | `m7-ai-commands.patch` | 7 | applied |
 | M8 | `m8-match-rules.patch` | 6 | applied |
 | M8 | `m8-readme-update.patch` | 1 | ready |
-| M9 | `m9-alpha-content-feel-pass.patch` | 6 | ready — replaces the earlier M9 attempt (216 lines: constant tweaks without the root-cause sim fix, no golden re-pins despite moving the flagship hash, no exit tests — it would have failed the green gate) |
+| M9 | `m9-alpha-content-feel-pass.patch` | 6 | applied (see the M9 note) |
+| M9.1 | `m9.1-input-hotfix.patch` | 4 | ready — applies on the M9 HEAD (dad840a) |
+
+## M9.1 note
+
+The first human playtest of the windowed client (DEBT-008) found the
+input layer mirrored and half-missing: D panned left and A right (the
+camera's screen-right axis has been negated since M3), W retreated,
+the mouse could not move the camera at all, there was no way to order
+an attack, rejected orders were silent, the opening zoom rendered the
+starting force as specks, and the M9 feedback cues never expired.
+`m9.1-input-hotfix.patch` fixes all of it — plan §11.3's input slice
+(edge scroll + middle-drag + zoom-toward-cursor + right-click context
+orders attack/gather/move + the armed-'A' attack-move flow),
+direction-pinning camera tests, refusal cues, selection brackets, the
+start-anchored opening camera, and the always-advancing feedback
+clock. Green-gated end to end: fmt, clippy -D warnings, 352 dev / 347
+release tests, and **zero golden movement** (demo 0x9d5ba9b565060336,
+flagship 0x01b3b60b741f03e9, content 0x249b69f0ee343a10 re-verified
+bit-identical — the fix touches only the client and the engine's
+camera, both above the sim boundary). The windowed loop re-verified
+under Xvfb + llvmpipe with XTEST injection: 900 frames presented,
+drag-box selection of the 5 start entities, 2 commands submitted.
 
 ## M9 note
 
