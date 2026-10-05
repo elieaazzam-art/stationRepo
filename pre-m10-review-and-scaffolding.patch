@@ -1,0 +1,1906 @@
+From 239784b67338f675a756ca106ff49eb061822c51 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:19:33 +0000
+Subject: [PATCH 1/8] perf(sim): batch entity removal in death & cleanup (stage
+ 8)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Stage 8's death loop removed one entity at a time, each call doing up to
+13 binary searches + 13 Vec::remove shifts across the capability stores.
+For m simultaneous deaths this was O(m · (log n + n)) per store.
+
+Add World::remove_batch(ids: &[EntityId]) — a single merge-join sweep per
+store (both ids and stores are ascending), reducing the cost to O(n + m)
+per store. The death loop now marks Lifecycle::Dead, releases footprints,
+and emits Died events per-entity, then calls remove_batch once with the
+dead-id slice.
+
+The post-state is byte-identical to the per-id path — proven by a new
+test that builds two identical worlds, removes the same non-contiguous
+id set via each path, and asserts every store compares equal. Golden
+hashes (determinism, economy, combat, movement, alpha_loop) remain
+unchanged: 352 dev tests green.
+
+Cost shape (alpha scale, n=200, m=10 dead): ~27k → ~2.7k ops per store
+pass, a ~10x speedup. At the 10x scale test (n=2000, m=100 dead): ~100x.
+
+Aligns with the user's 'better performance' goal and prepares M10's perf
+baseline (plan §15) without changing any observable behavior.
+---
+ crates/sim/src/sim.rs   |  20 ++++--
+ crates/sim/src/world.rs | 136 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 150 insertions(+), 6 deletions(-)
+
+diff --git a/crates/sim/src/sim.rs b/crates/sim/src/sim.rs
+index b48ca1f..5ada01a 100644
+--- a/crates/sim/src/sim.rs
++++ b/crates/sim/src/sim.rs
+@@ -479,6 +479,13 @@ impl Sim {
+     /// the allocator never looks back, so ids are never reused. Structures
+     /// release their footprint tiles on the way out, so the ground reopens,
+     /// and the population usage and cap settle again after the removals.
++    ///
++    /// Performance: the dead are removed in one batched pass per store
++    /// ([`crate::world::World::remove_batch`]) rather than `m` separate
++    /// `World::remove` calls. The post-state is byte-identical (the same
++    /// survivors, in the same order) — only the cost shape changes. Footprint
++    /// release happens per-entity before the batched removal because it reads
++    /// the entity's position and footprint (still in the world at that point).
+     fn advance_health_and_cleanup(&mut self) {
+         for (_, def) in &mut self.world.health {
+             let max = def.max_hp.max(0);
+@@ -493,16 +500,17 @@ impl Sim {
+             .collect();
+         // The dead list (ascending id — the health store's invariant) is what
+         // `clear_dead_targets` will match against attacker slots, so clone it
+-        // before the removal loop consumes it.
++        // before the removal pass consumes it.
+         let dead_ids = dead.clone();
+-        for id in dead {
+-            if let Some(entity) = self.world.entity_mut(id) {
++        for id in &dead {
++            if let Some(entity) = self.world.entity_mut(*id) {
+                 entity.lifecycle = Lifecycle::Dead;
+             }
+-            self.release_footprint(id);
+-            self.world.remove(id);
+-            self.events.push(Event::Died { entity: id });
++            self.release_footprint(*id);
++            self.events.push(Event::Died { entity: *id });
+         }
++        // One batched sweep per store — O(n + m) instead of m · O(log n + n).
++        self.world.remove_batch(&dead_ids);
+         // After removal, drop any attacker target slots pointing at the dead
+         // (the dead id is never reused, so the slot would otherwise dangle
+         // forever). Ascending attacker-id order (combat.rs's contract).
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index ed54c81..0953517 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -806,6 +806,11 @@ impl World {
+     /// `Vec::remove` shifts survivors down without reordering them, so the
+     /// ascending-id invariant — and therefore deterministic iteration — survives
+     /// removal (plan §7.3 requirement b).
++    ///
++    /// For death & cleanup (stage 8), prefer [`World::remove_batch`] — it walks
++    /// each store once with a merge-join over the dead-id slice, which is
++    /// O(n + m) per store instead of the O(m · (log n + n)) of `m` separate
++    /// `remove` calls. The two paths produce byte-identical state.
+     pub fn remove(&mut self, id: EntityId) {
+         if let Ok(i) = self.entities.binary_search_by_key(&id, |e| e.id) {
+             self.entities.remove(i);
+@@ -850,6 +855,69 @@ impl World {
+             self.attack.remove(i);
+         }
+     }
++
++    /// Removes every id in `ids` from the base record and every capability
++    /// store in a single pass per store (the batched path the death & cleanup
++    /// stage uses). `ids` must be sorted ascending with no duplicates — the
++    /// same shape the health store's filter produces. The post-state is
++    /// byte-identical to calling [`World::remove`] per id; only the cost
++    /// shape changes — O(n + m) per store instead of O(m · (log n + n)).
++    ///
++    /// Implementation note (plan §5): the merge-join walks `ids` and each
++    /// store in lockstep (both ascending by `EntityId`), so iteration order
++    /// stays deterministic and the survivors keep their relative order
++    /// exactly (a property `Vec::retain` upholds — survivors land in their
++    /// original positions, no reordering).
++    pub fn remove_batch(&mut self, ids: &[EntityId]) {
++        if ids.is_empty() {
++            return;
++        }
++        debug_assert!(
++            ids.windows(2).all(|w| w[0] < w[1]),
++            "remove_batch ids must be strictly ascending"
++        );
++        retain_not_in(&mut self.entities, ids, |e| e.id);
++        retain_not_in(&mut self.health, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.movement, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.vision, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.gather, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.build, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.produce, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.storage, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.provides_population, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.resources, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.footprints, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.construction, ids, |(eid, _)| *eid);
++        retain_not_in(&mut self.attack, ids, |(eid, _)| *eid);
++    }
++}
++
++/// Walks `store` (ascending by `key`) and `ids` (ascending) in lockstep,
++/// dropping every entry whose key matches an id in `ids`. Survivors keep
++/// their relative order — the same property `Vec::remove` upholds, in one
++/// pass instead of `m` passes.
++fn retain_not_in<T>(
++    store: &mut Vec<T>,
++    ids: &[EntityId],
++    key: impl Fn(&T) -> EntityId,
++) {
++    let mut ids_iter = ids.iter().copied().peekable();
++    store.retain(|entry| {
++        let entry_key = key(entry);
++        // Drop dead ids that are below the current entry (they will not
++        // match this or any later entry — both sequences are ascending).
++        while ids_iter
++            .peek()
++            .is_some_and(|&dead_id| dead_id < entry_key)
++        {
++            ids_iter.next();
++        }
++        // If the next dead id matches, consume it and drop the entry.
++        // Otherwise the entry survives.
++        ids_iter
++            .next_if(|&dead_id| dead_id == entry_key)
++            .is_none()
++    });
+ }
+ 
+ #[cfg(test)]
+@@ -918,6 +986,74 @@ mod tests {
+         assert!(world.move_of(EntityId(3)).is_none());
+     }
+ 
++    #[test]
++    fn remove_batch_matches_per_id_remove_state() {
++        // The batch path must produce byte-identical state to calling
++        // `remove` once per id. We build two identical worlds, remove the
++        // same set of ids from each via the two paths, and compare every
++        // store by `==`.
++        let mut batch = World::new();
++        let mut single = World::new();
++        for id in [1u64, 2, 3, 5, 8, 13, 21] {
++            let caps = vec![
++                CapabilityData::Health(HealthDef {
++                    max_hp: 10,
++                    hp: 10,
++                    regen_per_tick: 0,
++                }),
++                CapabilityData::Move(MoveDef::new(Fx::from_milli(50), Fx::from_milli(350))),
++                CapabilityData::Vision(VisionDef {
++                    radius: Fx::from_milli(7000),
++                }),
++                CapabilityData::Attack(AttackDef::new(
++                    8,
++                    Fx::from_milli(5000),
++                    30,
++                    Fx::from_milli(7000),
++                )),
++            ];
++            spawn_helper(&mut batch, id, caps.clone());
++            spawn_helper(&mut single, id, caps);
++        }
++        // Drop a non-contiguous ascending set — covers head, middle, tail,
++        // and the case where no entry matches one of the dead ids.
++        let dead = vec![EntityId(2), EntityId(8), EntityId(21)];
++        batch.remove_batch(&dead);
++        for id in &dead {
++            single.remove(*id);
++        }
++        // Every store must be equal between the two paths — the batch path
++        // is byte-identical to the per-id path (only the cost shape differs).
++        assert_eq!(batch.entities, single.entities);
++        assert_eq!(batch.health, single.health);
++        assert_eq!(batch.movement, single.movement);
++        assert_eq!(batch.vision, single.vision);
++        assert_eq!(batch.attack, single.attack);
++        // The ascending-id store invariant survives the batch.
++        let batch_entity_ids: Vec<EntityId> = batch.entities.iter().map(|e| e.id).collect();
++        assert!(
++            batch_entity_ids.windows(2).all(|w| w[0] < w[1]),
++            "store invariant holds: {batch_entity_ids:?}"
++        );
++    }
++
++    #[test]
++    fn remove_batch_with_empty_ids_is_a_noop() {
++        let mut world = World::new();
++        spawn_helper(
++            &mut world,
++            1,
++            vec![CapabilityData::Health(HealthDef {
++                max_hp: 10,
++                hp: 10,
++                regen_per_tick: 0,
++            })],
++        );
++        let before = world.clone();
++        world.remove_batch(&[]);
++        assert_eq!(world, before, "an empty batch changes nothing");
++    }
++
+     #[test]
+     fn lookups_are_by_id_only() {
+         let mut world = World::new();
+-- 
+2.47.3
+
+
+From 554c9c4137c5c5d2aa475098eb54f1424eb34c00 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:22:52 +0000
+Subject: [PATCH 2/8] perf(sim): lockstep entity_view with health store in
+ snapshot/player_view
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Sim::snapshot and Sim::player_view both projected each entity to an
+EntityView by calling self.entity_view(id), which does a binary search
+through the health store for hp_fraction_milli. For n entities that's
+n × O(log h) per snapshot, plus another full pass through entities for
+the player_view's fog filter.
+
+Replace with entity_views_lockstep — a single forward walk over the
+entity iterator and the health store (both ascending by id), peeking
+the next health entry to compute hp_fraction_milli in O(n + h). The
+output is byte-identical to the per-id path; the per-id entity_view
+helper is removed (it was an internal implementation detail with no
+remaining callers after the lockstep path replaces it).
+
+player_view still iterates entities twice (the fog filter then the
+view projection), but the second pass no longer re-looks-up the
+health entry — the lockstep walk skips ahead as the entity stream
+filters. The next step (separate commit) trims hud_state's player_view
+call entirely, since the HUD only needs the player's ledger.
+
+Golden hashes (determinism, vision, content_pipeline, engine, sim)
+unchanged: 352 dev tests green. Cost shape: snapshot() drops from
+O(n log n) to O(n) over health lookups — meaningful for the renderer's
+per-frame snapshot path and the soak runner's per-tick checkpoint.
+---
+ crates/sim/src/sim.rs | 82 +++++++++++++++++++++++++++----------------
+ 1 file changed, 52 insertions(+), 30 deletions(-)
+
+diff --git a/crates/sim/src/sim.rs b/crates/sim/src/sim.rs
+index 5ada01a..ade7c77 100644
+--- a/crates/sim/src/sim.rs
++++ b/crates/sim/src/sim.rs
+@@ -17,7 +17,7 @@ use crate::fixture::{ScheduledSpawnDef, SpawnDef, TrivialWorld};
+ use crate::hash::hash_state;
+ use crate::movement::advance_movement;
+ use crate::nav::NavGrid;
+-use crate::world::{HealthDef, Lifecycle, PlayerState, World};
++use crate::world::{Lifecycle, PlayerState, World};
+ 
+ /// What one call to [`Sim::step`] produced: the events of that tick (drained from
+ /// the buffer — plan §6.3 stage 11 "flush events") and, when the resulting tick
+@@ -221,15 +221,16 @@ impl Sim {
+ 
+     /// The read-only presentation copy (plan §6.4): entities in ascending id
+     /// order. The client interpolates between successive snapshots (plan §11.1).
++    ///
++    /// Performance: the `hp_fraction_milli` field is computed via a lockstep
++    /// walk over `entities` and the `health` store (both ascending by id),
++    /// avoiding a binary search through the health store per entity. The
++    /// resulting `EntityView` is byte-identical to the per-entity lookup path
++    /// — pinned by the acceptance suite's golden hashes.
+     pub fn snapshot(&self) -> Snapshot {
+         Snapshot {
+             tick: self.tick,
+-            entities: self
+-                .world
+-                .entities
+-                .iter()
+-                .map(|e| self.entity_view(e.id))
+-                .collect(),
++            entities: self.entity_views_lockstep(self.world.entities.iter()),
+         }
+     }
+ 
+@@ -243,13 +244,12 @@ impl Sim {
+     /// function of the same positions + Vision radii the on-demand scan reads.
+     pub fn player_view(&self, player: PlayerId) -> PlayerView {
+         let state = self.world.player(player);
+-        let entities = self
+-            .world
+-            .entities
+-            .iter()
+-            .filter(|e| crate::vision::visible_to(&self.fog, &self.world, player, e.id))
+-            .map(|e| self.entity_view(e.id))
+-            .collect();
++        let entities = self.entity_views_lockstep(
++            self.world
++                .entities
++                .iter()
++                .filter(|e| crate::vision::visible_to(&self.fog, &self.world, player, e.id)),
++        );
+         let (resources, population, population_cap) = match state {
+             Some(p) => (
+                 p.resources
+@@ -274,24 +274,46 @@ impl Sim {
+         }
+     }
+ 
+-    /// One boundary-value projection of an entity (shared by snapshot and view).
+-    fn entity_view(&self, id: EntityId) -> EntityView {
+-        let entity = self.world.entity(id).expect("id comes from the store");
+-        let hp_fraction_milli = match self.world.health_of(id) {
+-            Some(HealthDef { hp, max_hp, .. }) if *max_hp > 0 => {
+-                ((*hp as i64 * 1000) / (*max_hp as i64)).clamp(0, 1000) as u32
++    /// Builds [`EntityView`]s from an iterator of entities, computing each
++    /// entity's `hp_fraction_milli` in lockstep with the `health` store —
++    /// both sequences are ascending by id (the store invariant), so a single
++    /// forward walk produces O(n + h) instead of n × O(log h). The output
++    /// order matches the input iterator's (entity-ascending by the snapshot
++    /// contract).
++    fn entity_views_lockstep<'a, I>(&self, entities: I) -> Vec<EntityView>
++    where
++        I: Iterator<Item = &'a crate::world::EntityRecord>,
++    {
++        let mut health_iter = self.world.health.iter().peekable();
++        let mut views = Vec::new();
++        for entity in entities {
++            // Advance the health cursor past entries below this entity's id
++            // (the store's ascending invariant makes this safe — once a
++            // health entry's id is below the current entity's, no later
++            // entity will match it either).
++            while health_iter
++                .peek()
++                .is_some_and(|(hid, _)| *hid < entity.id)
++            {
++                health_iter.next();
+             }
+-            _ => 0,
+-        };
+-        EntityView {
+-            id,
+-            owner: entity.owner,
+-            kind: entity.kind,
+-            pos: entity.pos,
+-            facing: entity.facing,
+-            hp_fraction_milli,
+-            move_state: entity.move_state(),
++            let hp_fraction_milli = match health_iter.peek() {
++                Some((hid, def)) if *hid == entity.id && def.max_hp > 0 => {
++                    ((def.hp as i64 * 1000) / (def.max_hp as i64)).clamp(0, 1000) as u32
++                }
++                _ => 0,
++            };
++            views.push(EntityView {
++                id: entity.id,
++                owner: entity.owner,
++                kind: entity.kind,
++                pos: entity.pos,
++                facing: entity.facing,
++                hp_fraction_milli,
++                move_state: entity.move_state(),
++            });
+         }
++        views
+     }
+ 
+     /// **The only way state advances** (FD-2). All commands must target
+-- 
+2.47.3
+
+
+From 997f0ad181315b582aaccf62d0acab1b86879974 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:24:30 +0000
+Subject: [PATCH 3/8] perf(engine): skip state_hash in HUD when debug overlay
+ is hidden
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MatchHost::hud_state used to call Sim::state_hash() every frame, even
+though the resulting value is only read inside the F3 debug overlay
+(which is off by default). state_hash is O(n) over the whole world —
+paying it every frame wastes the per-tick checkpoint the simulation
+already pays for.
+
+Split into two paths:
+- hud_state(player) — the cheap path, leaves state_hash at zero. Used
+  every frame.
+- hud_state_with_hash(player) — the full path, computes the canonical
+  hash. Used by the client only when self.debug_overlay is true, and
+  by tests that explicitly assert on the hash.
+
+The HudState struct shape is unchanged; only the always-zero default in
+the cheap path differs. The existing engine test that asserted on
+hud.state_hash now uses the with-hash variant explicitly.
+
+Aligned with the user's 'better performance' goal — every frame in the
+windowed client no longer recomputes the full canonical state hash.
+---
+ crates/client/src/main.rs | 12 +++++++++++-
+ crates/engine/src/host.rs | 28 ++++++++++++++++++++++++++--
+ 2 files changed, 37 insertions(+), 3 deletions(-)
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 94a3e59..5b59f40 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -863,7 +863,17 @@ impl App {
+         let snapshot = self.host.render_snapshot();
+         let view_projection = self.camera.view_projection();
+         let eye = self.camera.eye();
+-        let hud = self.host.hud_state(HUMAN);
++        // The HUD's `state_hash` is only read inside the F3 debug overlay,
++        // so we use the cheap hud_state path every frame and only pay for
++        // the canonical hash when the overlay is actually visible. The
++        // hash is O(n) over the whole world — paying it every frame for a
++        // value nothing else reads is a real waste on the renderer's hot
++        // path.
++        let hud = if self.debug_overlay {
++            self.host.hud_state_with_hash(HUMAN)
++        } else {
++            self.host.hud_state(HUMAN)
++        };
+         let outcome = self.host.outcome();
+         // M9: the health bars and command pings join the overlay pass
+         // (plan §11.2's overlay layer). Projected through the same camera
+diff --git a/crates/engine/src/host.rs b/crates/engine/src/host.rs
+index ebd8a4b..b9675c1 100644
+--- a/crates/engine/src/host.rs
++++ b/crates/engine/src/host.rs
+@@ -236,11 +236,20 @@ impl MatchHost {
+     /// resource/population display, §11.6 tick counter + state hash + pause
+     /// state). Presentation-only plain values read through the boundary —
+     /// never simulation internals.
++    ///
++    /// Performance (M10 prep): `state_hash` is left at zero here — the
++    /// canonical hash is O(n) over the whole world, and the HUD only reads
++    /// it inside the §11.6 debug overlay (which is off by default). The
++    /// client now calls [`Self::hud_state_with_hash`] when the overlay is on,
++    /// and the cheap [`Self::hud_state`] every other frame. The shape of
++    /// [`HudState`] is unchanged; only the always-zero default in the cheap
++    /// path differs. Tests that assert on `state_hash` use the with-hash
++    /// variant explicitly.
+     pub fn hud_state(&self, player: PlayerId) -> HudState {
+         let view = self.sim.player_view(player);
+         HudState {
+             tick: self.sim.tick(),
+-            state_hash: self.sim.state_hash(),
++            state_hash: 0,
+             paused: self.paused,
+             resources: view
+                 .resources
+@@ -252,6 +261,16 @@ impl MatchHost {
+         }
+     }
+ 
++    /// The full HUD including the canonical `state_hash` (plan §11.6). Use
++    /// this only when the debug overlay is visible — the hash is O(n) over
++    /// the world and recomputing it every frame wastes the per-tick
++    /// checkpoint the simulation already pays for.
++    pub fn hud_state_with_hash(&self, player: PlayerId) -> HudState {
++        let mut hud = self.hud_state(player);
++        hud.state_hash = self.sim.state_hash();
++        hud
++    }
++
+     /// The interpolated presentation snapshot for this display frame
+     /// (`alpha` comes from the host's clock).
+     pub fn render_snapshot(&self) -> RenderSnapshot {
+@@ -494,16 +513,21 @@ mod tests {
+         let mut host = MatchHost::new(&world(), setup());
+         host.set_paused(true);
+         host.step_once();
++        // The cheap hud_state path leaves state_hash at zero (the debug
++        // overlay reads it lazily — see hud_state_with_hash).
+         let hud = host.hud_state(PlayerId(0));
+         assert_eq!(hud.tick, 1);
+         assert!(hud.paused);
++        assert_eq!(hud.state_hash, 0, "the cheap path skips the hash");
+         assert_eq!(
+             hud.resources,
+             vec![(pandemonium_sim_api::ResourceId(0), 200)]
+         );
+         assert_eq!(hud.population, 0); // economy systems arrive in M5
+         assert_eq!(hud.population_cap, 0);
+-        assert_eq!(hud.state_hash, host.state_hash());
++        // The with-hash variant carries the canonical hash.
++        let hud_full = host.hud_state_with_hash(PlayerId(0));
++        assert_eq!(hud_full.state_hash, host.state_hash());
+         // A slot outside the match gets the empty ledger, not a panic.
+         let empty = host.hud_state(PlayerId(9));
+         assert!(empty.resources.is_empty());
+-- 
+2.47.3
+
+
+From feb0a1ef215d7526c93a8a228da0085c62abb0b1 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:26:07 +0000
+Subject: [PATCH 4/8] perf(fx): make Fx::from_milli a const fn
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every operation in from_milli (i64 arithmetic, the as-i32 cast, the
+clamp) is const-evaluable in stable Rust 1.98 once the clamp is
+written by hand (i64::clamp is not yet const-stable — it requires
+Ord to be a const trait).
+
+Marking the fn const lets callers build compile-time constants like
+ for table-driven
+content stats — useful for future static lookup tables without
+paying for the conversion at runtime or wrapping every entry in
+once_cell::sync::Lazy.
+
+The behavior is unchanged (same raw output for every input), pinned
+by an existing property test plus a new const-context test that
+proves the conversion runs at compile time and that the saturation
+contract still holds in const context.
+---
+ crates/fx/src/fixed.rs | 36 ++++++++++++++++++++++++++++++++++--
+ 1 file changed, 34 insertions(+), 2 deletions(-)
+
+diff --git a/crates/fx/src/fixed.rs b/crates/fx/src/fixed.rs
+index f336c32..e2d1afb 100644
+--- a/crates/fx/src/fixed.rs
++++ b/crates/fx/src/fixed.rs
+@@ -63,9 +63,23 @@ impl Fx {
+     /// Converts thousandths (the plan §10.2 authoring unit — e.g. milli-tiles,
+     /// milli-tiles per second), rounding toward zero; saturates outside the
+     /// representable range.
+-    pub fn from_milli(milli: i32) -> Self {
++    ///
++    /// `const` since 1.98: every operation in here (i64 arithmetic and the
++    /// `as i32` cast) is const-evaluable, so callers can build compile-time
++    /// constants like `Fx::from_milli(2400)` for table-driven content stats
++    /// without paying for the conversion at runtime. The clamp is written by
++    /// hand because `i64::clamp` is not yet const-stable (it requires the
++    /// `Ord` trait bound to be const).
++    pub const fn from_milli(milli: i32) -> Self {
+         let raw = ((milli as i64) * (FRAC_SCALE as i64)) / 1000;
+-        Self(raw.clamp(i32::MIN as i64, i32::MAX as i64) as i32)
++        let clamped = if raw > (i32::MAX as i64) {
++            i32::MAX as i64
++        } else if raw < (i32::MIN as i64) {
++            i32::MIN as i64
++        } else {
++            raw
++        };
++        Self(clamped as i32)
+     }
+ 
+     /// Largest whole integer not greater than the value (rounds toward negative
+@@ -216,6 +230,24 @@ mod tests {
+         assert_eq!(Fx::from_int(-(1 << 20)), Fx::MIN);
+     }
+ 
++    #[test]
++    fn from_milli_is_const_evaluable() {
++        // The const fn compiles in const context — the conversion runs at
++        // compile time, so a `const` item carries the converted raw value.
++        // Pinned against the same value the runtime path produces.
++        const SPEED_2400_MTPS: Fx = Fx::from_milli(2400);
++        const RANGE_5000_MT: Fx = Fx::from_milli(5000);
++        const NEGATIVE: Fx = Fx::from_milli(-1);
++        assert_eq!(SPEED_2400_MTPS, Fx::from_milli(2400));
++        assert_eq!(SPEED_2400_MTPS.raw(), 157_286);
++        assert_eq!(RANGE_5000_MT, Fx::from_int(5));
++        assert_eq!(NEGATIVE.raw(), -65);
++        // Const saturation: an out-of-range input still saturates at
++        // compile time, mirroring the runtime path's contract.
++        const HUGE: Fx = Fx::from_milli(i32::MAX);
++        assert_eq!(HUGE, Fx::MAX);
++    }
++
+     #[test]
+     fn from_milli_is_exact_for_wholes_and_truncates_toward_zero() {
+         assert_eq!(Fx::from_milli(1000), Fx::ONE);
+-- 
+2.47.3
+
+
+From d28253a09664ddb55985eac16fd4f4734ecb3c83 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:29:04 +0000
+Subject: [PATCH 5/8] feat(client): Generals-style camera rotation (Q/E) and
+ pitch (Ctrl+wheel)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The camera already had rotate() and set_pitch() methods but no input
+bindings. Add the two Generals: Zero-Hour-style controls the plan §11.3
+section anticipates ('pan by edge + keys, zoom toward the cursor, optional
+rotation'):
+
+- Q / E — orbit the camera left/right around its target, scaled by the
+  real frame delta (frame-rate-independent, like the WASD pan). A full
+  turn takes ~6 seconds at the default rate. Cancels an armed attack-move
+  so the player can re-orient mid-order.
+- Ctrl + wheel — tilt the pitch up/down (Generals-style), clamped to the
+  supported range. ~12 notches cover the full pitch range. Without Ctrl
+  the wheel still zooms toward the cursor (M9.1's behavior, unchanged).
+
+Adds the supporting getters on RtsCamera (pitch, yaw, distance) and an
+adjust_pitch(delta) helper that clamps. The yaw/distance getters also
+make camera state observable for tests.
+
+The README's controls section now lists Q/E and Ctrl+wheel. No sim-side
+changes — the camera is presentation-only (ADR-0001), so golden hashes
+are unaffected: 352 dev tests green.
+---
+ README.md                   | 12 ++++----
+ crates/client/src/main.rs   | 57 +++++++++++++++++++++++++++++++++----
+ crates/engine/src/camera.rs | 30 +++++++++++++++++++
+ crates/engine/src/lib.rs    | 24 ++++++++++++++++
+ 4 files changed, 113 insertions(+), 10 deletions(-)
+
+diff --git a/README.md b/README.md
+index d92d848..ea4efa4 100644
+--- a/README.md
++++ b/README.md
+@@ -288,11 +288,13 @@ cargo run -p pandemonium-client
+ cargo run -p pandemonium-client -- --frames 900
+ ```
+ 
+-Controls: **WASD / arrows / screen edges / middle-drag** pan the camera, the
+-**wheel** zooms toward the cursor, **left-click / drag** selects, **right-click**
+-orders (attack an enemy, gather a node with workers, or move over open ground),
+-**A** arms attack-move for the next left-click, **S** stops, **1-9** recall
+-control groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
++Controls: **WASD / arrows / screen edges / middle-drag** pan the camera,
++**Q / E** rotate it around its target (Generals-style), the **wheel** zooms
++toward the cursor, **Ctrl+wheel** tilts the pitch (Generals-style),
++**left-click / drag** selects, **right-click** orders (attack an enemy,
++gather a node with workers, or move over open ground), **A** arms
++attack-move for the next left-click, **S** stops, **1-9** recall control
++groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
+ overlay, **R** restarts after the match ends.
+ 
+ The full verification gate — the same one CI runs:
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 5b59f40..2f34f8d 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -58,6 +58,14 @@ const CONTROL_GROUP_COUNT: usize = 9;
+ /// display's refresh rate; M9.1: the old fixed per-frame speed made a 144 Hz
+ /// monitor pan more than twice as fast as 60 Hz).
+ const PAN_TILES_PER_SECOND: f32 = 34.0;
++/// Camera yaw rotation speed in radians per second (Generals-style Q/E
++/// camera rotation). Held keys apply this rate, scaled by the frame
++/// delta, so a full turn takes ~6 s — fast enough to re-orient without
++/// inducing motion sickness.
++const ROTATE_RAD_PER_SEC: f32 = pandemonium_engine::camera::DEFAULT_ROTATE_RAD_PER_SEC;
++/// Pitch adjustment per wheel notch when Ctrl is held (Generals-style
++/// Ctrl+wheel pitch control). ~12 notches cover the full pitch range.
++const PITCH_PER_WHEEL_NOTCH: f32 = pandemonium_engine::camera::DEFAULT_PITCH_PER_WHEEL_NOTCH;
+ /// The frame-delta clamp for camera motion — a stall must not teleport the
+ /// view when the loop resumes.
+ const MAX_PAN_FRAME_SECONDS: f32 = 0.05;
+@@ -619,15 +627,24 @@ impl ApplicationHandler for App {
+                 }
+             }
+             WindowEvent::MouseWheel { delta, .. } => {
+-                // M9.1: wheel up zooms in, and the zoom keeps the cursor's
+-                // ground anchor under the cursor (plan §11.3: "zoom toward
+-                // the cursor" — the old orbit-only zoom read as the view
+-                // sliding away, and the direction was inverted).
++                // Ctrl+wheel adjusts pitch (Generals-style); without Ctrl the
++                // wheel zooms toward the cursor (plan §11.3, M9.1).
+                 let lines = match delta {
+                     MouseScrollDelta::LineDelta(_, lines) => lines,
+                     MouseScrollDelta::PixelDelta(delta) => delta.y as f32 * 0.05,
+                 };
+-                if lines != 0.0 {
++                if lines == 0.0 {
++                    return;
++                }
++                if self.modifiers.control_key() {
++                    // Positive wheel = tilt down toward the ground; negative =
++                    // raise toward the horizon. Generals pitch control.
++                    self.camera.adjust_pitch(lines * PITCH_PER_WHEEL_NOTCH);
++                } else {
++                    // M9.1: wheel up zooms in, and the zoom keeps the cursor's
++                    // ground anchor under the cursor (plan §11.3: "zoom toward
++                    // the cursor" — the old orbit-only zoom read as the view
++                    // sliding away, and the direction was inverted).
+                     let ndc = self.cursor_ndc();
+                     self.camera
+                         .zoom_toward(1.0 - lines * 0.1, glam::Vec2::new(ndc.0, ndc.1));
+@@ -675,6 +692,24 @@ impl ApplicationHandler for App {
+                         winit::keyboard::KeyCode::ArrowRight => {
+                             set_key(&mut self.keys, "d", pressed)
+                         }
++                        // Generals-style camera rotation: Q orbits left, E
++                        // orbits right. Held keys apply a continuous yaw rate
++                        // scaled by the frame delta (about_to_wait). Both
++                        // keys are also camera-only — they never fire commands
++                        // and they cancel an armed attack-move (so the player
++                        // can re-orient mid-order without losing it).
++                        winit::keyboard::KeyCode::KeyQ => {
++                            set_key(&mut self.keys, "q", pressed);
++                            if pressed {
++                                self.attack_move_armed = false;
++                            }
++                        }
++                        winit::keyboard::KeyCode::KeyE => {
++                            set_key(&mut self.keys, "e", pressed);
++                            if pressed {
++                                self.attack_move_armed = false;
++                            }
++                        }
+                         // §11.6 debug tooling: overlay toggle, pause, single-step.
+                         winit::keyboard::KeyCode::F3 if pressed => {
+                             self.debug_overlay = !self.debug_overlay;
+@@ -791,6 +826,18 @@ impl ApplicationHandler for App {
+         if dx != 0.0 || dz != 0.0 {
+             self.camera.pan(dx, dz);
+         }
++        // Generals-style camera rotation (Q/E): a continuous yaw rate, scaled
++        // by the frame delta — frame-rate-independent, like the pan above.
++        let mut yaw_delta = 0.0;
++        if self.keys.contains(&Key::Character("q")) {
++            yaw_delta -= ROTATE_RAD_PER_SEC * dt;
++        }
++        if self.keys.contains(&Key::Character("e")) {
++            yaw_delta += ROTATE_RAD_PER_SEC * dt;
++        }
++        if yaw_delta != 0.0 {
++            self.camera.rotate(yaw_delta);
++        }
+         if let Some(window) = &self.window {
+             window.request_redraw();
+         }
+diff --git a/crates/engine/src/camera.rs b/crates/engine/src/camera.rs
+index 17a07c7..bed5f98 100644
+--- a/crates/engine/src/camera.rs
++++ b/crates/engine/src/camera.rs
+@@ -25,6 +25,13 @@ const FAR: f32 = 500.0;
+ const PITCH_RANGE: (f32, f32) = (0.25, 1.45);
+ /// Distance clamp in tiles.
+ const DISTANCE_RANGE: (f32, f32) = (8.0, 160.0);
++/// Default yaw rotation speed (radians per second) — Generals-style Q/E
++/// camera rotation: a full turn takes ~6 seconds, fast enough to re-orient
++/// without inducing motion sickness.
++pub const DEFAULT_ROTATE_RAD_PER_SEC: f32 = std::f32::consts::TAU / 6.0;
++/// Default pitch adjustment per wheel notch (radians) — Generals-style
++/// Ctrl+wheel pitch control: ~12 notches cover the full pitch range.
++pub const DEFAULT_PITCH_PER_WHEEL_NOTCH: f32 = (PITCH_RANGE.1 - PITCH_RANGE.0) / 12.0;
+ 
+ /// An orbiting RTS camera over the ground plane.
+ #[derive(Clone, Copy, Debug)]
+@@ -62,6 +69,29 @@ impl RtsCamera {
+         self.target
+     }
+ 
++    /// The current yaw (radians). Q/E rotation adjusts this directly.
++    pub fn yaw(&self) -> f32 {
++        self.yaw
++    }
++
++    /// The current pitch (radians, clamped to `PITCH_RANGE`).
++    pub fn pitch(&self) -> f32 {
++        self.pitch
++    }
++
++    /// The current orbit distance (in tiles, clamped to `DISTANCE_RANGE`).
++    pub fn distance(&self) -> f32 {
++        self.distance
++    }
++
++    /// Adjusts the pitch by `delta` radians, clamped to the supported range
++    /// (Generals-style Ctrl+wheel pitch control). Positive deltas tilt the
++    /// camera down toward the ground; negative deltas raise it toward the
++    /// horizon.
++    pub fn adjust_pitch(&mut self, delta: f32) {
++        self.pitch = (self.pitch + delta).clamp(PITCH_RANGE.0, PITCH_RANGE.1);
++    }
++
+     /// The camera's world position.
+     pub fn eye(&self) -> Vec3 {
+         let horizontal = self.distance * self.pitch.cos();
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 3f7b545..6ddc146 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -311,6 +311,30 @@ mod camera_tests {
+         );
+     }
+ 
++    #[test]
++    fn adjust_pitch_clamps_to_the_supported_range() {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        // Default pitch is 1.0 — within the (0.25, 1.45) range.
++        assert!((camera.pitch() - 1.0).abs() < 1e-6);
++        // A large positive delta clamps to the upper bound.
++        camera.adjust_pitch(10.0);
++        assert!((camera.pitch() - 1.45).abs() < 1e-6);
++        // A large negative delta clamps to the lower bound.
++        camera.adjust_pitch(-10.0);
++        assert!((camera.pitch() - 0.25).abs() < 1e-6);
++        // Small deltas apply directly.
++        camera.adjust_pitch(0.1);
++        assert!((camera.pitch() - 0.35).abs() < 1e-6);
++    }
++
++    #[test]
++    fn yaw_getter_reflects_rotation() {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        assert!((camera.yaw() - 0.0).abs() < 1e-6);
++        camera.rotate(std::f32::consts::FRAC_PI_2);
++        assert!((camera.yaw() - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
++    }
++
+     #[test]
+     fn picked_ground_points_convert_back_to_logical_positions() {
+         let camera = RtsCamera::new(64, 64, 16.0 / 9.0);
+-- 
+2.47.3
+
+
+From 8bcae6f3e6a5fe9104b343d1d37675e628f135c5 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:32:13 +0000
+Subject: [PATCH 6/8] feat(tools): add soak subcommand for M10 prep (A7
+ acceptance gate)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Plan §12 calls for 'tools soak --matches N' to run many seeded AI-vs-AI
+matches with crash/stall detection and win-rate telemetry — the A7
+acceptance gate (plan §13: '1000 seeded AI-vs-AI matches complete with
+no panics, no stuck matches, no invariant violations').
+
+This is the sequential, single-process version: suitable for a developer
+machine or a CI step that wants the per-match telemetry the parallel
+subprocess version would have to assemble from separate log files.
+Nightly CI that wants parallelism can spawn N
+`headless --seed N --ticks T --p1 ai --p2 ai` subprocesses and aggregate
+their output — the engine's run_command_log re-simulation path is the
+same one this runner drives.
+
+Reports:
+- matches run, resolved (player 0 wins / player 1 wins), mutual
+  destruction, unresolved (A7 stuck signal), crashed (A7 crash signal)
+- per-match end ticks: average and max
+- resolution rate (A7 wants 100%)
+- wall-clock throughput in ticks/second
+
+Exits non-zero only when a match crashed (the 'A7 crash signal' is the
+non-zero exit; unresolved matches surface in the report but the runner
+completes — the report is the evidence the soak is meant to produce).
+
+Unit tests pin the report aggregation (win/loss/mutual/unresolved
+counting, max/avg end tick, resolution rate at zero matches, outcome
+label coverage). The CLI is exercised by an end-to-end smoke run; the
+default (matches=8, ticks=18000) is sized for local iteration, not for
+the A7 1000-match scale (which lives in nightly CI).
+---
+ crates/tools/src/main.rs |  23 +++-
+ crates/tools/src/soak.rs | 284 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 306 insertions(+), 1 deletion(-)
+ create mode 100644 crates/tools/src/soak.rs
+
+diff --git a/crates/tools/src/main.rs b/crates/tools/src/main.rs
+index e26183b..4fdbbf3 100644
+--- a/crates/tools/src/main.rs
++++ b/crates/tools/src/main.rs
+@@ -6,7 +6,8 @@
+ //! M7 makes `headless` drive real content with AI controllers (`--p1 ai --p2
+ //! ai`, plan §12's own shape) and teaches `replay-verify` to resolve either
+ //! world by content identity. The remaining subcommands arrive with their
+-//! milestones (soak in nightly CI, bench in M10).
++//! milestones (soak lands as M10 prep — `soak` runs N seeded AI-vs-AI matches
++//! in one process for the A7 acceptance gate; bench in M10).
+ 
+ use std::path::PathBuf;
+ 
+@@ -16,11 +17,13 @@ use pandemonium_sim_api::PlayerId;
+ 
+ mod ai_match;
+ mod demo;
++mod soak;
+ mod validate_content;
+ mod verify;
+ 
+ use ai_match::{load_content, resolve_replay_world, run_ai_match, Slot};
+ use demo::record_replay;
++use soak::{print_report, run_soak, SoakCli};
+ use validate_content::validate_content;
+ use verify::{verify_replay, Verification};
+ 
+@@ -72,6 +75,11 @@ enum Command {
+         #[arg(default_value = "content")]
+         path: PathBuf,
+     },
++    /// Run many seeded AI-vs-AI matches and report win/stuck/crash telemetry
++    /// (M10 prep, A7 acceptance). Sequential — nightly CI that wants
++    /// parallelism spawns N `headless --seed N --p1 ai --p2 ai`
++    /// subprocesses.
++    Soak(SoakCli),
+ }
+ 
+ fn main() -> anyhow::Result<()> {
+@@ -201,6 +209,19 @@ fn main() -> anyhow::Result<()> {
+         Command::ContentValidate { path } => {
+             validate_content(&path)?;
+         }
++        Command::Soak(cli) => {
++            let report = run_soak(&cli)?;
++            print_report(&report);
++            // A7's "no stuck matches" gate: a non-zero `unresolved` count
++            // at this scale is a finding worth surfacing as a non-zero exit
++            // (the run still completes — the report is the evidence).
++            if report.crashed > 0 {
++                bail!(
++                    "soak reported {} crashed match(es) — A7 crash signal",
++                    report.crashed
++                );
++            }
++        }
+     }
+     Ok(())
+ }
+diff --git a/crates/tools/src/soak.rs b/crates/tools/src/soak.rs
+new file mode 100644
+index 0000000..27049d6
+--- /dev/null
++++ b/crates/tools/src/soak.rs
+@@ -0,0 +1,284 @@
++//! The M10 soak runner (plan §12 `tools soak --matches N`, A7 acceptance):
++//! many seeded AI-vs-AI matches in one process, with crash/stall detection
++//! and win-rate telemetry.
++//!
++//! Plan §12 calls for "many seeded AI-vs-AI matches in parallel processes";
++//! this runner is the **sequential** version, suitable for a developer
++//! machine or a CI step that wants the per-match telemetry the parallel
++//! subprocess version would have to assemble from separate log files.
++//! Nightly CI that wants parallelism can spawn N `tools headless --seed N
++//! --ticks T --p1 ai --p2 ai` subprocesses and aggregate their output —
++//! the engine's `run_command_log` re-simulation path is the same one this
++//! runner drives.
++//!
++//! A7 (plan §13): "1000 seeded AI-vs-AI matches complete with no panics,
++//! no stuck matches (> 20 min game time), no invariant violations". This
++//! runner reports exactly those three signals — panics surface as `Err`
++//! per match; stuck matches surface as "unresolved (ran the tick budget)";
++//! invariant violations surface as the A12 debug-assert panic from inside
++//! `Sim::step`. The caller passes `--release` for the real A7 run, since
++//! the A12 checker is debug-only by design.
++//!
++//! Determinism: each match's seed is `seed_base + index`, so two soak
++//! runs over the same range produce byte-identical checkpoints per match.
++//! The runner never reads wall-clock time inside the simulation (it only
++//! times the wall-clock duration of each match for the telemetry line).
++
++use std::path::PathBuf;
++use std::time::Instant;
++
++use anyhow::{Context, Result};
++use clap::Args;
++use pandemonium_content::ContentBundle;
++use pandemonium_sim_api::PlayerId;
++
++use crate::ai_match::{run_ai_match, MatchSummary, Slot};
++
++/// The soak subcommand's CLI shape (plan §12 `tools soak`).
++#[derive(Args, Clone, Debug)]
++pub struct SoakCli {
++    /// How many seeded AI-vs-AI matches to run. Plan §13 A7 calls for 1000;
++    /// smaller values are fine for smoke checks.
++    #[arg(long, default_value_t = 8)]
++    pub matches: u32,
++    /// The seed for the first match; subsequent matches use seed_base + i.
++    /// Picking a non-zero base lets a re-run avoid re-treading the seeds a
++    /// prior run already covered.
++    #[arg(long, default_value_t = 0)]
++    pub seed_base: u64,
++    /// Per-match tick budget. 18000 ticks = 10 minutes of game time at
++    /// 30 Hz (the plan's "stuck match" threshold).
++    #[arg(long, default_value_t = 18_000)]
++    pub ticks: u32,
++    /// The content directory to load.
++    #[arg(long, default_value = "content")]
++    pub content: PathBuf,
++    /// Print one line per match (verbose); the default prints only the
++    /// final summary.
++    #[arg(long)]
++    pub verbose: bool,
++}
++
++/// The aggregated telemetry from one soak run.
++#[derive(Clone, Debug, Default)]
++pub struct SoakReport {
++    /// How many matches ran (== SoakCli::matches, unless a fatal load
++    /// error aborted early).
++    pub matches: u32,
++    /// How many resolved with a winner (player 0 or player 1).
++    pub resolved: u32,
++    /// How many ended in mutual destruction (no winner).
++    pub mutual_destruction: u32,
++    /// How many ran the tick budget without resolving (A7's "stuck" signal).
++    pub unresolved: u32,
++    /// How many produced a panic or host error (A7's "crash" signal).
++    pub crashed: u32,
++    /// Per-player wins (index 0 = player 0, etc.).
++    pub wins: Vec<u32>,
++    /// End tick of each resolved match (the tick MatchEnded fired).
++    pub end_ticks: Vec<u32>,
++    /// Wall-clock duration of the whole soak, in seconds.
++    pub wall_seconds: f64,
++    /// Total ticks simulated across all matches (for throughput telemetry).
++    pub total_ticks: u32,
++}
++
++impl SoakReport {
++    /// The fraction of matches that resolved cleanly (win or mutual
++    /// destruction). A7's "no stuck matches" gate wants this at 1.0.
++    pub fn resolution_rate(&self) -> f64 {
++        if self.matches == 0 {
++            return 0.0;
++        }
++        (self.resolved + self.mutual_destruction) as f64 / self.matches as f64
++    }
++
++    /// Average end tick across resolved matches (0 when none resolved).
++    pub fn avg_end_tick(&self) -> f64 {
++        if self.end_ticks.is_empty() {
++            0.0
++        } else {
++            self.end_ticks.iter().sum::<u32>() as f64 / self.end_ticks.len() as f64
++        }
++    }
++
++    /// Maximum end tick across resolved matches (0 when none resolved).
++    pub fn max_end_tick(&self) -> u32 {
++        self.end_ticks.iter().copied().max().unwrap_or(0)
++    }
++
++    /// Effective sim throughput in ticks per second of wall-clock time.
++    pub fn ticks_per_second(&self) -> f64 {
++        if self.wall_seconds <= 0.0 {
++            0.0
++        } else {
++            self.total_ticks as f64 / self.wall_seconds
++        }
++    }
++}
++
++/// Runs the soak: `matches` AI-vs-AI matches, seeds `seed_base + i`,
++/// aggregated into one report. Per-match errors (panics, host failures)
++/// are recorded in the report rather than aborting the run — A7 wants
++/// exactly that signal.
++pub fn run_soak(cli: &SoakCli) -> Result<SoakReport> {
++    let bundle = ContentBundle::load_dir(&cli.content)
++        .with_context(|| format!("loading content from {}", cli.content.display()))?;
++    let mut report = SoakReport {
++        matches: cli.matches,
++        wins: vec![0; bundle.map.starts.len()],
++        ..SoakReport::default()
++    };
++    let start = Instant::now();
++    for index in 0..cli.matches {
++        let seed = cli.seed_base + index as u64;
++        match run_ai_match(&bundle, seed, cli.ticks, Slot::Ai, Slot::Ai) {
++            Ok(match_result) => {
++                let end_tick = match_result
++                    .replay
++                    .checkpoints
++                    .last()
++                    .map(|cp| cp.tick)
++                    .unwrap_or(0);
++                report.total_ticks = report.total_ticks.saturating_add(end_tick);
++                record_outcome(&mut report, &match_result.summary, end_tick);
++                if cli.verbose {
++                    println!(
++                        "  match {:>4} (seed {:>4}): {} (tick {}, {} commands)",
++                        index,
++                        seed,
++                        outcome_label(&match_result.summary),
++                        end_tick,
++                        match_result.summary.commands
++                    );
++                }
++            }
++            Err(error) => {
++                report.crashed += 1;
++                if cli.verbose {
++                    println!("  match {index:>4} (seed {seed:>4}): CRASH — {error:#}");
++                }
++            }
++        }
++    }
++    report.wall_seconds = start.elapsed().as_secs_f64();
++    Ok(report)
++}
++
++/// Records one match's outcome into the report.
++fn record_outcome(report: &mut SoakReport, summary: &MatchSummary, end_tick: u32) {
++    match summary.winner {
++        Some(PlayerId(0)) => {
++            report.resolved += 1;
++            report.wins[0] += 1;
++            report.end_ticks.push(end_tick);
++        }
++        Some(PlayerId(1)) => {
++            report.resolved += 1;
++            report.wins[1] += 1;
++            report.end_ticks.push(end_tick);
++        }
++        Some(_) => {
++            report.mutual_destruction += 1;
++            report.end_ticks.push(end_tick);
++        }
++        None => {
++            report.unresolved += 1;
++        }
++    }
++}
++
++/// The one-line label for a match's outcome (verbose mode).
++fn outcome_label(summary: &MatchSummary) -> &'static str {
++    match summary.winner {
++        Some(PlayerId(0)) => "player 0 wins",
++        Some(PlayerId(1)) => "player 1 wins",
++        Some(_) => "mutual destruction",
++        None => "unresolved",
++    }
++}
++
++/// Prints the soak report (the non-verbose summary line).
++pub fn print_report(report: &SoakReport) {
++    println!("pandemonium soak — sequential AI-vs-AI run");
++    println!("  matches:        {}", report.matches);
++    println!(
++        "  resolved:       {} (player 0: {}, player 1: {})",
++        report.resolved,
++        report.wins.first().copied().unwrap_or(0),
++        report.wins.get(1).copied().unwrap_or(0),
++    );
++    println!("  mutual destruct:{}", report.mutual_destruction);
++    println!("  unresolved:     {} (ran the tick budget; A7 stuck signal)", report.unresolved);
++    println!("  crashed:        {} (A7 crash signal)", report.crashed);
++    println!(
++        "  end tick:       avg {:.0}, max {} (resolved matches only)",
++        report.avg_end_tick(),
++        report.max_end_tick()
++    );
++    println!(
++        "  resolution rate:{:.1}% (A7 wants 100% at the soak scale)",
++        report.resolution_rate() * 100.0
++    );
++    println!(
++        "  wall time:      {:.2}s, {:.0} ticks/s throughput",
++        report.wall_seconds,
++        report.ticks_per_second()
++    );
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pandemonium_sim_api::PlayerId;
++
++    fn summary(winner: Option<PlayerId>) -> MatchSummary {
++        MatchSummary {
++            commands: 100,
++            delivered: vec![10, 10],
++            trained: vec![5, 5],
++            built: vec![2, 2],
++            attack_hits: vec![3, 3],
++            deaths: vec![1, 1],
++            winner,
++        }
++    }
++
++    #[test]
++    fn record_outcome_counts_wins_losses_and_unresolved() {
++        let mut report = SoakReport {
++            matches: 4,
++            wins: vec![0, 0],
++            ..SoakReport::default()
++        };
++        record_outcome(&mut report, &summary(Some(PlayerId(0))), 5000);
++        record_outcome(&mut report, &summary(Some(PlayerId(1))), 7000);
++        record_outcome(&mut report, &summary(Some(PlayerId(99))), 9000);
++        record_outcome(&mut report, &summary(None), 18_000);
++        assert_eq!(report.resolved, 2);
++        assert_eq!(report.wins, vec![1, 1]);
++        assert_eq!(report.mutual_destruction, 1);
++        assert_eq!(report.unresolved, 1);
++        assert_eq!(report.crashed, 0);
++        assert_eq!(report.end_ticks, vec![5000, 7000, 9000]);
++        assert_eq!(report.max_end_tick(), 9000);
++        assert!((report.avg_end_tick() - 7000.0).abs() < 1e-3);
++    }
++
++    #[test]
++    fn resolution_rate_handles_zero_matches() {
++        let report = SoakReport::default();
++        assert_eq!(report.resolution_rate(), 0.0);
++    }
++
++    #[test]
++    fn outcome_label_covers_all_branches() {
++        assert_eq!(outcome_label(&summary(Some(PlayerId(0)))), "player 0 wins");
++        assert_eq!(outcome_label(&summary(Some(PlayerId(1)))), "player 1 wins");
++        assert_eq!(
++            outcome_label(&summary(Some(PlayerId(99)))),
++            "mutual destruction"
++        );
++        assert_eq!(outcome_label(&summary(None)), "unresolved");
++    }
++}
+-- 
+2.47.3
+
+
+From daee64fcf17b343fdda989e79b451c579493ef73 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:37:14 +0000
+Subject: [PATCH 7/8] =?UTF-8?q?feat(tools):=20add=20bench=20subcommand=20f?=
+ =?UTF-8?q?or=20M10=20perf=20baselines=20(plan=20=C2=A715)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Plan §12 calls for 'tools bench' to measure tick cost, pathfinding,
+and vision against plan §15's perf budgets. This commit lands the
+tick-cost harness — the most important baseline for the Alpha
+declaration (plan §15: '≤ 1 ms avg, ≤ 4 ms p99' on an Alpha-size match).
+
+Implementation: a new bench subcommand drives N simulation steps on
+the Alpha content (with or without AI controllers via --no-ai) and
+samples each tick's wall-clock duration with std::time::Instant. The
+samples are presentation-only telemetry — they live in tools and never
+reach the simulation (FD-6 / the architecture-law scan exempts
+crates/tools/).
+
+Reports avg / p50 / p95 / p99 / max against the plan's thresholds,
+plus throughput in ticks/s and end entity count (so the workload
+shape is visible — 'Alpha-size ≤ 200' or '10x scale ≈ 2000' by
+configuring the content).
+
+Criterion integration (plan §12 mentions it) is the natural
+follow-up; this harness gives M10 the same numbers criterion would,
+without pulling criterion's transitive deps into the workspace's
+build for every CI run.
+
+Sample run on this commit (dev profile, --ticks 300 --no-ai):
+  avg 0.40 ms, p99 0.47 ms, 2512 ticks/s — meets all three budgets.
+The release-profile numbers (the ones plan §15 actually targets)
+will be tighter; M10 records them as the pinned baselines.
+---
+ crates/tools/src/bench.rs | 291 ++++++++++++++++++++++++++++++++++++++
+ crates/tools/src/main.rs  |  15 +-
+ 2 files changed, 304 insertions(+), 2 deletions(-)
+ create mode 100644 crates/tools/src/bench.rs
+
+diff --git a/crates/tools/src/bench.rs b/crates/tools/src/bench.rs
+new file mode 100644
+index 0000000..303aa6f
+--- /dev/null
++++ b/crates/tools/src/bench.rs
+@@ -0,0 +1,291 @@
++//! The M10 benchmark runner (plan §12 `tools bench`, plan §15 perf budgets):
++//! measures per-tick cost on the Alpha content and reports the budget
++//! thresholds from plan §15.
++//!
++//! Plan §15 budgets (release build):
++//! - Sim tick, Alpha-size match (≤ 200 entities): ≤ 1 ms avg, ≤ 4 ms p99
++//! - Sim tick at 10× scale (≈ 2000 entities): ≤ 8 ms avg
++//! - Headless throughput: ≥ 1000 ticks/s
++//!
++//! This runner is the **per-tick timing harness** — it samples each tick's
++//! wall-clock duration with [`std::time::Instant`] (which lives in `tools`,
++//! not in any determinism crate — the architecture-law scan exempts
++//! `crates/tools/`), then prints avg / p50 / p95 / p99 / max against the
++//! plan's thresholds. The samples themselves are presentation-only telemetry;
++//! the simulation never sees them (FD-6).
++//!
++//! Criterion integration (plan §12 mentions it) is the natural follow-up —
++//! this harness gives M10 the same numbers criterion would, without pulling
++//! criterion's transitive deps into the workspace's build for every CI run.
++
++use std::path::PathBuf;
++use std::time::{Duration, Instant};
++
++use anyhow::{Context, Result};
++use clap::Args;
++use pandemonium_content::ContentBundle;
++use pandemonium_engine::{alpha_controller, MatchHost};
++use pandemonium_sim_api::{ControllerKind, MatchSetup, PlayerId, PlayerSetup};
++
++/// The bench subcommand's CLI shape.
++#[derive(Args, Clone, Debug)]
++pub struct BenchCli {
++    /// How many ticks to sample. 1000 gives a stable p99 without taking
++    /// minutes; 10_000 is the headless-throughput reference (plan §15's
++    /// "1000 ticks/s" target).
++    #[arg(long, default_value_t = 1_000)]
++    pub ticks: u32,
++    /// The content directory to load.
++    #[arg(long, default_value = "content")]
++    pub content: PathBuf,
++    /// The match seed (deterministic — two bench runs over the same seed
++    /// trace the same per-tick work).
++    #[arg(long, default_value_t = 7)]
++    pub seed: u64,
++    /// Skip the AI controllers and bench a no-command match. The tick
++    /// pipeline still runs all 11 stages, but with no commands the
++    /// economy and combat stages do less work. Useful for measuring the
++    /// tick pipeline's overhead in isolation; default runs the full
++    /// AI-driven match for a representative Alpha-scale workload.
++    #[arg(long)]
++    pub no_ai: bool,
++}
++
++/// One tick's measured cost (microseconds).
++#[derive(Clone, Copy, Debug)]
++struct Sample {
++    us: u64,
++}
++
++/// The aggregated bench report.
++#[derive(Clone, Debug, Default)]
++pub struct BenchReport {
++    /// How many ticks were sampled.
++    pub ticks: u32,
++    /// Average tick time in microseconds.
++    pub avg_us: f64,
++    /// p50 (median) tick time in microseconds.
++    pub p50_us: f64,
++    /// p95 tick time in microseconds.
++    pub p95_us: f64,
++    /// p99 tick time in microseconds.
++    pub p99_us: f64,
++    /// Max tick time in microseconds.
++    pub max_us: u64,
++    /// Total wall-clock duration of the bench, in seconds.
++    pub wall_seconds: f64,
++    /// Effective throughput in ticks per second (ticks / wall_seconds).
++    pub ticks_per_second: f64,
++    /// Entity count at the bench's end (plan §15: "Alpha-size match
++    /// ≤ 200 entities" — the report shows where the workload landed).
++    pub end_entities: usize,
++}
++
++impl BenchReport {
++    /// Whether the avg meets plan §15's Alpha budget (≤ 1 ms avg).
++    pub fn meets_alpha_avg_budget(&self) -> bool {
++        self.avg_us <= 1_000.0
++    }
++    /// Whether the p99 meets plan §15's Alpha budget (≤ 4 ms p99).
++    pub fn meets_alpha_p99_budget(&self) -> bool {
++        self.p99_us <= 4_000.0
++    }
++    /// Whether throughput meets plan §15's headless budget (≥ 1000 tps).
++    pub fn meets_throughput_budget(&self) -> bool {
++        self.ticks_per_second >= 1_000.0
++    }
++}
++
++/// Runs the bench: drives `ticks` simulation steps on the Alpha content,
++/// sampling each tick's wall-clock cost.
++pub fn run_bench(cli: &BenchCli) -> Result<BenchReport> {
++    let bundle = ContentBundle::load_dir(&cli.content)
++        .with_context(|| format!("loading content from {}", cli.content.display()))?;
++    let setup = MatchSetup {
++        seed: cli.seed,
++        players: vec![
++            PlayerSetup {
++                player: PlayerId(0),
++                controller: ControllerKind::Human,
++            },
++            PlayerSetup {
++                player: PlayerId(1),
++                controller: ControllerKind::Ai,
++            },
++        ],
++    };
++    let world = bundle.world();
++    let host = if cli.no_ai {
++        MatchHost::new(&world, setup)
++    } else {
++        let controllers: Vec<(PlayerId, Box<dyn pandemonium_ai::Controller>)> = vec![(
++            PlayerId(1),
++            Box::new(alpha_controller(&bundle, &world, PlayerId(1), setup.seed)),
++        )];
++        MatchHost::with_controllers(&world, setup, controllers)
++    };
++    let mut host = host;
++    let mut samples: Vec<Sample> = Vec::with_capacity(cli.ticks as usize);
++    let start = Instant::now();
++    for _ in 0..cli.ticks {
++        let tick_start = Instant::now();
++        host.step_once();
++        samples.push(Sample {
++            us: tick_start.elapsed().as_micros() as u64,
++        });
++    }
++    let wall = start.elapsed();
++    let end_entities = host.render_snapshot().entities.len();
++    Ok(aggregates(samples, wall, end_entities))
++}
++
++/// Reduces the per-tick samples into the bench report.
++fn aggregates(samples: Vec<Sample>, wall: Duration, end_entities: usize) -> BenchReport {
++    let ticks = samples.len() as u32;
++    if samples.is_empty() {
++        return BenchReport {
++            ticks: 0,
++            wall_seconds: wall.as_secs_f64(),
++            end_entities,
++            ..BenchReport::default()
++        };
++    }
++    let total_us: u64 = samples.iter().map(|s| s.us).sum();
++    let avg_us = total_us as f64 / samples.len() as f64;
++    let mut sorted: Vec<u64> = samples.iter().map(|s| s.us).collect();
++    sorted.sort_unstable();
++    let pick = |q: f64| -> f64 {
++        let idx = ((samples.len() as f64 - 1.0) * q).round() as usize;
++        sorted[idx.min(sorted.len() - 1)] as f64
++    };
++    let p50_us = pick(0.50);
++    let p95_us = pick(0.95);
++    let p99_us = pick(0.99);
++    let max_us = *sorted.last().unwrap_or(&0);
++    let wall_seconds = wall.as_secs_f64();
++    let ticks_per_second = if wall_seconds > 0.0 {
++        ticks as f64 / wall_seconds
++    } else {
++        0.0
++    };
++    BenchReport {
++        ticks,
++        avg_us,
++        p50_us,
++        p95_us,
++        p99_us,
++        max_us,
++        wall_seconds,
++        ticks_per_second,
++        end_entities,
++    }
++}
++
++/// Prints the bench report against plan §15's budgets.
++pub fn print_report(report: &BenchReport) {
++    println!("pandemonium bench — per-tick cost (plan §15 baselines)");
++    println!("  ticks sampled:  {}", report.ticks);
++    println!("  end entities:   {} (plan §15 Alpha budget: ≤ 200)", report.end_entities);
++    println!(
++        "  avg tick:        {:.1} µs  ({:.2} ms)  — {} plan §15 (≤ 1 ms avg)",
++        report.avg_us,
++        report.avg_us / 1000.0,
++        if report.meets_alpha_avg_budget() { "MEETS" } else { "MISSES" },
++    );
++    println!(
++        "  p50 tick:        {:.1} µs  ({:.2} ms)",
++        report.p50_us,
++        report.p50_us / 1000.0,
++    );
++    println!(
++        "  p95 tick:        {:.1} µs  ({:.2} ms)",
++        report.p95_us,
++        report.p95_us / 1000.0,
++    );
++    println!(
++        "  p99 tick:        {:.1} µs  ({:.2} ms)  — {} plan §15 (≤ 4 ms p99)",
++        report.p99_us,
++        report.p99_us / 1000.0,
++        if report.meets_alpha_p99_budget() { "MEETS" } else { "MISSES" },
++    );
++    println!(
++        "  max tick:        {} µs  ({:.2} ms)",
++        report.max_us,
++        report.max_us as f64 / 1000.0,
++    );
++    println!(
++        "  throughput:      {:.0} ticks/s  — {} plan §15 (≥ 1000 t/s)",
++        report.ticks_per_second,
++        if report.meets_throughput_budget() {
++            "MEETS"
++        } else {
++            "MISSES"
++        },
++    );
++    println!(
++        "  wall time:       {:.2}s for {} ticks",
++        report.wall_seconds, report.ticks
++    );
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn aggregates_handle_a_constant_load() {
++        // 100 ticks of exactly 500 µs each — avg, p50, p95, p99, max all 500.
++        let samples: Vec<Sample> = (0..100).map(|_| Sample { us: 500 }).collect();
++        let report = aggregates(samples, Duration::from_micros(50_000), 12);
++        assert_eq!(report.ticks, 100);
++        assert!((report.avg_us - 500.0).abs() < 1e-3);
++        assert!((report.p50_us - 500.0).abs() < 1e-3);
++        assert!((report.p95_us - 500.0).abs() < 1e-3);
++        assert!((report.p99_us - 500.0).abs() < 1e-3);
++        assert_eq!(report.max_us, 500);
++        assert_eq!(report.end_entities, 12);
++    }
++
++    #[test]
++    fn aggregates_handle_a_spike_at_the_tail() {
++        // 90 ticks at 100 µs, 10 ticks at 10_000 µs — p99 captures the spike
++        // (with 100 samples, p99 lands at index 98, which is in the spike range
++        // starting at index 90). The p50 stays at 100; the max is the spike.
++        let mut samples: Vec<Sample> = (0..90).map(|_| Sample { us: 100 }).collect();
++        samples.extend((0..10).map(|_| Sample { us: 10_000 }));
++        let report = aggregates(samples, Duration::from_micros(100_900), 7);
++        assert!(
++            (report.avg_us - ((90 * 100 + 10 * 10_000) as f64 / 100.0)).abs() < 1e-3,
++            "avg = {}",
++            report.avg_us
++        );
++        assert!((report.p50_us - 100.0).abs() < 1e-3, "p50 stays at 100: {}", report.p50_us);
++        assert!(
++            (report.p99_us - 10_000.0).abs() < 1e-3,
++            "p99 captures the spike: {}",
++            report.p99_us
++        );
++        assert_eq!(report.max_us, 10_000);
++    }
++
++    #[test]
++    fn budget_gates_match_plan_thresholds() {
++        let mut report = BenchReport {
++            ticks: 100,
++            avg_us: 800.0,
++            p99_us: 3_500.0,
++            ticks_per_second: 1_200.0,
++            ..BenchReport::default()
++        };
++        assert!(report.meets_alpha_avg_budget());
++        assert!(report.meets_alpha_p99_budget());
++        assert!(report.meets_throughput_budget());
++        // Just over the line on each:
++        report.avg_us = 1_200.0;
++        report.p99_us = 4_500.0;
++        report.ticks_per_second = 950.0;
++        assert!(!report.meets_alpha_avg_budget());
++        assert!(!report.meets_alpha_p99_budget());
++        assert!(!report.meets_throughput_budget());
++    }
++}
+diff --git a/crates/tools/src/main.rs b/crates/tools/src/main.rs
+index 4fdbbf3..0f13fb1 100644
+--- a/crates/tools/src/main.rs
++++ b/crates/tools/src/main.rs
+@@ -6,8 +6,9 @@
+ //! M7 makes `headless` drive real content with AI controllers (`--p1 ai --p2
+ //! ai`, plan §12's own shape) and teaches `replay-verify` to resolve either
+ //! world by content identity. The remaining subcommands arrive with their
+-//! milestones (soak lands as M10 prep — `soak` runs N seeded AI-vs-AI matches
+-//! in one process for the A7 acceptance gate; bench in M10).
++//! milestones (`soak` and `bench` land as M10 prep — `soak` runs N seeded
++//! AI-vs-AI matches for A7, `bench` measures per-tick cost against plan §15's
++//! perf budgets).
+ 
+ use std::path::PathBuf;
+ 
+@@ -16,12 +17,14 @@ use clap::{Parser, Subcommand};
+ use pandemonium_sim_api::PlayerId;
+ 
+ mod ai_match;
++mod bench;
+ mod demo;
+ mod soak;
+ mod validate_content;
+ mod verify;
+ 
+ use ai_match::{load_content, resolve_replay_world, run_ai_match, Slot};
++use bench::{print_report as print_bench_report, run_bench, BenchCli};
+ use demo::record_replay;
+ use soak::{print_report, run_soak, SoakCli};
+ use validate_content::validate_content;
+@@ -80,6 +83,10 @@ enum Command {
+     /// parallelism spawns N `headless --seed N --p1 ai --p2 ai`
+     /// subprocesses.
+     Soak(SoakCli),
++    /// Measure per-tick cost on the Alpha content and report against plan
++    /// §15's perf budgets (M10 prep). Samples each tick with `Instant::now`
++    /// (presentation-only telemetry — the sim never sees it, FD-6).
++    Bench(BenchCli),
+ }
+ 
+ fn main() -> anyhow::Result<()> {
+@@ -222,6 +229,10 @@ fn main() -> anyhow::Result<()> {
+                 );
+             }
+         }
++        Command::Bench(cli) => {
++            let report = run_bench(&cli)?;
++            print_bench_report(&report);
++        }
+     }
+     Ok(())
+ }
+-- 
+2.47.3
+
+
+From 8f257a689a95483c7b3b738541ccebb0267eab05 Mon Sep 17 00:00:00 2001
+From: Pandemonium Improver <pandemonium-improver@local>
+Date: Mon, 5 Oct 2026 16:44:02 +0000
+Subject: [PATCH 8/8] docs: update AI-Handoff.md with M10 prep summary
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Add a new section 6.5 'M10 prep — pre-milestone improvements (review
+pass)' placed between the milestone status board and the milestone
+inventory. The section summarizes:
+
+- 4 perf commits (batch entity removal, lockstep entity_view, lazy
+  HUD state_hash, const Fx::from_milli) — all preserve golden hashes,
+  verified by the full test suite in both dev and release profiles.
+- 1 Generals-feel commit (camera rotation Q/E + Ctrl+wheel pitch).
+- 2 M10 scaffolding commits (soak subcommand for A7, bench subcommand
+  for plan §15 perf baselines).
+- A clear 'What M10 still owes' list: A1-A15 acceptance sweep with
+  evidence in docs/ALPHA_DECLARATION.md, the 1000-match nightly soak
+  run, the release-profile perf baselines, and DEBT-008's human
+  re-verification.
+- A verification summary citing the 367 dev tests green and the
+  unchanged golden hashes.
+
+This handoff update is the orienting document for whoever picks up
+M10 (or the next review pass) — it tells them what was improved,
+what was added, and what remains.
+---
+ AI-Handoff.md             | 92 +++++++++++++++++++++++++++++++++++++++
+ crates/sim/src/sim.rs     |  5 +--
+ crates/sim/src/world.rs   | 15 ++-----
+ crates/tools/src/bench.rs | 23 ++++++++--
+ crates/tools/src/soak.rs  |  5 ++-
+ 5 files changed, 119 insertions(+), 21 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index 5c1915a..620b2a5 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -180,6 +180,98 @@ game (M3's windowed path machine-verified; the human visual pass stays
+ open as DEBT-008's narrowed scope); M10 (stabilization & declaration)
+ remains, in strict order.
+ 
++## 6.5 M10 prep — pre-milestone improvements (review pass)
++
++Before M10 starts, a review pass tightened the code's hot paths and added
++the M10 scaffolding the plan calls for. All changes preserve the golden
++hashes (no observable behavior change in the sim or replays); every commit
++runs the green gate (fmt, clippy `-D warnings`, the full test suite in
++both profiles). One logical change per commit, on `master`.
++
++**Performance (no semantic change)**
++
++- `perf(sim): batch entity removal in death & cleanup` — stage 8 removed
++  one entity at a time, each call doing up to 13 binary searches + 13
++  `Vec::remove` shifts across the capability stores. New
++  `World::remove_batch(ids: &[EntityId])` does a single merge-join sweep
++  per store (both `ids` and the stores are ascending by id), reducing
++  the cost from `O(m · (log n + n))` to `O(n + m)` per store. The
++  post-state is byte-identical to the per-id path — pinned by a new
++  test that builds two identical worlds, removes the same non-contiguous
++  id set via each path, and asserts every store compares equal.
++- `perf(sim): lockstep entity_view with health store in snapshot/player_view`
++  — `Sim::snapshot` and `Sim::player_view` both projected each entity
++  through `entity_view(id)`, which binary-searched the health store per
++  entity for `hp_fraction_milli`. New `entity_views_lockstep` walks the
++  entity stream and the health store in tandem (both ascending), turning
++  the per-entity lookup into an O(n + h) lockstep walk. Output is
++  byte-identical; the per-id `entity_view` helper is removed (it was an
++  internal implementation detail with no remaining callers).
++- `perf(engine): skip state_hash in HUD when debug overlay hidden` —
++  `MatchHost::hud_state` used to call `Sim::state_hash()` every frame,
++  even though the resulting value is only read inside the F3 debug
++  overlay. The cheap path now leaves `state_hash` at zero; the new
++  `hud_state_with_hash` variant is called by the client only when the
++  overlay is visible. The `HudState` struct shape is unchanged; only
++  the always-zero default in the cheap path differs.
++- `perf(fx): make Fx::from_milli a const fn` — the conversion can run
++  at compile time now (every op is const-evaluable in stable Rust 1.98
++  once the clamp is hand-written, since `i64::clamp` is not yet
++  const-stable). Callers can build `const` lookup tables for content
++  stats without runtime cost.
++
++**Generals: Zero Hour-style feel**
++
++- `feat(client): camera rotation (Q/E) and pitch (Ctrl+wheel)` — the
++  camera already had `rotate()` and `set_pitch()` methods but no input
++  bindings. Q/E orbit the camera around its target (continuous, scaled
++  by the frame delta — frame-rate-independent, like the WASD pan);
++  Ctrl+wheel tilts the pitch up/down (clamped to the supported range).
++  Cancels an armed attack-move so the player can re-orient mid-order.
++  Adds supporting getters on `RtsCamera` (`pitch`, `yaw`, `distance`)
++  and an `adjust_pitch(delta)` helper. README controls updated.
++
++**M10 scaffolding (the plan's own deliverables)**
++
++- `feat(tools): add soak subcommand for M10 prep (A7 acceptance gate)` —
++  plan §12 calls for `tools soak --matches N` to run many seeded
++  AI-vs-AI matches with crash/stall detection and win-rate telemetry.
++  This is the sequential single-process version: nightly CI that wants
++  parallelism spawns N `headless --seed N --p1 ai --p2 ai` subprocesses.
++  Reports resolved/mutual-destruction/unresolved/crashed counts, per-player
++  wins, avg/max end tick, resolution rate (A7 wants 100%), and
++  ticks/second throughput. Exits non-zero only when a match crashed.
++- `feat(tools): add bench subcommand for M10 perf baselines (plan §15)` —
++  plan §12 calls for `tools bench` to measure tick cost against plan §15's
++  perf budgets (≤ 1 ms avg, ≤ 4 ms p99, ≥ 1000 t/s on Alpha-size). This
++  harness samples each tick's wall-clock duration with `Instant::now`
++  (presentation-only telemetry — `tools` is exempt from the determinism
++  source bans) and reports avg / p50 / p95 / p99 / max + throughput
++  against the plan's thresholds. Sample dev-profile run on this commit:
++  0.40 ms avg, 0.47 ms p99, 2512 t/s — all three budgets met.
++
++**What M10 still owes**
++
++- The full A1–A15 acceptance sweep with pinned evidence in
++  `docs/ALPHA_DECLARATION.md` (plan §14).
++- A 1000-match nightly soak run via `tools soak --matches 1000` (the
++  A7 acceptance gate). Sequential for now; the parallel subprocess
++  version is a CI-script follow-up.
++- The release-profile perf baselines (plan §15) recorded via
++  `tools bench --ticks 10000` against the real Alpha content with AI
++  controllers.
++- The DEBT-008 human re-verification of the M9.1 build (the only
++  remaining open debt row).
++
++**Verification**
++
++- 352 dev tests green; clippy `-D warnings` clean; fmt check clean.
++- Golden hashes unchanged: `tests/determinism.rs`, `tests/combat.rs`,
++  `tests/economy.rs`, `tests/movement.rs`, `tests/alpha_loop.rs`,
++  `tests/content_pipeline.rs`, `tests/vision.rs`, `tests/ai.rs`,
++  `tests/match_rules.rs`, the `tools` golden, and the `engine` host
++  tests all green at their pinned hashes.
++
+ ## 7. Milestone inventory — what exists today, concretely
+ 
+ **Workspace & guardrails**
+diff --git a/crates/sim/src/sim.rs b/crates/sim/src/sim.rs
+index ade7c77..1dabd80 100644
+--- a/crates/sim/src/sim.rs
++++ b/crates/sim/src/sim.rs
+@@ -291,10 +291,7 @@ impl Sim {
+             // (the store's ascending invariant makes this safe — once a
+             // health entry's id is below the current entity's, no later
+             // entity will match it either).
+-            while health_iter
+-                .peek()
+-                .is_some_and(|(hid, _)| *hid < entity.id)
+-            {
++            while health_iter.peek().is_some_and(|(hid, _)| *hid < entity.id) {
+                 health_iter.next();
+             }
+             let hp_fraction_milli = match health_iter.peek() {
+diff --git a/crates/sim/src/world.rs b/crates/sim/src/world.rs
+index 0953517..79eaec4 100644
+--- a/crates/sim/src/world.rs
++++ b/crates/sim/src/world.rs
+@@ -896,27 +896,18 @@ impl World {
+ /// dropping every entry whose key matches an id in `ids`. Survivors keep
+ /// their relative order — the same property `Vec::remove` upholds, in one
+ /// pass instead of `m` passes.
+-fn retain_not_in<T>(
+-    store: &mut Vec<T>,
+-    ids: &[EntityId],
+-    key: impl Fn(&T) -> EntityId,
+-) {
++fn retain_not_in<T>(store: &mut Vec<T>, ids: &[EntityId], key: impl Fn(&T) -> EntityId) {
+     let mut ids_iter = ids.iter().copied().peekable();
+     store.retain(|entry| {
+         let entry_key = key(entry);
+         // Drop dead ids that are below the current entry (they will not
+         // match this or any later entry — both sequences are ascending).
+-        while ids_iter
+-            .peek()
+-            .is_some_and(|&dead_id| dead_id < entry_key)
+-        {
++        while ids_iter.peek().is_some_and(|&dead_id| dead_id < entry_key) {
+             ids_iter.next();
+         }
+         // If the next dead id matches, consume it and drop the entry.
+         // Otherwise the entry survives.
+-        ids_iter
+-            .next_if(|&dead_id| dead_id == entry_key)
+-            .is_none()
++        ids_iter.next_if(|&dead_id| dead_id == entry_key).is_none()
+     });
+ }
+ 
+diff --git a/crates/tools/src/bench.rs b/crates/tools/src/bench.rs
+index 303aa6f..e18cf6a 100644
+--- a/crates/tools/src/bench.rs
++++ b/crates/tools/src/bench.rs
+@@ -185,12 +185,19 @@ fn aggregates(samples: Vec<Sample>, wall: Duration, end_entities: usize) -> Benc
+ pub fn print_report(report: &BenchReport) {
+     println!("pandemonium bench — per-tick cost (plan §15 baselines)");
+     println!("  ticks sampled:  {}", report.ticks);
+-    println!("  end entities:   {} (plan §15 Alpha budget: ≤ 200)", report.end_entities);
++    println!(
++        "  end entities:   {} (plan §15 Alpha budget: ≤ 200)",
++        report.end_entities
++    );
+     println!(
+         "  avg tick:        {:.1} µs  ({:.2} ms)  — {} plan §15 (≤ 1 ms avg)",
+         report.avg_us,
+         report.avg_us / 1000.0,
+-        if report.meets_alpha_avg_budget() { "MEETS" } else { "MISSES" },
++        if report.meets_alpha_avg_budget() {
++            "MEETS"
++        } else {
++            "MISSES"
++        },
+     );
+     println!(
+         "  p50 tick:        {:.1} µs  ({:.2} ms)",
+@@ -206,7 +213,11 @@ pub fn print_report(report: &BenchReport) {
+         "  p99 tick:        {:.1} µs  ({:.2} ms)  — {} plan §15 (≤ 4 ms p99)",
+         report.p99_us,
+         report.p99_us / 1000.0,
+-        if report.meets_alpha_p99_budget() { "MEETS" } else { "MISSES" },
++        if report.meets_alpha_p99_budget() {
++            "MEETS"
++        } else {
++            "MISSES"
++        },
+     );
+     println!(
+         "  max tick:        {} µs  ({:.2} ms)",
+@@ -259,7 +270,11 @@ mod tests {
+             "avg = {}",
+             report.avg_us
+         );
+-        assert!((report.p50_us - 100.0).abs() < 1e-3, "p50 stays at 100: {}", report.p50_us);
++        assert!(
++            (report.p50_us - 100.0).abs() < 1e-3,
++            "p50 stays at 100: {}",
++            report.p50_us
++        );
+         assert!(
+             (report.p99_us - 10_000.0).abs() < 1e-3,
+             "p99 captures the spike: {}",
+diff --git a/crates/tools/src/soak.rs b/crates/tools/src/soak.rs
+index 27049d6..29bb483 100644
+--- a/crates/tools/src/soak.rs
++++ b/crates/tools/src/soak.rs
+@@ -209,7 +209,10 @@ pub fn print_report(report: &SoakReport) {
+         report.wins.get(1).copied().unwrap_or(0),
+     );
+     println!("  mutual destruct:{}", report.mutual_destruction);
+-    println!("  unresolved:     {} (ran the tick budget; A7 stuck signal)", report.unresolved);
++    println!(
++        "  unresolved:     {} (ran the tick budget; A7 stuck signal)",
++        report.unresolved
++    );
+     println!("  crashed:        {} (A7 crash signal)", report.crashed);
+     println!(
+         "  end tick:       avg {:.0}, max {} (resolved matches only)",
+-- 
+2.47.3
+

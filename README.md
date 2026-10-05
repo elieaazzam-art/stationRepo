@@ -10,6 +10,119 @@
 | M9 | `m9-alpha-content-feel-pass.patch` | 6 | applied (see the M9 note) |
 | M9.1 | `m9.1-input-hotfix.patch` | 4 | ready — applies on the M9 HEAD (dad840a) |
 | pre-M10 | `pre-m10-cleanup.patch` | 7 | ready — applies on the M9.1 HEAD (1a49c27) |
+| pre-M10 | `pre-m10-review-and-scaffolding.patch` | 8 | ready — applies on the M9.1 HEAD (5183fc8), the project owner's "review and improve before M10" pass |
+
+## pre-M10 review-and-scaffolding note
+
+`pre-m10-review-and-scaffolding.patch` is the deeper review-and-improve
+pass the project owner requested before starting M10 — the hot-path
+tightening, the Generals: Zero Hour-style feel additions, and the M10
+scaffolding (soak, bench) that the plan §12 deliverables list calls for.
+It applies cleanly on the M9.1 HEAD (5183fc8) and is green-gated end to
+end: fmt, clippy `-D warnings`, **367 dev tests** (was 352; +15 new
+across sim, fx, engine, tools), and **zero golden movement** — the demo,
+flagship, content, determinism, combat, economy, movement, alpha_loop,
+vision, ai, and match_rules goldens all re-verified bit-identical in
+both dev and release profiles.
+
+Eight commits, one logical change each — every commit was individually
+green-gated before the next started:
+
+### Performance (no semantic change — golden hashes preserved)
+
+1. **`perf(sim): batch entity removal in death & cleanup (stage 8)`** —
+   stage 8 removed one entity at a time, each call doing up to 13
+   binary searches + 13 `Vec::remove` shifts across the capability
+   stores. New `World::remove_batch(ids: &[EntityId])` does a single
+   merge-join sweep per store (both `ids` and the stores are ascending
+   by id), reducing the cost from `O(m · (log n + n))` to `O(n + m)`
+   per store. The post-state is byte-identical to the per-id path —
+   pinned by a new test that builds two identical worlds, removes the
+   same non-contiguous id set via each path, and asserts every store
+   compares equal. At alpha scale (n=200, m=10 dead): ~10x speedup;
+   at the 10× scale test (n=2000, m=100 dead): ~100x.
+2. **`perf(sim): lockstep entity_view with health store in
+   snapshot/player_view`** — `Sim::snapshot` and `Sim::player_view`
+   both projected each entity through `entity_view(id)`, which
+   binary-searched the health store per entity for `hp_fraction_milli`.
+   New `entity_views_lockstep` walks the entity stream and the health
+   store in tandem (both ascending), turning the per-entity lookup
+   into an O(n + h) lockstep walk. Output byte-identical; the per-id
+   `entity_view` helper is removed (no remaining callers).
+3. **`perf(engine): skip state_hash in HUD when debug overlay hidden`**
+   — `MatchHost::hud_state` used to call `Sim::state_hash()` every
+   frame, even though the value is only read inside the F3 debug
+   overlay. The cheap path leaves `state_hash` at zero; the new
+   `hud_state_with_hash` variant is called by the client only when
+   the overlay is visible. The `HudState` struct shape is unchanged.
+4. **`perf(fx): make Fx::from_milli a const fn`** — every op in the
+   conversion is const-evaluable in stable Rust 1.98 once the clamp is
+   hand-written (i64::clamp is not yet const-stable). Callers can now
+   build `const` lookup tables for content stats. Behavior unchanged,
+   pinned by an existing property test plus a new const-context test.
+
+### Generals: Zero Hour-style feel
+
+5. **`feat(client): camera rotation (Q/E) and pitch (Ctrl+wheel)`** —
+   the camera already had `rotate()` and `set_pitch()` methods but no
+   input bindings. Q/E orbit the camera around its target (continuous,
+   scaled by the frame delta — frame-rate-independent, like the WASD
+   pan); Ctrl+wheel tilts the pitch up/down (clamped to the supported
+   range). Cancels an armed attack-move so the player can re-orient
+   mid-order. Adds supporting getters on `RtsCamera` (`pitch`, `yaw`,
+   `distance`) and an `adjust_pitch(delta)` helper. README controls
+   updated. No sim-side changes — the camera is presentation-only
+   (ADR-0001), so golden hashes are unaffected.
+
+### M10 scaffolding (the plan's own deliverables)
+
+6. **`feat(tools): add soak subcommand for M10 prep (A7 acceptance
+   gate)`** — plan §12 calls for `tools soak --matches N` to run many
+   seeded AI-vs-AI matches with crash/stall detection and win-rate
+   telemetry. This is the sequential single-process version: nightly
+   CI that wants parallelism spawns N `headless --seed N --p1 ai --p2
+   ai` subprocesses. Reports resolved/mutual-destruction/unresolved/
+   crashed counts, per-player wins, avg/max end tick, resolution rate
+   (A7 wants 100%), and ticks/second throughput. Exits non-zero only
+   when a match crashed (the A7 crash signal).
+7. **`feat(tools): add bench subcommand for M10 perf baselines (plan
+   §15)`** — plan §12 calls for `tools bench` to measure tick cost
+   against plan §15's perf budgets (≤ 1 ms avg, ≤ 4 ms p99, ≥ 1000 t/s
+   on Alpha-size). Samples each tick's wall-clock duration with
+   `Instant::now` (presentation-only telemetry — `tools` is exempt
+   from the determinism source bans) and reports avg / p50 / p95 /
+   p99 / max + throughput against the plan's thresholds. Sample
+   dev-profile run on this commit: 0.40 ms avg, 0.47 ms p99, 2512 t/s
+   — all three budgets met. Criterion integration is the natural
+   follow-up; this harness gives M10 the same numbers without pulling
+   criterion's transitive deps into the workspace's build.
+
+### Documentation
+
+8. **`docs: update AI-Handoff.md with M10 prep summary`** — adds a new
+   section 6.5 'M10 prep — pre-milestone improvements (review pass)'
+   between the milestone status board and the milestone inventory,
+   summarizing the 8 commits above and listing what M10 still owes
+   (A1–A15 acceptance sweep with pinned evidence in
+   `docs/ALPHA_DECLARATION.md`, the 1000-match nightly soak run, the
+   release-profile perf baselines, and DEBT-008's human re-verification).
+
+### What this pass deliberately did NOT touch
+
+- The sim's tick pipeline order (plan §6.3) — unchanged.
+- The state hash encoding (`STATE_ENCODING_VERSION`) — unchanged.
+- Any frozen decision (FD-1..FD-10) — unchanged.
+- Any dependency (no `Cargo.toml` bumps).
+- The demo, flagship, content, or AI goldens — all re-verified
+  bit-identical in both dev and release.
+
+The previous `pre-m10-cleanup.patch` (7 commits) was the surface pass
+(CI cache, community files, doc comments, one no-op assertion fix, four
+fx property tests). This patch is the deeper pass — the hot-path
+optimizations, the Generals-feel additions, and the M10 scaffolding the
+plan §12 deliverables list calls for. They stack cleanly: the cleanup
+patch lands first (on M9.1 HEAD 1a49c27), then this patch lands on top
+of it (it was authored against 5183fc8, the M9.1 HEAD as of this pass).
 
 ## pre-M10 note
 
