@@ -11,6 +11,29 @@
 | M9.1 | `m9.1-input-hotfix.patch` | 4 | ready — applies on the M9 HEAD (dad840a) |
 | pre-M10 | `pre-m10-cleanup.patch` | 7 | ready — applies on the M9.1 HEAD (1a49c27) |
 | pre-M10 | `pre-m10-review-and-scaffolding.patch` | 8 | ready — applies on the M9.1 HEAD (5183fc8), the project owner's "review and improve before M10" pass |
+| M10 | `m10-stabilization-and-declaration.patch` | 10 | ready — applies on the pre-M10 review HEAD (a4393a1) |
+| M10.1 | `m10.1-decal-render-fix.patch` | 1 | ready — applies on the M10 HEAD (8b4757a), the first-frame decal crash fix |
+
+## M10.1 decal render fix note
+
+`m10.1-decal-render-fix.patch` fixes the deterministic first-frame
+crash in the decal rendering pipeline: the decal pipeline declares two
+vertex buffer slots (slot 0 geometry, slot 1 per-instance
+`DecalInstance` data), but the draw block uploaded the instance data
+with `queue.write_buffer` and never bound it to the pass — wgpu's
+validation rejected the very first draw with "requires vertex buffer 1
+to be set", and the panic's teardown then surfaced the secondary
+"Trying to destroy a SurfaceAcquireSemaphores" error. The fix is one
+binding (`pass.set_vertex_buffer(1, self.decal_instance_buf.slice(..))`)
+placed before both decal draws, plus a hermetic regression test in the
+repo's source-scanning law style (a GPU integration test cannot run on
+the project's headless CI). Verified end to end: fmt, clippy
+`-D warnings`, the full workspace suite, the replay round-trip, the
+determinism golden (`headless --seed 7 --ticks 300` still ends at
+`0x9d5ba9b565060336`), and a real windowed run under Xvfb + lavapipe
+where the unfixed build reproduces both panics and the fixed build
+presents 600 frames and exits cleanly. Simulation behavior is
+untouched — the change is client-rendering-only.
 
 ## pre-M10 review-and-scaffolding note
 
