@@ -19,6 +19,7 @@ alphabetically) always reads oldest → newest, top → bottom.
 | 009 | pre-M10 | `009-pre-m10-review-and-scaffolding.patch` | 8 | ready — applies on the M9.1 HEAD (5183fc8), the project owner's "review and improve before M10" pass |
 | 010 | M10 | `010-m10-stabilization-and-declaration.patch` | 10 | ready — applies on the pre-M10 review HEAD (a4393a1) |
 | 011 | M10.1 | `011-m10.1-decal-render-fix.patch` | 1 | ready — applies on the M10 HEAD (8b4757a), the first-frame decal crash fix |
+| 012 | M10.1 | `012-m10.1-pre-declaration-hardening.patch` | 5 | ready — applies on the decal-fix HEAD (6ec9693), the pre-declaration hardening & A14 enablement pass |
 
 ## Adding a new patch
 
@@ -237,6 +238,80 @@ where the unfixed build reproduces both panics and the fixed build
 presents 600 frames and exits cleanly. Simulation behavior is
 untouched — the change is client-rendering-only.
 
+## M10.1 pre-declaration hardening note
+
+`012-m10.1-pre-declaration-hardening.patch` is the pass between M10 and
+the Alpha declaration (AGENT-TASK-M10.1): the one open gate is A14 (the
+human playtest), and it lacked its enabling machinery — no
+`docs/PLAYTEST.md`, no client `--seed`, no client replay recording, no
+§11.6 bug-report dump. The pass builds that machinery, repays the one
+debt whose trigger had fired (DEBT-001), hardens the nightly soak, and
+closes out the registers. Five commits, one logical change each:
+
+1. **`feat(fx)`** — DEBT-001 repaid: `XxHash64` (the reference XXH64,
+   written in-repo like PCG32 — the dependency law forbids
+   `twox-hash`) becomes the canonical hasher behind the same
+   `write_*`/`finish` surface. **The pass's single hash-moving
+   commit**: every pinned golden re-pinned with its written reason
+   (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, tick-0
+   `0x71a924ad5799e4b3`, content hash `0x9bc18c521107b262` / map id
+   `0xd38136401ab02ff1`; the FNV-era values are history in the docs).
+   Golden-tested against reference vectors (stripe boundaries
+   31/32/33, a nonzero seed) plus a chunking-invariance property;
+   `STATE_ENCODING_VERSION` and the replay `format_version`
+   unchanged (A-087 — byte layouts identical, no replay files existed
+   in the wild); `Fnv1a64` retained as the replay *file* checksum.
+2. **`feat(client)`** — `--seed <u64>` (default 7), `--record <path>`
+   (the segment's replay written at match end / clean exit — every
+   exit path funnels through the winit `exiting` hook; `tools
+   replay-verify` accepts the file), and **F8**: the §11.6
+   deterministic bug-report dump (`pandemonium-report-<seed>-tick<tick>.pdrp`
+   + the `-info.txt` sidecar with seed/tick/content identity/frame
+   count/selection/controls line — no wall-clock; works while paused).
+   Pure assembly in the new `crates/client/src/report.rs` with the
+   client-seam A2 test (decode + `run_command_log` re-sim + hash
+   equality), pause validity, and sidecar-determinism tests. Zero
+   golden movement — client-only.
+3. **`docs`** — `docs/PLAYTEST.md`, the A14 instrument, all eight
+   sections (per-OS quickstart, the README's controls card + F8, the
+   unaided-loop checklist, spectator legibility, the DEBT-011/012/A8
+   probes, the F8 procedure, the five-row results table, the pass
+   bar). Every referenced command was run against the tree before
+   writing it down.
+4. **`ci`** — the nightly soak sharded 10×100 (seeds disjoint by
+   construction — the arithmetic proven in the workflow's comments),
+   `timeout-minutes` on every job (90/shard, 30 smoke, 30 bench),
+   per-shard evidence artifacts, and an aggregate job that gates on
+   any nonzero `crashed` count. Zero Rust changes.
+5. **`docs`** — the close-out: CHANGELOG folds `[Unreleased]` into
+   `[M10]` and adds `[M10.1]`; DEBT-013 (the client monoliths) logged
+   with the post-alpha split plan; DEBT-011/012 triggers sharpened to
+   name their PLAYTEST.md probes; A-087..A-090 logged; AI-Handoff
+   §2/§4/§5/§6/§8 refreshed (the "Next:" line now points at the
+   playtest); ARCHITECTURE carries the post-alpha refactor map; the
+   README's bug-report promise names F8 and the dump files; the stage
+   badge stays `A14 playtest pending` (the owner flips it).
+
+Green-gated end to end: fmt, clippy `-D warnings`, **414 dev / 409
+release tests** (20 new: 8 fx, 12 client), the replay round-trip PASS
+at the new identity, `content-validate` PASS, an 8-match soak spot
+check (8/8 resolved, 0 crashed), and the §15 bench budgets still met
+(0.25 ms avg, 2.25 ms p99, 4003 t/s). Windowed verification under
+Xvfb + llvmpipe with XTEST injection (DEBT-008's recipe): `--seed 42`
+runs and diverges from seed 7, `--record` writes at exit and
+replay-verifies, two F8 presses (one mid-run, one during pause) both
+replay-verify PASS, and the `.pdrp` is byte-identical across
+same-tick presses.
+
+Task 6 (optional CI binary artifacts for testers) was **dropped** per
+its own escape clause: the task's mandated local verification failed —
+the client's content resolution is compile-time baked
+(`CARGO_MANIFEST_DIR`), so a CI-built binary cannot find `content/`
+beside it on a tester's machine. The repo quickstart remains the
+distribution path. Also flagged: **no LICENSE exists** — a public repo
+taking external playtesters needs a license decision (the owner's
+copyright, the owner's call; the README already says so).
+
 ## Applying a patch
 
 ```bash
@@ -259,4 +334,5 @@ git am 008-pre-m10-cleanup.patch
 git am 009-pre-m10-review-and-scaffolding.patch
 git am 010-m10-stabilization-and-declaration.patch
 git am 011-m10.1-decal-render-fix.patch
+git am 012-m10.1-pre-declaration-hardening.patch
 ```

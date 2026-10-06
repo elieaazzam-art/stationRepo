@@ -1,0 +1,2770 @@
+From 8fcae118595754131e4cf7d98ab3c85cf6140cd5 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <331263527+elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 10:02:55 +0000
+Subject: [PATCH 1/5] =?UTF-8?q?feat(fx):=20repay=20DEBT-001=20=E2=80=94=20?=
+ =?UTF-8?q?xxHash64=20as=20the=20canonical=20hasher,=20goldens=20re-pinned?=
+ =?UTF-8?q?=20with=20reasons?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The pass's single hash-moving commit. XxHash64 (the reference XXH64
+algorithm, written in-repo like PCG32 — the dependency law forbids
+twox-hash) implements the same incremental surface as Fnv1a64:
+new/seeded, write_bytes/u8/u16/u32/u64/i32/i64 (little-endian), finish.
+Golden-tested against reference vectors over the 0..len byte sequences
+at stripe boundaries 31/32/33 with a nonzero seed, plus a
+chunking-invariance property (any write split digests to the one-shot
+value).
+
+The canonical call sites (sim state hash, fixture + content bundle
+hashes) now route through XxHash64; the byte encodings are unchanged,
+so STATE_ENCODING_VERSION and the replay format_version stay put
+(A-087; no replay files exist in the wild). Fnv1a64 remains for the
+replay file checksum — a file-format concern, not the canonical state
+hasher.
+
+Every pinned golden re-pinned with its written reason: determinism.rs
+(ticks 0/30/60 + final), ai.rs (tick 0 + flagship final),
+match_rules.rs (the pinned-trail guard), tools' ai_match golden. New
+pins: demo 0xb6fff6659cfb7709 (seed 7, 300 ticks), flagship
+0x6e9a18bd7c5f699f (seed 7, 7200 ticks), content hash
+0x9bc18c521107b262 / map id 0xd38136401ab02ff1. Doc citations updated
+(ALPHA_DECLARATION A1/A2 rows, AI-Handoff §2/§4/§5/§6/§7, ARCHITECTURE,
+README); DEBT-001 → repaid (M10.1); A-087 logged.
+
+Verified: fmt/clippy clean; 402 dev / 397 release tests green; replay
+round-trip PASS on a freshly recorded file (11 checkpoints); content-
+validate PASS at the new identity; two-run determinism identical (the
+escape hatch did not fire).
+---
+ AI-Handoff.md                 |  33 +--
+ README.md                     |   5 +-
+ crates/content/src/bundle.rs  |  24 +-
+ crates/fx/src/hash.rs         | 411 ++++++++++++++++++++++++++++++++--
+ crates/fx/src/lib.rs          |   5 +-
+ crates/fx/tests/properties.rs |  19 +-
+ crates/sim/src/fixture.rs     |  10 +-
+ crates/sim/src/hash.rs        |   8 +-
+ crates/tools/src/ai_match.rs  |   4 +-
+ docs/ALPHA_DECLARATION.md     |   4 +-
+ docs/ARCHITECTURE.md          |  12 +-
+ docs/ASSUMPTIONS.md           |  14 ++
+ docs/DEBT.md                  |   2 +-
+ tests/ai.rs                   |  11 +-
+ tests/determinism.rs          |  16 +-
+ tests/match_rules.rs          |   4 +-
+ 16 files changed, 499 insertions(+), 83 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index c9c7884..ff57e24 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -31,7 +31,7 @@
+ | Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M9.1 (input hotfix) COMPLETE on top of M9 — the loop is playable, and now *controllable*.** The DEBT-008 human pass finally ran (the project owner played the windowed build) and reported: *"nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears on the screen."* Every symptom was real and every root cause was client-side (the simulation itself was machine-verified through M9 and untouched): (1) the camera's screen-right axis had been **negated since M3** — D panned left, A right, W retreated, S advanced; no sim-side test can catch presentation direction, and nobody had ever played it; (2) the mouse **could not move the camera at all** — plan §11.3's "pan by edge + keys" and "zoom toward the cursor" were never implemented, and the wheel direction was inverted (orbit-only); (3) right-click only ever issued `Move` — **the client had no way to order an attack at all** (§11.3's right-click *context* command was unimplemented); (4) 'A' fired attack-move on key-down *and on every OS key repeat* while also being a pan key; (5) **rejected orders were silent** — `CommandRejected` events were dropped, so every illegal order read as "the controls don't work"; (6) the opening camera framed the map center at 58 tiles out — the starting force read as specks ("nothing appears"); (7) `frames_presented` only advanced in `--frames` verification mode, so M9's flashes and pings **never expired and accumulated forever** in normal play. M9.1 fixes all seven: corrected pan axes (with direction-pinning tests at yaw 0 and 90°), WASD + arrow-key panning at frame-rate-independent speed, edge scrolling + middle-drag grab-pan + wheel zoom-toward-cursor, right-click context resolution (enemy → Attack, node → Gather for workers, ground → Move; `client::orders`), 'A' arms attack-move for the next left-click (HUD line included; Esc/right-click cancels), key-repeat guards, refusal cues (red square at the click point + HUD reason line; the smoke run now pins the wiring with a deliberately invalid order), selection corner brackets, an opening camera focused on the player's start at 26 tiles (re-framed on restart), map-bounds clamping, and a viewport-centered end screen. Machine-verified end to end under Xvfb + llvmpipe with XTEST injection (the DEBT-008 recipe, extended — see §8): a 900-frame windowed run with drag-box selection of the 5 start entities and 2 submitted commands (a context Move and an armed attack-move), the loop healthy through pan, zoom, and middle-drag. 352 dev / 347 release tests green (19 new: 7 camera, 8 context-resolution, 4 feedback). **Zero golden movement** — the fix is 100% presentation/input (no sim/ai/content files touched): demo `0x9d5ba9b565060336`, flagship `0x01b3b60b741f03e9`, content `0x249b69f0ee343a10` all re-verified bit-identical. M9 remains complete underneath (the frozen-army chase-order pop, the re-marching wave machine with CC focus, waves of ten — matches resolve in 9.1k–23.3k ticks across a 32-seed sweep, `tests/alpha_loop.rs`; the feel pass: hit flashes, health bars, command pings, the §11.5 audio seam). DEBT-008 is narrowed to its last inch: the human *re-verification* of the fixed build on a real display (the feel judgment). **Next: M10 is complete — the acceptance sweep is recorded in docs/ALPHA_DECLARATION.md** | defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result, derived state per A-066, not hashed — the same reasoning as fog A-059; the defeat check fires only in structure-bearing matches, A-067). `MatchHost` hosts the vs-AI opponent (`with_controllers`), keeps the command log, surfaces the outcome; the client's full loop (hosted AI, end screen, R restart, control groups, context orders, feedback cues) runs through it. A15 green (two fresh hosts from the same seed: identical hashes; with AI controllers: identical logs too). |
++| Status | **M9.1 (input hotfix) COMPLETE on top of M9 — the loop is playable, and now *controllable*.** The DEBT-008 human pass finally ran (the project owner played the windowed build) and reported: *"nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears on the screen."* Every symptom was real and every root cause was client-side (the simulation itself was machine-verified through M9 and untouched): (1) the camera's screen-right axis had been **negated since M3** — D panned left, A right, W retreated, S advanced; no sim-side test can catch presentation direction, and nobody had ever played it; (2) the mouse **could not move the camera at all** — plan §11.3's "pan by edge + keys" and "zoom toward the cursor" were never implemented, and the wheel direction was inverted (orbit-only); (3) right-click only ever issued `Move` — **the client had no way to order an attack at all** (§11.3's right-click *context* command was unimplemented); (4) 'A' fired attack-move on key-down *and on every OS key repeat* while also being a pan key; (5) **rejected orders were silent** — `CommandRejected` events were dropped, so every illegal order read as "the controls don't work"; (6) the opening camera framed the map center at 58 tiles out — the starting force read as specks ("nothing appears"); (7) `frames_presented` only advanced in `--frames` verification mode, so M9's flashes and pings **never expired and accumulated forever** in normal play. M9.1 fixes all seven: corrected pan axes (with direction-pinning tests at yaw 0 and 90°), WASD + arrow-key panning at frame-rate-independent speed, edge scrolling + middle-drag grab-pan + wheel zoom-toward-cursor, right-click context resolution (enemy → Attack, node → Gather for workers, ground → Move; `client::orders`), 'A' arms attack-move for the next left-click (HUD line included; Esc/right-click cancels), key-repeat guards, refusal cues (red square at the click point + HUD reason line; the smoke run now pins the wiring with a deliberately invalid order), selection corner brackets, an opening camera focused on the player's start at 26 tiles (re-framed on restart), map-bounds clamping, and a viewport-centered end screen. Machine-verified end to end under Xvfb + llvmpipe with XTEST injection (the DEBT-008 recipe, extended — see §8): a 900-frame windowed run with drag-box selection of the 5 start entities and 2 submitted commands (a context Move and an armed attack-move), the loop healthy through pan, zoom, and middle-drag. 352 dev / 347 release tests green (19 new: 7 camera, 8 context-resolution, 4 feedback). **Zero golden movement** — the fix is 100% presentation/input (no sim/ai/content files touched): demo `0x9d5ba9b565060336`, flagship `0x01b3b60b741f03e9`, content `0x249b69f0ee343a10` all re-verified bit-identical. (M10.1: those were the FNV-era values — the canonical hasher swap repaid DEBT-001 and moved every digest; §4 carries the current pins.) M9 remains complete underneath (the frozen-army chase-order pop, the re-marching wave machine with CC focus, waves of ten — matches resolve in 9.1k–23.3k ticks across a 32-seed sweep, `tests/alpha_loop.rs`; the feel pass: hit flashes, health bars, command pings, the §11.5 audio seam). DEBT-008 is narrowed to its last inch: the human *re-verification* of the fixed build on a real display (the feel judgment). **Next: M10 is complete — the acceptance sweep is recorded in docs/ALPHA_DECLARATION.md** | defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result, derived state per A-066, not hashed — the same reasoning as fog A-059; the defeat check fires only in structure-bearing matches, A-067). `MatchHost` hosts the vs-AI opponent (`with_controllers`), keeps the command log, surfaces the outcome; the client's full loop (hosted AI, end screen, R restart, control groups, context orders, feedback cues) runs through it. A15 green (two fresh hosts from the same seed: identical hashes; with AI controllers: identical logs too). |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -84,12 +84,13 @@ hashes, the pinned-trail regression guard, MatchEnded surfaces in the
+ event stream), and 3 M9 tests (`tests/alpha_loop.rs`: resolution
+ within the fifteen-minute budget across seeds, end-to-end resolution
+ determinism, the windowed host's vs-AI loop closing naturally).
+-The headless demo's final hash is still 0x9d5ba9b565060336 (seed 7,
+-300 ticks — unchanged through M9 and M9.1: its lone Attack command is
+-gate-refused on the trivial world, so the chase-order pop never
+-fires there); the AI-vs-AI flagship (seed 7, 7200 ticks) pins
+-0x01b3b60b741f03e9 with tick-0 hash 0x61613bca16b8f00e — the tick-0
+-hash is the M7 original (no orders exist at tick 0); the final hash
++The headless demo's final hash is 0xb6fff6659cfb7709 (seed 7, 300
++ticks — re-pinned at M10.1: the canonical hasher swap, FNV-1a ->
++xxHash64, DEBT-001 repaid; the FNV-era value was 0x9d5ba9b565060336,
++which had been unchanged through M9 and M9.1); the AI-vs-AI flagship
++(seed 7, 7200 ticks) pins 0x6e9a18bd7c5f699f with tick-0 hash
++0x71a924ad5799e4b3 (both re-pinned at M10.1 by the same swap; the
++FNV-era values were 0x01b3b60b741f03e9 / 0x61613bca16b8f00e); the final hash
+ moved twice in M9 (the chase-order pop, then the AI tuning), each
+ re-pinned with its written reason in the test — and M9.1 moved
+ nothing (all three hashes re-verified bit-identical: the hotfix
+@@ -99,8 +100,10 @@ runner prints a `match ended:` line; at longer budgets it now ends
+ naturally (player N wins) — run `--ticks 27000 --p1 ai --p2 ai` to
+ watch a full match resolve.
+ `tools content-validate content` prints the bundle identity and PASS
+-(content hash 0x249b69f0ee343a10, map id 0xbc0970c3cf14e9cf — unchanged
+-by M9: the manifest review changed no values); `cargo run -p
++(content hash 0x9bc18c521107b262, map id 0xd38136401ab02ff1 — re-issued
++at M10.1 by the hasher swap; the FNV-era values were
++0x249b69f0ee343a10 / 0xbc0970c3cf14e9cf, which M9's manifest review
++had left unchanged); `cargo run -p
+ pandemonium-client` prints the no-display finding and runs the headless
+ smoke pass — which since M9 drives the windowed path's exact hosting
+ seam (the AI opponent included) and prints the feedback-wiring
+@@ -133,7 +136,7 @@ pushed to GitHub (`.github/workflows/ci.yml`) — see A-010/A-020 above.
+ ## 5. Workspace map (as built; see `docs/ARCHITECTURE.md` for detail)
+ 
+ ```text
+-crates/fx        DONE    Q16.16 fixed-point math, isqrt, PCG32 Rng, FNV-1a hasher
++crates/fx        DONE    Q16.16 fixed-point math, isqrt, PCG32 Rng, xxHash64 canonical hasher (M10.1; FNV-1a kept for the replay file checksum)
+ crates/sim_api   DONE    vocabulary: ids, Command/CommandKind, Event, Reject, Snapshot, PlayerView, MatchSetup
+ crates/sim       DONE    Sim spine + M4 movement + M5 economy + M6 combat & vision + M7's run_command_log (the one canonical command-log re-simulation driver — DEBT-005 repaid): step pipeline (11 stages, 5/7/9 now wired), entity + capability stores (12 capability types), command gate w/ economy + combat checks, state hash (v4), trivial-world fixture, nav grid + A* + footprint occupancy, mover, gather loop, production queues, construction, combat pipeline, three-state fog (derived not hashed — A-059), A12 invariant checker, + the headless driver returning the checkpoint trail + allocator watermark
+ crates/content   DONE    RON schema (strict), versioned loaders + map v1->v2 migration, precise validators, ContentBundle + content hash, world() seam (all 12 capabilities mapped — Attack mapped in M6, DEBT-006 retired)
+@@ -170,7 +173,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M8 | Match rules & full loop (P5) | ✅ **complete** | Stage 10 (plan §6.3.10, §9.7) lands: defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result). The defeat check only fires when the match is "structure-bearing" (A-067) so the M1 spine-test fixture and the M3 headless smoke stay green. The outcome is derived state (A-066: not part of the canonical hash) — the M7 goldens stay green by construction (no `STATE_ENCODING_VERSION` bump). `MatchHost` extended with optional AI controllers (`with_controllers`), a command log (`log()`), and the match outcome (`outcome()` / `is_finished()`). The windowed client hosts its vs-AI opponent through this seam, renders the end-screen panel (VICTORY/DEFEAT/MUTUAL DESTRUCTION), supports restart (R — drop + reconstruct, A15), control groups (1-9), and Stop/AttackMove hotkeys (S/A). A15 green (two fresh hosts, same seed → identical hashes; with AI → identical logs too). The `--p1 ai --p2 ai` runner prints a `match ended:` line. DEBT-008 narrowed by M8 (the human visual pass over the full vs-AI loop remains) |
+ | M9 | Alpha content & feel pass | ✅ **complete** | The M8 gap closed: the frozen-chase-order sim bug fixed (defense orders outliving their dead targets froze both armies; combat stage 1 pops them now — 2 unit tests), the wave machine re-marches on the pressure cadence and focuses the sighted enemy CC (re-pinned + a new pin test), waves of ten / army cap sixteen. `tests/alpha_loop.rs`: AI-vs-AI resolves inside 27000 ticks across seeds (measured 9.1k–23.3k over a 32-seed sweep), end-to-end resolution determinism (same seed → same winner, end tick, log, final hash), and the windowed host's vs-AI loop closes naturally (an idle human's base falls to the AI, `outcome()` surfaces through the end-screen boundary). Feel pass: hit flashes, health bars, command pings (5 unit tests, no GPU needed), the `AudioSink` seam + placeholder cue set (3 unit tests; no audible backend — DEBT-011). Manifest review: no value changed — the stall was code, not content (§10.4 pins hold). Goldens: the demo untouched; the AI flagship re-pinned twice with written reasons |
+ | M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+-| M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (goldens re-verified bit-identical: demo 0x9d5ba9b565060336, flagship 0x01b3b60b741f03e9, content 0x249b69f0ee343a10); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
++| M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (M10 verified them bit-identical at their then-FNV values; M10.1's hasher swap re-pinned them: demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+ M4 movement, M5 economy/production/construction, M6 combat & vision, M7
+@@ -305,9 +308,11 @@ both profiles). One logical change per commit, on `master`.
+   stream; `next_u32`, `next_u64` (fixed hi-then-lo composition), `bounded(n)`
+   (rejection-sampled, unbiased); `state_parts()`/`from_state_parts()` for canonical
+   hashing and exact restore (plan §6.4).
+-- `Fnv1a64` — incremental FNV-1a 64-bit canonical hasher; `write_u16/u32/u64/i32/i64`
+-  encode little-endian (the canonical byte form of plan §6.4); golden-tested
+-  against the published FNV vectors. xxHash64 swap is DEBT-001.
++- `XxHash64` — incremental xxHash64, the canonical hasher since M10.1 (DEBT-001
++  repaid): the same `write_u16/u32/u64/i32/i64` little-endian surface as the old
++  `Fnv1a64`, golden-tested against the reference XXH64 vectors (stripe boundaries
++  31/32/33, a nonzero seed) and chunking-invariant by property test. `Fnv1a64`
++  remains for the replay file checksum only.
+ 
+ **Tests (57, all green dev + release)**
+ 
+diff --git a/README.md b/README.md
+index 6956f66..b37f21d 100644
+--- a/README.md
++++ b/README.md
+@@ -177,7 +177,8 @@ Built and verified through M9:
+ 
+ - **`fx`** — Q16.16 fixed-point math with 64-bit intermediates, round-toward-zero
+   and saturating contracts (identical in debug and release), exact integer square
+-  root over the full u64 range, PCG32 RNG with canonical seeding, FNV-1a 64-bit
++  root over the full u64 range, PCG32 RNG with canonical seeding, xxHash64 as
++  the canonical hasher
+   hashing — all property-tested.
+ - **`sim`** — the tick pipeline (all 11 stages live, including M8's match rules);
+   entity and capability stores kept in ascending-ID order by construction
+@@ -258,7 +259,7 @@ Not built yet — on purpose, in milestone order:
+ ```text
+ pandemonium-bd/
+ ├─ crates/
+-│  ├─ fx/         fixed-point math (Fx, Vec2Fx, isqrt), PCG32 RNG, FNV-1a hasher
++│  ├─ fx/         fixed-point math (Fx, Vec2Fx, isqrt), PCG32 RNG, xxHash64 hasher
+ │  ├─ sim_api/    boundary vocabulary: Command, Event, Snapshot, PlayerView, Reject
+ │  ├─ sim/        the simulation: tick pipeline, stores, command gate, state hash
+ │  ├─ content/    RON schema, versioned loaders, validators, ContentBundle
+diff --git a/crates/content/src/bundle.rs b/crates/content/src/bundle.rs
+index 3b578bf..802bc2d 100644
+--- a/crates/content/src/bundle.rs
++++ b/crates/content/src/bundle.rs
+@@ -15,7 +15,7 @@
+ use std::collections::BTreeMap;
+ use std::path::Path;
+ 
+-use pandemonium_fx::Fnv1a64;
++use pandemonium_fx::XxHash64;
+ use pandemonium_sim::TrivialWorld;
+ use pandemonium_sim::{
+     CapTemplate, KindEconomy, KindTemplate, ResourceDef as SimResourceDef, SpawnDef,
+@@ -253,7 +253,7 @@ impl ContentBundle {
+         map: defs::MapDef,
+     ) -> Self {
+         let content_hash = {
+-            let mut h = Fnv1a64::new();
++            let mut h = XxHash64::new();
+             h.write_u32(CONTENT_ENCODING_VERSION);
+             encode_rules(&mut h, &rules);
+             encode_entities(&mut h, &entities);
+@@ -262,7 +262,7 @@ impl ContentBundle {
+             h.finish()
+         };
+         let map_hash = {
+-            let mut h = Fnv1a64::new();
++            let mut h = XxHash64::new();
+             h.write_u32(MAP_ID_DOMAIN);
+             encode_map(&mut h, &map);
+             h.finish()
+@@ -285,7 +285,7 @@ impl ContentBundle {
+     /// The canonical content identity of this bundle (plan §6.5 `content_hash`):
+     /// a hash over every canonical field — rules, entities, factions, and the
+     /// whole map including the display-only heightmap — in a fixed
+-    /// little-endian order through `fx::Fnv1a64`, never over `Debug` output or
++    /// little-endian order through `fx::XxHash64`, never over `Debug` output or
+     /// memory layout (plan §5.10).
+     ///
+     /// The heightmap participates even though it cannot alter simulation
+@@ -606,19 +606,19 @@ fn map_flag(map: &defs::MapDef, pick: impl Fn(&defs::TerrainClass) -> bool) -> V
+ 
+ // ---------------------------------------------------------------------------
+ // Canonical encoding (the content hash) — plan §5.10: explicit little-endian
+-// byte encoding through fx::Fnv1a64, fixed field order, never Debug output.
++// byte encoding through fx::XxHash64, fixed field order, never Debug output.
+ // ---------------------------------------------------------------------------
+ 
+-fn encode_str(h: &mut Fnv1a64, text: &str) {
++fn encode_str(h: &mut XxHash64, text: &str) {
+     h.write_u32(text.len() as u32);
+     h.write_bytes(text.as_bytes());
+ }
+ 
+-fn encode_bool(h: &mut Fnv1a64, value: bool) {
++fn encode_bool(h: &mut XxHash64, value: bool) {
+     h.write_u8(u8::from(value));
+ }
+ 
+-fn encode_rules(h: &mut Fnv1a64, rules: &defs::RulesDef) {
++fn encode_rules(h: &mut XxHash64, rules: &defs::RulesDef) {
+     encode_str(h, &rules.id);
+     encode_str(h, &rules.display_name);
+     h.write_u32(rules.resources.len() as u32);
+@@ -634,7 +634,7 @@ fn encode_rules(h: &mut Fnv1a64, rules: &defs::RulesDef) {
+     encode_bool(h, rules.allow_resignation);
+ }
+ 
+-fn encode_entities(h: &mut Fnv1a64, entities: &[defs::EntityDef]) {
++fn encode_entities(h: &mut XxHash64, entities: &[defs::EntityDef]) {
+     h.write_u32(entities.len() as u32);
+     for entity in entities {
+         encode_str(h, &entity.id);
+@@ -653,7 +653,7 @@ fn encode_entities(h: &mut Fnv1a64, entities: &[defs::EntityDef]) {
+     }
+ }
+ 
+-fn encode_capability(h: &mut Fnv1a64, cap: &defs::CapabilityDef) {
++fn encode_capability(h: &mut XxHash64, cap: &defs::CapabilityDef) {
+     match cap {
+         defs::CapabilityDef::Health {
+             max_hp,
+@@ -723,7 +723,7 @@ fn encode_capability(h: &mut Fnv1a64, cap: &defs::CapabilityDef) {
+     }
+ }
+ 
+-fn encode_factions(h: &mut Fnv1a64, factions: &[defs::FactionDef]) {
++fn encode_factions(h: &mut XxHash64, factions: &[defs::FactionDef]) {
+     h.write_u32(factions.len() as u32);
+     for faction in factions {
+         encode_str(h, &faction.id);
+@@ -749,7 +749,7 @@ fn encode_factions(h: &mut Fnv1a64, factions: &[defs::FactionDef]) {
+     }
+ }
+ 
+-fn encode_map(h: &mut Fnv1a64, map: &defs::MapDef) {
++fn encode_map(h: &mut XxHash64, map: &defs::MapDef) {
+     encode_str(h, &map.id);
+     encode_str(h, &map.display_name);
+     h.write_u32(map.width);
+diff --git a/crates/fx/src/hash.rs b/crates/fx/src/hash.rs
+index 874e37b..0ac0ab7 100644
+--- a/crates/fx/src/hash.rs
++++ b/crates/fx/src/hash.rs
+@@ -1,20 +1,277 @@
+-//! FNV-1a 64-bit canonical hasher (plan §5.10, §6.4).
++//! Canonical hashers (plan §5.10, §6.4).
+ //!
+ //! The state hash is computed over a canonical byte encoding — little-endian, fixed
+-//! field order — through this hasher, never over `Debug` output or memory layout.
+-//! FNV-1a is chosen for M0 because it is trivially portable and obviously correct;
+-//! swapping to xxHash64 behind the same API is DEBT-001.
++//! field order — through a hasher from this module, never over `Debug` output or
++//! memory layout.
++//!
++//! Two hashers live here:
++//! - [`XxHash64`] — the canonical hasher since M10.1 (DEBT-001 repaid): the
++//!   state hash, the fixture/content hashes, and the checkpoint digests embed
++//!   its output. The algorithm is Yann Collet's XXH64 (the reference spec),
++//!   implemented in-repo the way the project wrote PCG32: the dependency law
++//!   forbids pulling `twox-hash`, so the ~80 lines are ours. No `unsafe`.
++//! - [`Fnv1a64`] — the M0-era canonical hasher, retained for the replay *file*
++//!   checksum (`crates/replay`'s trailing integrity word — a file-format
++//!   concern, deliberately untouched by the M10.1 swap) and its own golden
++//!   tests.
++//!
++//! Both share the same incremental call surface (`write_*`/`finish`), so the
++//! M10.1 swap was an alias change at the canonical call sites: the byte
++//! encodings the hasher consumes are unchanged — only the digest moved.
++
++/// XXH64 prime 1.
++const PRIME1: u64 = 0x9E37_79B1_85EB_CA87;
++/// XXH64 prime 2.
++const PRIME2: u64 = 0xC2B2_AE3D_27D4_EB4F;
++/// XXH64 prime 3.
++const PRIME3: u64 = 0x1656_67B1_9E37_79F9;
++/// XXH64 prime 4.
++const PRIME4: u64 = 0x85EB_CA77_C2B2_AE63;
++/// XXH64 prime 5.
++const PRIME5: u64 = 0x27D4_EB2F_1656_67C5;
++
++/// The XXH64 accumulator round (spec step 2.2): `rotl64(acc + lane*P2, 31) * P1`.
++#[inline]
++fn round(acc: u64, lane: u64) -> u64 {
++    acc.wrapping_add(lane.wrapping_mul(PRIME2))
++        .rotate_left(31)
++        .wrapping_mul(PRIME1)
++}
++
++/// The merge round applied to each accumulator at digest time (spec step 2.3).
++#[inline]
++fn merge_round(mut acc: u64, val: u64) -> u64 {
++    acc ^= round(0, val);
++    acc.wrapping_mul(PRIME1).wrapping_add(PRIME4)
++}
++
++/// The final avalanche (spec step 4).
++#[inline]
++fn avalanche(mut h: u64) -> u64 {
++    h ^= h >> 33;
++    h = h.wrapping_mul(PRIME2);
++    h ^= h >> 29;
++    h = h.wrapping_mul(PRIME3);
++    h ^= h >> 32;
++    h
++}
++
++#[inline]
++fn read_u64(bytes: &[u8]) -> u64 {
++    let mut lane = [0u8; 8];
++    lane.copy_from_slice(&bytes[..8]);
++    u64::from_le_bytes(lane)
++}
++
++#[inline]
++fn read_u32(bytes: &[u8]) -> u32 {
++    let mut lane = [0u8; 4];
++    lane.copy_from_slice(&bytes[..4]);
++    u32::from_le_bytes(lane)
++}
++
++/// Incremental XXH64 hasher (the canonical hasher since M10.1, DEBT-001).
++///
++/// Feed canonical bytes with the `write_*` methods (integers are encoded
++/// little-endian, matching plan §6.4's canonical form — the same call-site
++/// behavior as [`Fnv1a64`]) and read the digest with [`XxHash64::finish`].
++/// Copyable and restartable at any point; arbitrary write-chunking produces
++/// the same digest as one shot (the streaming-state contract, pinned by
++/// tests).
++#[derive(Clone, Copy, Debug)]
++pub struct XxHash64 {
++    /// The seed (needed at digest time for inputs shorter than one stripe).
++    seed: u64,
++    /// Total bytes absorbed (the digest mixes the length in).
++    total_len: u64,
++    /// The four stripe accumulators, initialized from the seed.
++    v1: u64,
++    v2: u64,
++    v3: u64,
++    v4: u64,
++    /// The carry buffer: whole 32-byte stripes are consumed immediately,
++    /// the sub-stripe tail waits here (never more than 31 bytes).
++    mem: [u8; 32],
++    /// How many bytes of `mem` are live.
++    memsize: u32,
++}
++
++impl XxHash64 {
++    /// A fresh hasher at seed 0 (the canonical state/content hash seed).
++    pub const fn new() -> Self {
++        Self::seeded(0)
++    }
++
++    /// A fresh hasher at `seed` (XXH64 is seedable by design; the golden
++    /// vectors pin at least one nonzero seed).
++    pub const fn seeded(seed: u64) -> Self {
++        Self {
++            seed,
++            total_len: 0,
++            v1: seed.wrapping_add(PRIME1).wrapping_add(PRIME2),
++            v2: seed.wrapping_add(PRIME2),
++            v3: seed,
++            v4: seed.wrapping_sub(PRIME1),
++            mem: [0; 32],
++            memsize: 0,
++        }
++    }
++
++    /// Consumes one whole 32-byte stripe into the four accumulators.
++    fn consume_stripe(&mut self, stripe: &[u8]) {
++        self.v1 = round(self.v1, read_u64(&stripe[0..]));
++        self.v2 = round(self.v2, read_u64(&stripe[8..]));
++        self.v3 = round(self.v3, read_u64(&stripe[16..]));
++        self.v4 = round(self.v4, read_u64(&stripe[24..]));
++    }
++
++    /// Absorbs a byte slice in order. Chunking is free: any sequence of
++    /// `write_bytes` calls over the same byte stream yields the same digest
++    /// as a single call (mirroring [`Fnv1a64::write_bytes`] call-site
++    /// behavior).
++    pub fn write_bytes(&mut self, bytes: &[u8]) {
++        self.total_len = self.total_len.wrapping_add(bytes.len() as u64);
++
++        // Short writes that cannot complete a stripe just extend the tail.
++        if (self.memsize as u64) + (bytes.len() as u64) < 32 {
++            let start = self.memsize as usize;
++            self.mem[start..start + bytes.len()].copy_from_slice(bytes);
++            self.memsize += bytes.len() as u32;
++            return;
++        }
++
++        let mut input = bytes;
++        // Complete the buffered stripe first, so the accumulators advance on
++        // whole stripes only.
++        if self.memsize > 0 {
++            let fill = 32 - self.memsize as usize;
++            self.mem[32 - fill..].copy_from_slice(&input[..fill]);
++            let stripe = self.mem;
++            self.consume_stripe(&stripe);
++            input = &input[fill..];
++            self.memsize = 0;
++        }
++        // Whole stripes straight from the input.
++        while input.len() >= 32 {
++            self.consume_stripe(&input[..32]);
++            input = &input[32..];
++        }
++        // Park the sub-stripe tail.
++        self.mem[..input.len()].copy_from_slice(input);
++        self.memsize = input.len() as u32;
++    }
++
++    /// Absorbs a `u8` (single byte, identity encoding).
++    pub fn write_u8(&mut self, n: u8) {
++        self.write_bytes(&[n]);
++    }
++
++    /// Absorbs a `u16`, little-endian.
++    pub fn write_u16(&mut self, n: u16) {
++        self.write_bytes(&n.to_le_bytes());
++    }
++
++    /// Absorbs a `u32`, little-endian.
++    pub fn write_u32(&mut self, n: u32) {
++        self.write_bytes(&n.to_le_bytes());
++    }
++
++    /// Absorbs a `u64`, little-endian.
++    pub fn write_u64(&mut self, n: u64) {
++        self.write_bytes(&n.to_le_bytes());
++    }
++
++    /// Absorbs an `i32` via its bit pattern, little-endian.
++    pub fn write_i32(&mut self, n: i32) {
++        self.write_bytes(&n.to_le_bytes());
++    }
++
++    /// Absorbs an `i64` via its bit pattern, little-endian.
++    pub fn write_i64(&mut self, n: i64) {
++        self.write_bytes(&n.to_le_bytes());
++    }
++
++    /// The digest of everything absorbed so far (XXH64 steps 3-4: merge the
++    /// accumulators for long inputs or seed+PRIME5 for short ones, mix the
++    /// total length, then process the buffered tail and avalanche).
++    pub fn finish(self) -> u64 {
++        let mut h = if self.total_len >= 32 {
++            let merged = self
++                .v1
++                .rotate_left(1)
++                .wrapping_add(self.v2.rotate_left(7))
++                .wrapping_add(self.v3.rotate_left(12))
++                .wrapping_add(self.v4.rotate_left(18));
++            let merged = merge_round(merged, self.v1);
++            let merged = merge_round(merged, self.v2);
++            let merged = merge_round(merged, self.v3);
++            merge_round(merged, self.v4)
++        } else {
++            self.seed.wrapping_add(PRIME5)
++        };
++        h = h.wrapping_add(self.total_len);
++
++        // The buffered tail (at most 31 bytes): 8-byte lanes, then a 4-byte
++        // lane, then single bytes.
++        let mut pos = 0usize;
++        let mut len = self.memsize as usize;
++        while len >= 8 {
++            h ^= round(0, read_u64(&self.mem[pos..]));
++            h = h.rotate_left(27).wrapping_mul(PRIME1).wrapping_add(PRIME4);
++            pos += 8;
++            len -= 8;
++        }
++        if len >= 4 {
++            h ^= u64::from(read_u32(&self.mem[pos..])).wrapping_mul(PRIME1);
++            h = h.rotate_left(23).wrapping_mul(PRIME2).wrapping_add(PRIME3);
++            pos += 4;
++            len -= 4;
++        }
++        while len > 0 {
++            h ^= u64::from(self.mem[pos]).wrapping_mul(PRIME5);
++            h = h.rotate_left(11).wrapping_mul(PRIME1);
++            pos += 1;
++            len -= 1;
++        }
++        avalanche(h)
++    }
++}
++
++impl Default for XxHash64 {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++/// One-shot XXH64 hash of a byte slice (seed 0).
++pub fn xxhash64(bytes: &[u8]) -> u64 {
++    let mut h = XxHash64::new();
++    h.write_bytes(bytes);
++    h.finish()
++}
++
++/// One-shot seeded XXH64 hash of a byte slice.
++pub fn xxhash64_seeded(bytes: &[u8], seed: u64) -> u64 {
++    let mut h = XxHash64::seeded(seed);
++    h.write_bytes(bytes);
++    h.finish()
++}
++
++// ---------------------------------------------------------------------------
++// FNV-1a 64 — the M0-era canonical hasher (plan §5.10), retained for the
++// replay file checksum (a file-format concern, not the canonical state hash).
++// ---------------------------------------------------------------------------
+ 
+ /// FNV-1a 64 offset basis.
+-const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
++const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+ /// FNV-1a 64 prime.
+-const PRIME: u64 = 0x0000_0100_0000_01b3;
++const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+ 
+ /// Incremental FNV-1a 64-bit hasher.
+ ///
+ /// Feed canonical bytes with the `write_*` methods (integers are encoded
+-/// little-endian, matching plan §6.4's canonical form) and read the digest with
+-/// [`Fnv1a64::finish`]. Copyable and restartable at any point.
++/// little-endian, matching plan §6.4's canonical form) and read the digest
++/// with [`Fnv1a64::finish`]. Copyable and restartable at any point.
+ #[derive(Clone, Copy, Debug)]
+ pub struct Fnv1a64 {
+     state: u64,
+@@ -24,7 +281,7 @@ impl Fnv1a64 {
+     /// A fresh hasher at the offset basis.
+     pub const fn new() -> Self {
+         Self {
+-            state: OFFSET_BASIS,
++            state: FNV_OFFSET_BASIS,
+         }
+     }
+ 
+@@ -32,7 +289,7 @@ impl Fnv1a64 {
+     pub fn write_bytes(&mut self, bytes: &[u8]) {
+         for &b in bytes {
+             self.state ^= u64::from(b);
+-            self.state = self.state.wrapping_mul(PRIME);
++            self.state = self.state.wrapping_mul(FNV_PRIME);
+         }
+     }
+ 
+@@ -87,10 +344,118 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::{fnv1a64, Fnv1a64};
++    use super::{fnv1a64, xxhash64, xxhash64_seeded, Fnv1a64, XxHash64};
++
++    /// The input `0..len` byte sequence at a given length.
++    fn sequence(len: usize) -> Vec<u8> {
++        (0..len as u8).collect()
++    }
++
++    #[test]
++    fn golden_vectors_from_the_reference() {
++        // Reference XXH64 vectors over the `0..len` byte sequences — the
++        // reference test shape (stripe boundaries 31/32/33 included), values
++        // generated by the official xxhash Python binding wrapping Yann
++        // Collet's reference implementation, plus the published
++        // empty-input (0xEF46DB3751D8E999) and "abc" (0x44BC2CF5AD770999)
++        // vectors as cross-checks below.
++        let vectors: &[(usize, u64, u64)] = &[
++            // (len, seed 0 digest, seed 1 digest)
++            (0, 0xEF46_DB37_51D8_E999, 0xD5AF_BA13_36A3_BE4B),
++            (1, 0xE934_A84A_DB05_2768, 0x7719_17C7_F6EE_2451),
++            (14, 0x5CDA_8B69_BBFC_1D45, 0x9744_EC47_2BD1_5C83),
++            (31, 0xC346_D2B5_9B4D_8EE1, 0xF031_031D_6597_7DFC),
++            (32, 0xCBF5_9C51_16FF_32B4, 0xD74E_6766_CE9D_BA94),
++            (33, 0x0C53_5D1A_CAFB_8EAD, 0xA371_825F_4210_FE99),
++            (100, 0x6AC1_E580_3216_6597, 0x3D19_A3A2_098A_7023),
++            (222, 0x88FF_0DAD_A4BF_A877, 0x2D04_D8C1_6E56_2039),
++        ];
++        for (len, want_zero, want_one) in vectors {
++            let data = sequence(*len);
++            assert_eq!(xxhash64(&data), *want_zero, "seed 0 at len {len}");
++            assert_eq!(xxhash64_seeded(&data, 1), *want_one, "seed 1 at len {len}");
++        }
++        // The published "abc" vector (seed 0) cross-checks the reference.
++        assert_eq!(xxhash64(b"abc"), 0x44BC_2CF5_AD77_0999);
++    }
++
++    #[test]
++    fn incremental_matches_one_shot_at_every_split() {
++        // The streaming-state contract: any chunking of the same byte stream
++        // digests to the one-shot value. Covers the carry buffer's fill,
++        // complete, and re-fill paths at every boundary.
++        let data = sequence(222);
++        for split in 0..=data.len() {
++            let mut h = XxHash64::new();
++            h.write_bytes(&data[..split]);
++            h.write_bytes(&data[split..]);
++            assert_eq!(h.finish(), xxhash64(&data), "split at {split}");
++        }
++    }
+ 
+     #[test]
+-    fn golden_vectors_from_the_fnv_reference() {
++    fn incremental_matches_one_shot_chunked() {
++        // Byte-at-a-time and ragged multi-chunk writes across the stripe
++        // boundary, at both zero and nonzero seeds.
++        let data = sequence(100);
++        let mut h = XxHash64::new();
++        for byte in &data {
++            h.write_u8(*byte);
++        }
++        assert_eq!(h.finish(), xxhash64(&data));
++        let mut h = XxHash64::seeded(1);
++        for chunk in data.chunks(7) {
++            h.write_bytes(chunk);
++        }
++        assert_eq!(h.finish(), xxhash64_seeded(&data, 1));
++    }
++
++    #[test]
++    fn integer_writes_are_little_endian() {
++        for n in [0u32, 1, 0xDEAD_BEEF, u32::MAX] {
++            let mut a = XxHash64::new();
++            a.write_u32(n);
++            let mut b = XxHash64::new();
++            b.write_bytes(&n.to_le_bytes());
++            assert_eq!(a.finish(), b.finish());
++        }
++        for n in [0i64, -1, i64::MIN, i64::MAX] {
++            let mut a = XxHash64::new();
++            a.write_i64(n);
++            let mut b = XxHash64::new();
++            b.write_bytes(&n.to_le_bytes());
++            assert_eq!(a.finish(), b.finish());
++        }
++    }
++
++    #[test]
++    fn changing_any_byte_changes_the_digest() {
++        let a = xxhash64(b"pandemonium");
++        let b = xxhash64(b"pandemoniuN");
++        let c = xxhash64(b"pandemoniu");
++        assert_ne!(a, b);
++        assert_ne!(a, c);
++    }
++
++    #[test]
++    fn default_is_a_fresh_hasher() {
++        let h: XxHash64 = Default::default();
++        assert_eq!(h.finish(), xxhash64(b""));
++    }
++
++    #[test]
++    fn the_seed_matters() {
++        let data = sequence(40);
++        assert_ne!(xxhash64(&data), xxhash64_seeded(&data, 1));
++        // Short inputs take the seed+PRIME5 branch — the seed must survive
++        // even when no stripe was ever consumed.
++        assert_ne!(xxhash64(b""), xxhash64_seeded(b"", 1));
++    }
++
++    // -- FNV-1a (retained: the replay file checksum) -----------------------
++
++    #[test]
++    fn fnv_golden_vectors_from_the_fnv_reference() {
+         // Published FNV-1a 64 test vectors (isthe.com/chongo/tech/comp/fnv).
+         assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+         assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+@@ -98,7 +463,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn incremental_matches_one_shot() {
++    fn fnv_incremental_matches_one_shot() {
+         let mut h = Fnv1a64::new();
+         h.write_bytes(b"foo");
+         h.write_bytes(b"bar");
+@@ -106,7 +471,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn integer_writes_are_little_endian() {
++    fn fnv_integer_writes_are_little_endian() {
+         for n in [0u32, 1, 0xDEAD_BEEF, u32::MAX] {
+             let mut a = Fnv1a64::new();
+             a.write_u32(n);
+@@ -124,17 +489,17 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn changing_any_byte_changes_the_digest() {
+-        let a = fnv1a64(b"pandemonium");
+-        let b = fnv1a64(b"pandemoniuN");
+-        let c = fnv1a64(b"pandemoniu");
+-        assert_ne!(a, b);
+-        assert_ne!(a, c);
++    fn fnv_default_is_a_fresh_hasher() {
++        let h: Fnv1a64 = Default::default();
++        assert_eq!(h.finish(), fnv1a64(b""));
+     }
+ 
+     #[test]
+-    fn default_is_a_fresh_hasher() {
+-        let h: Fnv1a64 = Default::default();
+-        assert_eq!(h.finish(), fnv1a64(b""));
++    fn the_two_hashers_disagree_on_a_shared_input() {
++        // The M10.1 swap must change every digest: same bytes, different
++        // algorithms. If these ever agree, the canonical pins would not move
++        // and the swap would be a no-op worth investigating.
++        let data = sequence(64);
++        assert_ne!(xxhash64(&data), fnv1a64(&data));
+     }
+ }
+diff --git a/crates/fx/src/lib.rs b/crates/fx/src/lib.rs
+index 7016974..8d29502 100644
+--- a/crates/fx/src/lib.rs
++++ b/crates/fx/src/lib.rs
+@@ -10,7 +10,8 @@
+ //! - `Vec2Fx`: 2D fixed-point vector (tile units).
+ //! - `isqrt`: exact integer square root.
+ //! - `Rng`: PCG32 deterministic random generator.
+-//! - `Fnv1a64`: FNV-1a 64-bit canonical hasher.
++//! - `XxHash64`: xxHash64 — the canonical hasher (since M10.1, DEBT-001).
++//! - `Fnv1a64`: FNV-1a 64-bit — the replay file checksum.
+ 
+ #![forbid(unsafe_code)]
+ #![deny(
+@@ -27,7 +28,7 @@ mod sqrt;
+ mod vec;
+ 
+ pub use fixed::{Fx, FRAC_BITS, FRAC_SCALE};
+-pub use hash::{fnv1a64, Fnv1a64};
++pub use hash::{fnv1a64, xxhash64, xxhash64_seeded, Fnv1a64, XxHash64};
+ pub use rng::Rng;
+ pub use sqrt::isqrt;
+ pub use vec::Vec2Fx;
+diff --git a/crates/fx/tests/properties.rs b/crates/fx/tests/properties.rs
+index c168ee4..c788e9c 100644
+--- a/crates/fx/tests/properties.rs
++++ b/crates/fx/tests/properties.rs
+@@ -1,7 +1,7 @@
+ //! Property tests for the fx crate (plan §6.1): conversion round-trips, arithmetic
+ //! laws where they are expected to hold, and no panics on extremes.
+ 
+-use pandemonium_fx::{fnv1a64, isqrt, Fnv1a64, Fx, Rng, Vec2Fx};
++use pandemonium_fx::{fnv1a64, isqrt, xxhash64, Fnv1a64, Fx, Rng, Vec2Fx, XxHash64};
+ use proptest::prelude::*;
+ 
+ proptest! {
+@@ -156,6 +156,23 @@ proptest! {
+         prop_assert_eq!(h.finish(), fnv1a64(&b));
+     }
+ 
++    /// The canonical hasher's streaming state equals its one-shot digest for
++    /// arbitrary bytes and arbitrary two-way chunkings (M10.1, DEBT-001: the
++    /// canonical call sites feed many small writes, so chunking-invariance is
++    /// the load-bearing property).
++    #[test]
++    fn xxhash64_incremental_matches_one_shot(
++        b in proptest::collection::vec(any::<u8>(), 0..256),
++        split in proptest::num::usize::ANY,
++    ) {
++        let split = if b.is_empty() { 0 } else { split % b.len() };
++        let (l, r) = b.split_at(split);
++        let mut h = XxHash64::new();
++        h.write_bytes(l);
++        h.write_bytes(r);
++        prop_assert_eq!(h.finish(), xxhash64(&b));
++    }
++
+     /// Every integer-write method matches the canonical little-endian byte
+     /// encoding (plan §5.10) — the property the state hash (sim/src/hash.rs)
+     /// and the replay codec (replay/src/bytes.rs) both depend on. The unit
+diff --git a/crates/sim/src/fixture.rs b/crates/sim/src/fixture.rs
+index 1c2b770..6a22e7f 100644
+--- a/crates/sim/src/fixture.rs
++++ b/crates/sim/src/fixture.rs
+@@ -11,7 +11,7 @@
+ //! second, radii in milli-tiles, durations implicitly in ticks; the simulator
+ //! converts them to fixed point once, at world construction.
+ 
+-use pandemonium_fx::{Fnv1a64, Fx};
++use pandemonium_fx::{Fx, XxHash64};
+ use pandemonium_sim_api::{KindId, PlayerId, ResourceId, Tick, Vec2Fx};
+ 
+ use crate::world::{BuildDef, GatherDef, PopulationDef, ProduceDef, StorageDef, VisionDef};
+@@ -80,7 +80,7 @@ impl TrivialWorld {
+     /// fixed little-endian order. Replays record it so a replay can be checked
+     /// against the world it was recorded on (plan §6.5 `content_hash`).
+     pub fn content_hash(&self) -> u64 {
+-        let mut h = Fnv1a64::new();
++        let mut h = XxHash64::new();
+         h.write_u32(FIXTURE_ENCODING_VERSION);
+         h.write_u64(self.map_id);
+         h.write_u32(self.width_tiles);
+@@ -149,7 +149,7 @@ pub struct KindEconomy {
+ 
+ impl KindEconomy {
+     /// Encodes the economy block into the fixture hash.
+-    fn encode(&self, h: &mut Fnv1a64) {
++    fn encode(&self, h: &mut XxHash64) {
+         h.write_u32(self.cost.len() as u32);
+         for (resource, amount) in &self.cost {
+             h.write_u32(resource.0);
+@@ -264,7 +264,7 @@ pub enum CapTemplate {
+ 
+ impl CapTemplate {
+     /// Encodes one template into the fixture hash (fixed tag + fields).
+-    fn encode(&self, h: &mut Fnv1a64) {
++    fn encode(&self, h: &mut XxHash64) {
+         match self {
+             CapTemplate::Health {
+                 max_hp,
+@@ -435,7 +435,7 @@ pub struct SpawnDef {
+ 
+ impl SpawnDef {
+     /// Encodes one spawn into the fixture hash.
+-    fn encode(self, h: &mut Fnv1a64) {
++    fn encode(self, h: &mut XxHash64) {
+         h.write_u8(self.owner.0);
+         h.write_u32(self.kind.0);
+         h.write_i32(self.pos.x.raw());
+diff --git a/crates/sim/src/hash.rs b/crates/sim/src/hash.rs
+index 8921ff6..13a5fbe 100644
+--- a/crates/sim/src/hash.rs
++++ b/crates/sim/src/hash.rs
+@@ -1,5 +1,5 @@
+ //! The canonical state hash (plan §6.4): an explicit little-endian byte encoding
+-//! of the simulation state, in a fixed field order, through `fx::Fnv1a64` — never
++//! of the simulation state, in a fixed field order, through `fx::XxHash64` — never
+ //! `Debug` output, never memory layout.
+ //!
+ //! What is encoded (the plan's list, minus state that does not exist yet):
+@@ -13,7 +13,7 @@
+ //! shows up as a golden-hash change in review (tests/determinism.rs) rather than
+ //! as a silent value shift.
+ 
+-use pandemonium_fx::{Fnv1a64, Rng};
++use pandemonium_fx::{Rng, XxHash64};
+ use pandemonium_sim_api::Tick;
+ 
+ use crate::world::{CapabilityData, Order, World};
+@@ -31,7 +31,7 @@ pub(crate) const STATE_ENCODING_VERSION: u32 = 4;
+ 
+ /// Encodes the whole state into the hasher, in canonical order.
+ pub(crate) fn hash_state(world: &World, tick: Tick, rng: &Rng, next_entity_id: u64) -> u64 {
+-    let mut h = Fnv1a64::new();
++    let mut h = XxHash64::new();
+     h.write_u32(STATE_ENCODING_VERSION);
+     h.write_u32(tick);
+     let (state, inc) = rng.state_parts();
+@@ -170,7 +170,7 @@ pub(crate) fn hash_state(world: &World, tick: Tick, rng: &Rng, next_entity_id: u
+     h.finish()
+ }
+ 
+-fn encode_order(h: &mut Fnv1a64, order: &Order) {
++fn encode_order(h: &mut XxHash64, order: &Order) {
+     match order {
+         Order::MoveTo { target } => {
+             h.write_u8(1);
+diff --git a/crates/tools/src/ai_match.rs b/crates/tools/src/ai_match.rs
+index 5c94a8a..4aa028f 100644
+--- a/crates/tools/src/ai_match.rs
++++ b/crates/tools/src/ai_match.rs
+@@ -341,6 +341,8 @@ mod tests {
+             match_result.replay.checkpoints.len(),
+             (7200 / 30) as usize + 1
+         );
+-        assert_eq!(match_result.replay.final_hash, 0x01b3_b60b_741f_03e9);
++        // Re-pinned M10.1: canonical hasher FNV-1a -> xxHash64 (DEBT-001
++        // repaid); encoding unchanged, algorithm moved. See docs/DEBT.md.
++        assert_eq!(match_result.replay.final_hash, 0x6e9a_18bd_7c5f_699f);
+     }
+ }
+diff --git a/docs/ALPHA_DECLARATION.md b/docs/ALPHA_DECLARATION.md
+index 69153f5..057185a 100644
+--- a/docs/ALPHA_DECLARATION.md
++++ b/docs/ALPHA_DECLARATION.md
+@@ -42,8 +42,8 @@ through the whole series):
+ 
+ | # | Criterion | Verdict | Evidence |
+ |---|-----------|---------|----------|
+-| A1 | Determinism: same seed + log → byte-identical hash | **PASS** | `tests/determinism.rs` (A1 acceptance, two in-process runs + pinned golden hashes, cross-platform via CI matrix in dev and release). Golden pins re-verified on this commit: demo (seed 7, 300 ticks) `0x9d5ba9b565060336`; AI flagship (seed 7, 7200 ticks) `0x01b3b60b741f03e9` — both unchanged through the entire M9.1→M10 series. |
+-| A2 | Replay: a recorded match replays to identical final hash | **PASS** | `tools headless --record` + `tools replay-verify` (re-run for this declaration: PASS, 11 checkpoints, final hash `0x9d5ba9b565060336`); CI's `replay` job runs the round-trip for both the demo and an AI-vs-AI match on every push. |
++| A1 | Determinism: same seed + log → byte-identical hash | **PASS** | `tests/determinism.rs` (A1 acceptance, two in-process runs + pinned golden hashes, cross-platform via CI matrix in dev and release). Golden pins on this commit (re-pinned at M10.1 by the canonical hasher swap, FNV-1a → xxHash64 — DEBT-001 repaid; the M9.1→M10 series had verified the FNV-era values bit-identical): demo (seed 7, 300 ticks) `0xb6fff6659cfb7709`; AI flagship (seed 7, 7200 ticks) `0x6e9a18bd7c5f699f`. |
++| A2 | Replay: a recorded match replays to identical final hash | **PASS** | `tools headless --record` + `tools replay-verify` (re-run for this declaration at its FNV-era value: PASS, 11 checkpoints; the M10.1 hasher swap re-pins the final hash to `0xb6fff6659cfb7709` and the round-trip re-verified green after the swap); CI's `replay` job runs the round-trip for both the demo and an AI-vs-AI match on every push. |
+ | A3 | Add-a-unit is data-only | **PASS** | `tests/content_pipeline.rs::add_a_unit_is_data_only` — loads, spawns, trains from a barracks, and fights through the auto-acquire pipeline; the sim source scan finds no trace of the kind; the fixture commit shows zero diffs under `crates/sim/`. |
+ | A4 | Add-a-map is data-only | **PASS** | `tests/content_pipeline.rs::add_a_map_is_data_only` (landed this milestone — the sweep found the test missing and wrote it): a new 48x48 map with a rock spine, starts, ore nodes, and a display-only heightmap loads, moves the map identity, drives the sim's passability grid, and runs a Move — zero code changes. |
+ | A5 | AI parity: AI acts only through Commands | **PASS** | `tests/ai.rs` — the A5 structural audits (ai depends only on fx + sim_api; the sim never references the ai crate) and the ledger identity (starting + deliveries − accepted costs holds per player). Parity is compile-time, not policy. |
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 1626cc1..9b17d14 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -12,7 +12,7 @@ exists versus what is pending, see [`AI-Handoff.md`](../AI-Handoff.md).
+ 
+ | Crate | Role (plan §4) | Depends on |
+ |-------|----------------|------------|
+-| `crates/fx` | Fixed-point math (`Fx`, `Vec2Fx`), integer sqrt, PCG32 RNG, FNV-1a hasher | nothing |
++| `crates/fx` | Fixed-point math (`Fx`, `Vec2Fx`), integer sqrt, PCG32 RNG, xxHash64 canonical hasher (M10.1; FNV-1a kept for the replay checksum) | nothing |
+ | `crates/sim_api` | Public vocabulary crossing the sim boundary: ids, commands, events, views | fx |
+ | `crates/sim` | World state, entity store, capabilities, tick pipeline, systems, state hash | fx, sim_api |
+ | `crates/content` | RON schema, versioned loaders, validators, content bundle + hash | fx, sim, sim_api + serde, ron, thiserror |
+@@ -59,7 +59,8 @@ enforcement). See [`ASSUMPTIONS.md`](ASSUMPTIONS.md).
+ - All randomness flows from `fx::Rng` (PCG32), seeded from the match seed and owned
+   by the simulation state, advanced in a fixed order.
+ - State hashing is an explicit canonical little-endian byte encoding through
+-  `fx::Fnv1a64` — never `Debug` output or memory layout (plan §6.4).
++  `fx::XxHash64` (since M10.1; FNV-1a before — DEBT-001 repaid) — never `Debug`
++  output or memory layout (plan §6.4).
+ 
+ ## The boundary the whole design hangs on
+ 
+@@ -138,7 +139,7 @@ crates/sim/src/
+                shared by the gate and player_view().
+   hash.rs      The canonical state hash (plan §6.4): little-endian, fixed field
+                order, entity-major with a capability presence bitmask (u16,
+-               eleven slots), through fx::Fnv1a64; carries
++               eleven slots), through fx::XxHash64 (xxHash64 since M10.1); carries
+                STATE_ENCODING_VERSION = 4 (the economy capability blocks, the
+                GatherAt/BuildAt orders, the UnderConstruction lifecycle, the
+                Attack capability block + AttackUnit order — M6).
+@@ -220,8 +221,9 @@ crates/content/src/
+                start over free terrain), and the declared 180-degree symmetry
+                check (grid + ore tile multiset + mirrored anchors).
+   bundle.rs    ContentTree (everything in a directory) and ContentBundle (one
+-               match's content): the canonical content hash and map id (FNV-1a
+-               over an explicit little-endian encoding, plan §5.10) and world()
++               match's content): the canonical content hash and map id (xxHash64
++               over an explicit little-endian encoding, plan §5.10; FNV-1a before
++               M10.1) and world()
+                — the plain TrivialWorld the simulation receives.
+ ```
+ 
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 0a9e604..7b4380a 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -739,3 +739,17 @@ confirms or rejects it.
+   stuck (an evidence run showed 4 of 32 "unresolved" that all resolve by
+   36000). The default is now 36000 and the report's end-tick telemetry reads
+   the tick `MatchEnded` fired.
++
++- **A-087 (§6.4/§6.5, DEBT-001, M10.1).** The canonical hasher swapped
++  FNV-1a → xxHash64 (DEBT-001 repaid) without bumping
++  `STATE_ENCODING_VERSION` or the replay `format_version`: the canonical
++  byte encodings (field set, order, little-endian form) are unchanged —
++  only the digest algorithm moved, so an old reader's layout knowledge
++  stays valid. No `*.pdrp` replay files existed anywhere at swap time
++  (verified by search), so nothing in the wild can hold a stale digest.
++  The replay file's trailing *integrity checksum* deliberately remains
++  FNV-1a: it guards the file's bytes (a file-format concern), not the
++  simulation's canonical state, and swapping it would move the format
++  for no acceptance value. The swap is the pass's one hash-moving
++  commit; every subsequent task re-verifies zero golden movement
++  against the new pins.
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index bc01881..591d35f 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -9,7 +9,7 @@ repay-when trigger | status |`
+ 
+ | id | what | category | why now | replacement plan | repay-when trigger | status |
+ |----|------|----------|---------|------------------|--------------------|--------|
+-| DEBT-001 | Canonical hasher is FNV-1a 64-bit, not xxHash64 | simplification | trivial, obviously-correct implementation fits M0; at Alpha state sizes a 64-bit collision is a non-issue | swap the algorithm behind the same `fx::hash` API surface (state hash call sites are unaffected) | M10 hash baselines, or any suspected hash collision | open |
++| DEBT-001 | ~~Canonical hasher is FNV-1a 64-bit, not xxHash64~~ repaid (M10.1): `fx::XxHash64` (the reference XXH64 algorithm, implemented in-repo behind the same `write_*`/`finish` surface) is now the canonical hasher for the state hash, the fixture/content hashes, and the checkpoint digests; golden-tested against reference vectors (stripe boundaries 31/32/33, a nonzero seed) plus a chunking-invariance property. The swap was the pass's single hash-moving commit — every pinned golden re-pinned with its written reason; `STATE_ENCODING_VERSION` and the replay `format_version` are unchanged (byte layouts identical, only the digest moved — A-087; no replay files existed in the wild at swap time). `Fnv1a64` remains for the replay *file* checksum (a file-format concern, not the canonical state hasher) | simplification | repaid as M10.1 Task 1 (the M10 hash baselines trigger fired) | — | — | repaid (M10.1) |
+ | DEBT-002 | `Vec2Fx::normalized` loses precision for very short vectors (integer-sqrt floor error dominates below ~2^12 raw length) | simplification | real facing/direction vectors are thousands of raw units long, where the error is under 0.1% | precision-boosted path (sqrt of a shifted sum of squares) or a wider intermediate inside `normalized` | M4 steering work shows directional drift | open |
+ | DEBT-003 | ~~M1 movement is a placeholder straight-line mover~~ repaid: M4 landed the three-layer movement contract (plan §9.1) — nav grid + A* with deterministic tie-breaks, waypoint steering with a terrain guard, spatial-hash push-apart, stuck escalation with `MoveFailed`; exit tests green (tests/movement.rs) | simplification | repaid as M4's whole scope | — | — | repaid (M4) |
+ | DEBT-004 | ~~Vision/visibility (`visible_to`, `player_view`) recomputes the full radius scan on every call~~ repaid (M6): `crates/sim/src/vision.rs` lands the three-state per-player per-tile model (Hidden/Explored/Visible) maintained incrementally in stage 9; `player_view` consults the cached fog state instead of the M1 on-demand scan. The per-tick pass is O(N*V) (N=players, V=vision area) — cheaper than per-tile incremental at Alpha entity counts, with the same observable result. A truly incremental scheme (only recompute tiles whose vision status changed) waits for a profile-driven need | simplification | repaid as M6's vision work | — | — | repaid (M6) |
+diff --git a/tests/ai.rs b/tests/ai.rs
+index 604f7ba..821d298 100644
+--- a/tests/ai.rs
++++ b/tests/ai.rs
+@@ -1038,10 +1038,15 @@ fn ai_vs_ai_golden_hash_is_pinned() {
+     // wave never parks), focuses the sighted enemy command center, and
+     // marches waves of ten with an army cap of sixteen — controller
+     // decisions are canonical hashed state, so the trail moves again.
+-    // Tick 0 is still the untouched 0x6161_3bca_16b8_f00e.
++    // Tick 0 was still the untouched 0x6161_3bca_16b8_f00e.
++    //
++    // M10.1 re-pin (written reason): the canonical hasher moved FNV-1a ->
++    // xxHash64 (DEBT-001 repaid). Every digest moves — including tick 0 —
++    // while the encoded bytes are unchanged (no encoding bump; see
++    // docs/DEBT.md and docs/ASSUMPTIONS.md A-087).
+     assert_eq!(run.checkpoints.len(), (FLAGSHIP_TICKS / 30) as usize + 1);
+-    assert_eq!(run.checkpoints[0].hash, 0x6161_3bca_16b8_f00e);
+-    assert_eq!(run.final_hash, 0x01b3_b60b_741f_03e9);
++    assert_eq!(run.checkpoints[0].hash, 0x71a9_24ad_5799_e4b3);
++    assert_eq!(run.final_hash, 0x6e9a_18bd_7c5f_699f);
+     assert_eq!(run.final_hash, run.checkpoints.last().unwrap().hash);
+ }
+ 
+diff --git a/tests/determinism.rs b/tests/determinism.rs
+index 6e0154a..0824042 100644
+--- a/tests/determinism.rs
++++ b/tests/determinism.rs
+@@ -494,13 +494,15 @@ fn a1_golden_hashes_are_pinned() {
+     let script = acceptance_script();
+     let run = run_match(&world, &setup, &script, TICKS);
+ 
+-    // Regenerated for M6 (state encoding v4: the Attack capability block +
+-    // AttackUnit order; fixture encoding v4: Attack CapTemplate) — see
+-    // docs/ASSUMPTIONS.md A-056.
++    // Re-pinned M10.1: canonical hasher FNV-1a -> xxHash64 (DEBT-001 repaid);
++    // encoding unchanged, algorithm moved. See docs/DEBT.md.
++    // (Prior history: regenerated for M6 — state encoding v4: the Attack
++    // capability block + AttackUnit order; fixture encoding v4: Attack
++    // CapTemplate — see docs/ASSUMPTIONS.md A-056.)
+     let golden: &[(u32, u64)] = &[
+-        (0, 0x20EB18080A514366),
+-        (30, 0x09149ED9FC29C507),
+-        (60, 0x9719C3BDD713159E),
++        (0, 0x5A467269B78F6B93),
++        (30, 0x2BCCEA8144F1ED96),
++        (60, 0x732E7B725B0F4E26),
+     ];
+     assert_eq!(run.checkpoints.len(), 4, "tick 0 + 30 + 60 + final 65");
+     for (want_tick, want_hash) in golden {
+@@ -511,7 +513,7 @@ fn a1_golden_hashes_are_pinned() {
+             .unwrap_or_else(|| panic!("missing checkpoint at tick {want_tick}"));
+         assert_eq!(found.hash, *want_hash, "golden hash at tick {want_tick}");
+     }
+-    assert_eq!(run.final_hash, 0xAA8857A41E6B757E);
++    assert_eq!(run.final_hash, 0xC5F543CFA16BA2B4); // re-pinned M10.1 (DEBT-001)
+     assert_eq!(run.next_entity_id, 9);
+ }
+ 
+diff --git a/tests/match_rules.rs b/tests/match_rules.rs
+index c4d5060..dd0693e 100644
+--- a/tests/match_rules.rs
++++ b/tests/match_rules.rs
+@@ -263,7 +263,9 @@ fn stage_10_does_not_change_the_m7_golden_checkpoint_trail() {
+     while host.tick() < 7200 {
+         host.advance();
+     }
+-    assert_eq!(host.state_hash(), 0x01b3_b60b_741f_03e9);
++    // Re-pinned M10.1: canonical hasher FNV-1a -> xxHash64 (DEBT-001 repaid);
++    // encoding unchanged, algorithm moved. See docs/DEBT.md.
++    assert_eq!(host.state_hash(), 0x6e9a_18bd_7c5f_699f);
+ }
+ 
+ // ---------------------------------------------------------------------------
+-- 
+2.47.3
+
+
+From 491106e35a72d7f7930f954aa61e10af117bba3c Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <331263527+elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 10:22:44 +0000
+Subject: [PATCH 2/5] =?UTF-8?q?feat(client):=20--seed,=20--record,=20and?=
+ =?UTF-8?q?=20the=20F8=20bug-report=20dump=20(plan=20=C2=A711.6)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The README promises "a report that includes the seed and the tick is a
+reproducible incident" — the windowed client could not produce that
+report. Now it can, and A14 gets its evidence channel:
+
+- `--seed <u64>` (default 7, mirroring --frames's parser conventions)
+  threads into the MatchSetup; restart keeps reproducing the same match
+  (the controller seeds derive from it, A15's property).
+- `--record <path>` writes the run's replay at match end / clean exit /
+  window close (the exiting hook), assembled exactly like the tools'
+  AI-match recorder — content hash, map id, the host's command log
+  (rejections included), the checkpoint trail collected from the
+  per-frame outcomes, the forced final hash. `tools replay-verify`
+  accepts the file (A2 at the client seam).
+- **F8 — the §11.6 deterministic bug-report dump**: a
+  `pandemonium-report-<seed>-tick<tick>.pdrp` replay record plus a
+  sidecar `…-info.txt` (seed, tick, content hash, map id, player
+  slot, frame count, selection size, the controls line in effect —
+  no wall-clock, no paths), written beside --record's path or the
+  working directory, both filenames printed, with the existing ping
+  cue so the tester sees it wrote. Works while paused (the dump reads
+  current state).
+
+The assembly lives in the new client module `report.rs` as pure
+functions over host state (replay_record, sidecar_text, report_stem,
+write_files) with the tests: the record decodes and re-simulates to
+identical hashes (the A2 pattern), F8 during pause produces a valid
+record, the sidecar is deterministic per state, the stem is a pure
+function. Parser tests cover --seed (valid / missing / garbage),
+--record, and --frames's new slice signature. Zero golden movement —
+client-only (the repo pins re-verified bit-identical).
+
+Windowed verification under Xvfb + llvmpipe with XTEST injection
+(DEBT-008's recipe): --seed 42 runs and diverges from seed 7; --record
+writes at the --frames exit and replay-verifies PASS; two F8 presses
+land (one mid-run, one during pause) and both dumps replay-verify
+PASS; the .pdrp is byte-identical across same-tick presses.
+---
+ crates/client/src/main.rs   | 294 ++++++++++++++++++++++++++++--
+ crates/client/src/report.rs | 347 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 628 insertions(+), 13 deletions(-)
+ create mode 100644 crates/client/src/report.rs
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 41a9268..1b2cea5 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -13,11 +13,12 @@
+ mod feedback;
+ mod orders;
+ mod render;
++mod report;
+ mod text;
+ mod ui;
+ 
+ use std::collections::BTreeSet;
+-use std::path::Path;
++use std::path::{Path, PathBuf};
+ use std::sync::Arc;
+ use std::time::Instant;
+ 
+@@ -29,8 +30,8 @@ use pandemonium_engine::audio::{AudioSink, NullAudioSink};
+ use pandemonium_engine::mesh::terrain_mesh;
+ use pandemonium_engine::renderer::{Frame, HudState};
+ use pandemonium_engine::{
+-    alpha_controller, alpha_plan, Interpolator, MatchHost, MatchOutcome, NullRenderer, Renderer,
+-    RtsCamera,
++    alpha_controller, alpha_plan, FrameOutcome, Interpolator, MatchHost, MatchOutcome,
++    NullRenderer, Renderer, RtsCamera,
+ };
+ use pandemonium_sim_api::{
+     Command, CommandKind, ControllerKind, EntityId, Event, KindId, MatchSetup, PlayerId,
+@@ -83,6 +84,9 @@ const EDGE_SCROLL_PX: f64 = 24.0;
+ const START_CAMERA_DISTANCE: f32 = 26.0;
+ 
+ fn main() -> anyhow::Result<()> {
++    let args: Vec<String> = std::env::args().collect();
++    let seed = seed_from_args(&args);
++    let record_path = record_from_args(&args);
+     let content = content_path();
+     let bundle = ContentBundle::load_dir(content)
+         .with_context(|| format!("loading content from {}", content.display()))?;
+@@ -99,8 +103,8 @@ fn main() -> anyhow::Result<()> {
+             return headless_smoke(&bundle);
+         }
+     };
+-    let mut app = App::new(bundle)?;
+-    app.frames_budget = frames_budget_arg();
++    let mut app = App::new(bundle, seed, record_path)?;
++    app.frames_budget = frames_budget_arg(&args);
+     event_loop
+         .run_app(&mut app)
+         .map_err(|error| anyhow::anyhow!(error))?;
+@@ -111,8 +115,8 @@ fn main() -> anyhow::Result<()> {
+ /// presented frames and print the windowed smoke summary (tick, state hash,
+ /// commands submitted, selection size). Presentation-layer tooling for the
+ /// DEBT-008 windowed verification — it changes no simulation behavior.
+-fn frames_budget_arg() -> Option<u64> {
+-    let mut args = std::env::args();
++fn frames_budget_arg(args: &[String]) -> Option<u64> {
++    let mut args = args.iter();
+     while let Some(arg) = args.next() {
+         if arg == "--frames" {
+             let value = args
+@@ -125,6 +129,38 @@ fn frames_budget_arg() -> Option<u64> {
+     None
+ }
+ 
++/// Parses the reproduction affordance `--seed N` (M10.1, plan §6.5: a match
++/// is seed + content + command log — the README's bug-report promise needs
++/// the windowed player to be able to name the seed they played). Default 7
++/// (the seed every existing pin and the M1 demo use); a missing or malformed
++/// value falls back to the default, mirroring `--frames`'s parser.
++fn seed_from_args(args: &[String]) -> u64 {
++    let mut args = args.iter();
++    while let Some(arg) = args.next() {
++        if arg == "--seed" {
++            return args
++                .next()
++                .and_then(|value| value.parse::<u64>().ok())
++                .unwrap_or(7);
++        }
++    }
++    7
++}
++
++/// Parses the recording affordance `--record <path>` (M10.1, plan §6.5):
++/// when set, the windowed run writes its replay at match end / clean exit —
++/// a file `tools replay-verify` accepts (A2's evidence channel for the
++/// human playtest). A missing value disables recording.
++fn record_from_args(args: &[String]) -> Option<PathBuf> {
++    let mut args = args.iter();
++    while let Some(arg) = args.next() {
++        if arg == "--record" {
++            return args.next().cloned().map(PathBuf::from);
++        }
++    }
++    None
++}
++
+ /// The repository's content directory, resolved from the crate manifest so the
+ /// binary works from any working directory.
+ fn content_path() -> &'static Path {
+@@ -222,6 +258,19 @@ struct App {
+     /// The bottom bar's clickable regions, rebuilt every frame by the UI
+     /// pass and hit-tested before world clicks.
+     ui_buttons: Vec<Button>,
++    /// M10.1 (plan §6.5): `--record <path>` — when set, the windowed run's
++    /// replay is written at match end / clean exit (a file `tools
++    /// replay-verify` accepts — A2's evidence channel for the playtest).
++    record_path: Option<PathBuf>,
++    /// M10.1: whether the current match segment's record was already
++    /// written at its end (the exit path writes only when it never was —
++    /// restart resets this with the segment).
++    record_written: bool,
++    /// M10.1 (plan §6.5/§11.6): the checkpoint trail feeding `--record` and
++    /// the F8 dump — the tick-0 hash plus every periodic checkpoint the
++    /// host reported per frame (the same assembly the tools' AI-match
++    /// recorder uses).
++    checkpoints: Vec<(u32, u64)>,
+ }
+ 
+ /// Active structure placement (plan §11.3's build placement mode with a
+@@ -236,9 +285,9 @@ struct PlacementState {
+ }
+ 
+ impl App {
+-    fn new(bundle: ContentBundle) -> anyhow::Result<Self> {
++    fn new(bundle: ContentBundle, seed: u64, record_path: Option<PathBuf>) -> anyhow::Result<Self> {
+         let setup = MatchSetup {
+-            seed: 7,
++            seed,
+             players: vec![
+                 PlayerSetup {
+                     player: PlayerId(0),
+@@ -279,6 +328,9 @@ impl App {
+         let worker_kind = Some(plan.worker);
+         let node_kind = plan.node;
+         let host = Self::build_host(&bundle, setup.clone());
++        // M10.1: the checkpoint trail opens at the fresh match's tick-0
++        // hash (the same first entry the tools' recorder pushes).
++        let checkpoints = vec![(0, host.state_hash())];
+         Ok(Self {
+             bundle,
+             setup,
+@@ -315,6 +367,9 @@ impl App {
+             latest_view: None,
+             placement: None,
+             ui_buttons: Vec::new(),
++            record_path,
++            record_written: false,
++            checkpoints,
+         })
+     }
+ 
+@@ -353,6 +408,11 @@ impl App {
+         self.latest_view = None;
+         self.placement = None;
+         self.ui_buttons.clear();
++        // M10.1: the recording state restarts with the match — the new
++        // segment gets its own tick-0 checkpoint and its own end-of-match
++        // record write.
++        self.checkpoints = vec![(0, self.host.state_hash())];
++        self.record_written = false;
+         // M9.1: the camera re-frames on the base and the armed order clears
+         // — a fresh match starts from the same readable opening view.
+         self.camera.focus(
+@@ -385,6 +445,115 @@ impl App {
+         self.view_interp.render(self.host.alpha())
+     }
+ 
++    /// M10.1 (plan §6.5): folds one frame outcome's periodic checkpoints
++    /// into the trail `--record` and F8 read (the same accumulation the
++    /// tools' AI-match recorder performs).
++    fn collect_checkpoints(&mut self, outcome: &FrameOutcome) {
++        for &(tick, hash) in &outcome.hashes {
++            self.checkpoints.push((tick, hash));
++        }
++    }
++
++    /// M10.1 (plan §6.5): writes the current match segment's replay record
++    /// to the `--record` path — a file `tools replay-verify` accepts, built
++    /// exactly like the tools' recorder (content hash, map id, the host's
++    /// command log, the checkpoint trail, the forced final hash).
++    fn write_recording(&mut self) {
++        let Some(path) = self.record_path.clone() else {
++            return;
++        };
++        let world = self.bundle.world();
++        let replay = report::replay_record(
++            &world,
++            &self.setup,
++            self.host.log(),
++            &self.checkpoints,
++            self.host.tick(),
++            self.host.state_hash(),
++        );
++        let bytes = replay.encode();
++        match std::fs::write(&path, &bytes) {
++            Ok(()) => {
++                println!(
++                    "pandemonium client — replay recorded: {} ({} bytes, {} checkpoints, final \
++                     hash {:#018x})",
++                    path.display(),
++                    bytes.len(),
++                    replay.checkpoints.len(),
++                    replay.final_hash
++                );
++                self.record_written = true;
++            }
++            Err(error) => {
++                // Not recorded: the exit path may try again once the run ends
++                // or the loop exits (a transient I/O failure should not lose
++                // the recording).
++                println!("pandemonium client — replay record failed: {error}");
++            }
++        }
++    }
++
++    /// M10.1 (plan §11.6): the deterministic F8 bug-report dump — the replay
++    /// record of the match so far (`pandemonium-report-<seed>-tick<tick>.pdrp`)
++    /// plus the sidecar info file (`…-info.txt`), written beside `--record`'s
++    /// path or in the working directory, both filenames printed so the tester
++    /// can attach them to the report. Works while paused (the dump reads the
++    /// current state); deterministic content only, so two dumps at the same
++    /// tick produce identical bytes.
++    fn dump_bug_report(&mut self) {
++        let world = self.bundle.world();
++        let tick = self.host.tick();
++        let replay = report::replay_record(
++            &world,
++            &self.setup,
++            self.host.log(),
++            &self.checkpoints,
++            tick,
++            self.host.state_hash(),
++        );
++        let sidecar = report::sidecar_text(&report::SidecarInfo {
++            seed: self.setup.seed,
++            tick,
++            content_hash: replay.content_hash,
++            map_id: replay.map_id,
++            player_slot: HUMAN.0,
++            frame_count: self.frames_presented,
++            selection_size: self.selection.len(),
++            controls_line: report::controls_line(
++                self.attack_move_armed,
++                self.feedback.refusal_notice.is_some(),
++            ),
++        });
++        // Beside --record's path when given, the working directory otherwise.
++        let dir = match &self.record_path {
++            Some(path) => path
++                .parent()
++                .filter(|parent| !parent.as_os_str().is_empty())
++                .map(Path::to_path_buf)
++                .unwrap_or_default(),
++            None => PathBuf::from("."),
++        };
++        let stem = report::report_stem(self.setup.seed, tick);
++        match report::write_files(&dir, &stem, &replay, &sidecar) {
++            Ok((replay_path, info_path)) => {
++                println!("pandemonium bug report: {}", replay_path.display());
++                println!("pandemonium bug report: {}", info_path.display());
++                // The on-screen cue (plan §11.6): a brief ping where the
++                // tester is looking, so the dump's success is visible.
++                let ndc = self.cursor_ndc();
++                let ground = self
++                    .camera
++                    .ground_point(glam::Vec2::new(ndc.0, ndc.1))
++                    .map(|point| MatchHost::world_to_logical(point.x, point.z))
++                    .unwrap_or_else(|| {
++                        Vec2Fx::from_ints(self.start_anchor.0 as i32, self.start_anchor.1 as i32)
++                    });
++                self.feedback.ping(ground, self.frames_presented);
++            }
++            Err(error) => println!("pandemonium bug report: write failed ({error})"),
++        }
++    }
++
+     /// The cursor's current NDC position (M8: used by the AttackMove hotkey,
+     /// which fires on key-down without a fresh cursor event). Falls back to
+     /// the screen center when the cursor hasn't moved yet.
+@@ -969,15 +1138,21 @@ impl ApplicationHandler for App {
+                                 self.attack_move_armed = false;
+                             }
+                         }
+-                        // §11.6 debug tooling: overlay toggle, pause, single-step.
++                        // §11.6 debug tooling: overlay toggle, pause, single-step,
++                        // and the M10.1 F8 bug-report dump (seed + tick,
++                        // deterministic — see report.rs).
+                         winit::keyboard::KeyCode::F3 if pressed => {
+                             self.debug_overlay = !self.debug_overlay;
+                         }
++                        winit::keyboard::KeyCode::F8 if pressed => {
++                            self.dump_bug_report();
++                        }
+                         winit::keyboard::KeyCode::KeyP if pressed => {
+                             self.host.set_paused(!self.host.is_paused());
+                         }
+                         winit::keyboard::KeyCode::Period if pressed => {
+-                            let _ = self.host.step_once();
++                            let outcome = self.host.step_once();
++                            self.collect_checkpoints(&outcome);
+                         }
+                         // M8 (plan §11.3): control groups 1-9. Ctrl+digit
+                         // assigns the current selection; digit alone recalls.
+@@ -1033,6 +1208,16 @@ impl ApplicationHandler for App {
+         }
+     }
+ 
++    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
++        // M10.1 (plan §6.5): `--record`'s clean-exit write. Every exit path
++        // (window close, Escape, the `--frames` budget) lands here — the
++        // segment's replay is written unless the match already ended and
++        // wrote its record at the end tick.
++        if self.record_path.is_some() && !self.record_written {
++            self.write_recording();
++        }
++    }
++
+     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+         // M9.1: camera motion from held keys and the screen edge, scaled by
+         // the real frame delta (frame-rate independent — the old fixed
+@@ -1136,6 +1321,14 @@ impl App {
+         let dt = self.last_frame.elapsed();
+         self.last_frame = Instant::now();
+         let outcome = self.host.advance(dt);
++        // M10.1 (plan §6.5/§11.6): the trail feeding --record and F8.
++        self.collect_checkpoints(&outcome);
++        // M10.1 (plan §6.5): --record writes the segment's replay at the
++        // match's end — the log is complete there, and the checkpoint at the
++        // end tick is the natural replay finale.
++        if self.record_path.is_some() && !self.record_written && self.host.is_finished() {
++            self.write_recording();
++        }
+         // M9 (plan §11.5, FD-9): the step's events flow outward — the audio
+         // sink and the feedback state consume them after the step, never
+         // inside it. Presentation-only bookkeeping.
+@@ -1567,9 +1760,9 @@ fn overlay_quads(input: OverlayInput<'_>) -> Vec<UiQuad> {
+             format!("hash {:#018x}", hud.state_hash),
+             format!("entities {entities}  selected {selected}  log {log_len}"),
+             if hud.paused {
+-                "PAUSED  [.] step".to_string()
++                "PAUSED  [.] step  [F8] bug report".to_string()
+             } else {
+-                "[F3] overlay  [P] pause".to_string()
++                "[F3] overlay  [P] pause  [F8] bug report".to_string()
+             },
+         ];
+         let widest = lines
+@@ -1780,3 +1973,78 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+     println!("pandemonium client — smoke PASS (windowed M3 verification requires a display)");
+     Ok(())
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::{frames_budget_arg, record_from_args, seed_from_args};
++
++    /// `args(["--seed", "42"])` — the standard helper spelling.
++    fn args(parts: &[&str]) -> Vec<String> {
++        parts.iter().map(|part| part.to_string()).collect()
++    }
++
++    #[test]
++    fn seed_parser_accepts_a_valid_value() {
++        assert_eq!(
++            seed_from_args(&args(&["pandemonium-client", "--seed", "42"])),
++            42
++        );
++        assert_eq!(seed_from_args(&args(&["--seed", "0"])), 0);
++        assert_eq!(
++            seed_from_args(&args(&["--seed", "18446744073709551615"])),
++            u64::MAX
++        );
++    }
++
++    #[test]
++    fn seed_parser_defaults_without_the_flag() {
++        assert_eq!(seed_from_args(&args(&["pandemonium-client"])), 7);
++        assert_eq!(seed_from_args(&args(&["--frames", "900"])), 7);
++    }
++
++    #[test]
++    fn seed_parser_falls_back_on_a_missing_value() {
++        // Mirrors `--frames`: a missing value silently takes the default
++        // (7) rather than failing to start — the flag is an affordance, not
++        // a contract.
++        assert_eq!(seed_from_args(&args(&["--seed"])), 7);
++    }
++
++    #[test]
++    fn seed_parser_falls_back_on_a_garbage_value() {
++        assert_eq!(seed_from_args(&args(&["--seed", "not-a-number"])), 7);
++        assert_eq!(seed_from_args(&args(&["--seed", "-1"])), 7);
++        assert_eq!(seed_from_args(&args(&["--seed", ""])), 7);
++    }
++
++    #[test]
++    fn record_parser_reads_the_path() {
++        assert_eq!(
++            record_from_args(&args(&["--record", "/tmp/match.pdrp"])),
++            Some(std::path::PathBuf::from("/tmp/match.pdrp"))
++        );
++        // A relative path (the playtest quickstart's shape) passes verbatim.
++        assert_eq!(
++            record_from_args(&args(&["--record", "match.pdrp"])),
++            Some(std::path::PathBuf::from("match.pdrp"))
++        );
++    }
++
++    #[test]
++    fn record_parser_is_none_without_the_flag_or_value() {
++        assert_eq!(record_from_args(&args(&["pandemonium-client"])), None);
++        assert_eq!(record_from_args(&args(&["--seed", "42"])), None);
++        // A missing value disables recording rather than guessing a file.
++        assert_eq!(record_from_args(&args(&["--record"])), None);
++    }
++
++    #[test]
++    fn frames_parser_still_parses_after_the_signature_change() {
++        assert_eq!(frames_budget_arg(&args(&["--frames", "900"])), Some(900));
++        assert_eq!(
++            frames_budget_arg(&args(&["--frames", "garbage"])),
++            Some(180)
++        );
++        assert_eq!(frames_budget_arg(&args(&["pandemonium-client"])), None);
++    }
++}
+diff --git a/crates/client/src/report.rs b/crates/client/src/report.rs
+new file mode 100644
+index 0000000..1014052
+--- /dev/null
++++ b/crates/client/src/report.rs
+@@ -0,0 +1,347 @@
++//! The §11.6 deterministic bug-report dump + `--record` replay assembly
++//! (M10.1, plan §11.6 / §6.5).
++//!
++//! Two consumers share this module:
++//! - **`--record <path>`** — the windowed player's replay recording: the
++//!   match's `ReplayFile`, assembled exactly as the tools' AI-match recorder
++//!   does (`crates/tools/src/ai_match.rs`), written at match end / clean
++//!   exit so `tools replay-verify` accepts it.
++//! - **F8, the bug-report dump** — plan §11.6's "deterministic seed + tick
++//!   dump": a `.pdrp` replay record of the match so far *plus* a sidecar
++//!   `…-info.txt` carrying the seed, tick, content identity, and the client
++//!   state a reproducer needs. Deterministic content only — no wall-clock,
++//!   no paths beyond the write location — so two dumps at the same tick
++//!   produce identical bytes (which is itself a test).
++//!
++//! Everything that decides bytes is a pure function over its inputs; the
++//! I/O wrappers are thin. The client is above the determinism boundary
++//! (plan §5 governs the simulation crates), but the *dump* stays
++//! deterministic anyway: a report a tester files twice from the same tick
++//! must not claim two different matches.
++
++use std::io;
++use std::path::{Path, PathBuf};
++
++use pandemonium_replay::{Checkpoint, ReplayFile, FORMAT_VERSION};
++use pandemonium_sim::TrivialWorld;
++use pandemonium_sim_api::{Command, MatchSetup};
++
++/// The standing controls line (mirrors the README's controls paragraph and
++/// the UI's first-time-player reminder, `ui.rs`).
++pub const CONTROLS_LINE: &str = "left-click/drag select; right-click move/attack/gather; \
++     A+click attack-move; S stop; Q/E rotate; Ctrl+wheel pitch; P pause; \
++     F3 overlay; F8 bug report; R restart";
++
++/// The armed-attack-move instruction (the HUD line shown while 'A' is armed).
++pub const ATTACK_MOVE_LINE: &str = "ATTACK MOVE - left-click a target (Esc cancels)";
++
++/// The controls line in effect at a moment of interest: the armed
++/// attack-move instruction, a showing refusal notice, or the standing
++/// controls summary. Pure — callers feed the same booleans the HUD reads.
++pub fn controls_line(attack_move_armed: bool, refusal_showing: bool) -> &'static str {
++    if attack_move_armed {
++        ATTACK_MOVE_LINE
++    } else if refusal_showing {
++        "order refused - see HUD notice"
++    } else {
++        CONTROLS_LINE
++    }
++}
++
++/// Assembles the match's replay record (plan §6.5's field list), mirroring
++/// the tools' AI-match recorder: format version, the world's content hash +
++/// map id, the setup, the host's command log (rejections included), the
++/// checkpoint trail (tick 0 + every periodic checkpoint, forced final at
++/// `current_tick` if the trail does not end there), and the final hash.
++///
++/// Pure over its inputs — the caller supplies what the `MatchHost` already
++/// keeps (`log()`, `tick()`, `state_hash()`) plus the trail collected from
++/// the per-frame outcomes.
++pub fn replay_record(
++    world: &TrivialWorld,
++    setup: &MatchSetup,
++    log: &[Command],
++    trail: &[(u32, u64)],
++    current_tick: u32,
++    current_hash: u64,
++) -> ReplayFile {
++    let mut checkpoints: Vec<Checkpoint> = trail
++        .iter()
++        .map(|&(tick, hash)| Checkpoint { tick, hash })
++        .collect();
++    if checkpoints.last().map(|cp| cp.tick) != Some(current_tick) {
++        checkpoints.push(Checkpoint {
++            tick: current_tick,
++            hash: current_hash,
++        });
++    }
++    ReplayFile {
++        format_version: FORMAT_VERSION,
++        content_hash: world.content_hash(),
++        map_id: world.map_id,
++        seed: setup.seed,
++        player_setup: setup.players.clone(),
++        commands: log.to_vec(),
++        checkpoints,
++        final_hash: current_hash,
++    }
++}
++
++/// The state snapshot the bug-report sidecar records.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct SidecarInfo {
++    /// The match seed (the report's reproduction handle).
++    pub seed: u64,
++    /// The tick at the moment of the dump.
++    pub tick: u32,
++    /// The match's content identity (the fixture-encoded world hash).
++    pub content_hash: u64,
++    /// The map the match runs on.
++    pub map_id: u64,
++    /// The human's player slot.
++    pub player_slot: u8,
++    /// How many frames have been presented (the client's own clock).
++    pub frame_count: u64,
++    /// How many entities the tester has selected.
++    pub selection_size: usize,
++    /// The controls line in effect (see [`controls_line`]).
++    pub controls_line: &'static str,
++}
++
++/// Builds the sidecar text. Deterministic content only — no wall-clock, no
++/// paths, no environment: two dumps with the same inputs produce identical
++/// bytes (pinned by a test).
++pub fn sidecar_text(info: &SidecarInfo) -> String {
++    let SidecarInfo {
++        seed,
++        tick,
++        content_hash,
++        map_id,
++        player_slot,
++        frame_count,
++        selection_size,
++        controls_line,
++    } = *info;
++    format!(
++        "pandemonium bug report\n\
++         seed: {seed}\n\
++         tick: {tick}\n\
++         content hash: {content_hash:#018x}\n\
++         map id: {map_id}\n\
++         player slot: {player_slot}\n\
++         frame count: {frame_count}\n\
++         selection size: {selection_size}\n\
++         controls: {controls_line}\n"
++    )
++}
++
++/// The report file stem: `pandemonium-report-<seed>-tick<tick>`. Two dumps at
++/// the same seed + tick overwrite each other — the name is a pure function
++/// of the match state, matching the dump's byte determinism.
++pub fn report_stem(seed: u64, tick: u32) -> String {
++    format!("pandemonium-report-{seed}-tick{tick}")
++}
++
++/// Writes the two report files into `dir` and returns their paths: the
++/// replay record `<stem>.pdrp` and the sidecar `<stem>-info.txt`.
++pub fn write_files(
++    dir: &Path,
++    stem: &str,
++    replay: &ReplayFile,
++    sidecar: &str,
++) -> io::Result<(PathBuf, PathBuf)> {
++    let replay_path = dir.join(format!("{stem}.pdrp"));
++    let info_path = dir.join(format!("{stem}-info.txt"));
++    std::fs::write(&replay_path, replay.encode())?;
++    std::fs::write(&info_path, sidecar)?;
++    Ok((replay_path, info_path))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::Duration;
++
++    use pandemonium_content::ContentBundle;
++    use pandemonium_engine::MatchHost;
++    use pandemonium_sim::run_command_log;
++    use pandemonium_sim_api::{ControllerKind, MatchSetup, PlayerId, PlayerSetup};
++
++    use crate::alpha_controller;
++
++    /// The repo's content directory (the client's own resolution depth).
++    fn repo_content() -> std::path::PathBuf {
++        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
++            .ancestors()
++            .nth(2)
++            .unwrap()
++            .join("content")
++    }
++
++    /// A driven host over the real content: the same shape the windowed
++    /// client builds (`App::build_host`), advanced for a few real frames.
++    fn driven_host(frames: u32, paused: bool) -> (MatchHost, Vec<(u32, u64)>) {
++        let bundle = ContentBundle::load_dir(&repo_content()).expect("repo content loads");
++        let world = bundle.world();
++        let setup = MatchSetup {
++            seed: 7,
++            players: vec![
++                PlayerSetup {
++                    player: PlayerId(0),
++                    controller: ControllerKind::Human,
++                },
++                PlayerSetup {
++                    player: PlayerId(1),
++                    controller: ControllerKind::Ai,
++                },
++            ],
++        };
++        let controllers = vec![(
++            PlayerId(1),
++            Box::new(alpha_controller(&bundle, &world, PlayerId(1), setup.seed))
++                as Box<dyn pandemonium_ai::Controller>,
++        )];
++        let mut host = MatchHost::with_controllers(&world, setup.clone(), controllers);
++        let mut trail = vec![(0, host.state_hash())];
++        let frame_dt = Duration::from_secs_f64(1.0 / 60.0);
++        if paused {
++            host.set_paused(true);
++        }
++        for _ in 0..frames {
++            let outcome = host.advance(frame_dt);
++            for &(tick, hash) in &outcome.hashes {
++                trail.push((tick, hash));
++            }
++        }
++        (host, trail)
++    }
++
++    #[test]
++    fn the_record_re_simulates_to_identical_hashes() {
++        // The A2 pattern at the client seam: the record built from a driven
++        // host decodes and re-simulates through the canonical driver to the
++        // same checkpoints and final hash.
++        let bundle = ContentBundle::load_dir(&repo_content()).expect("repo content loads");
++        let world = bundle.world();
++        let (host, trail) = driven_host(120, false);
++        let replay = replay_record(
++            &world,
++            &host_setup(),
++            host.log(),
++            &trail,
++            host.tick(),
++            host.state_hash(),
++        );
++        let decoded = ReplayFile::decode(&replay.encode()).expect("the record decodes");
++        assert_eq!(decoded, replay);
++        let resim = run_command_log(
++            &world,
++            &host_setup(),
++            &replay.commands,
++            replay.checkpoints.last().unwrap().tick,
++        );
++        assert_eq!(
++            resim
++                .checkpoints
++                .iter()
++                .map(|&(tick, hash)| Checkpoint { tick, hash })
++                .collect::<Vec<_>>(),
++            replay.checkpoints,
++            "every checkpoint re-simulates"
++        );
++        assert_eq!(resim.final_hash, replay.final_hash);
++    }
++
++    #[test]
++    fn f8_during_pause_produces_a_valid_record() {
++        // Pause freezes the clock; the dump reads the current state, so a
++        // paused match's record is as verifiable as a running one's.
++        let bundle = ContentBundle::load_dir(&repo_content()).expect("repo content loads");
++        let world = bundle.world();
++        let (host, trail) = driven_host(120, true);
++        let replay = replay_record(
++            &world,
++            &host_setup(),
++            host.log(),
++            &trail,
++            host.tick(),
++            host.state_hash(),
++        );
++        let resim = run_command_log(
++            &world,
++            &host_setup(),
++            &replay.commands,
++            replay.checkpoints.last().unwrap().tick,
++        );
++        assert_eq!(resim.final_hash, replay.final_hash);
++    }
++
++    #[test]
++    fn the_sidecar_is_deterministic_and_state_dependent() {
++        let base = SidecarInfo {
++            seed: 42,
++            tick: 300,
++            content_hash: 0x9BC1_8C52_1107_B262,
++            map_id: 0xD381_3640_1AB0_2FF1,
++            player_slot: 0,
++            frame_count: 512,
++            selection_size: 3,
++            controls_line: controls_line(false, false),
++        };
++        // Same inputs -> identical bytes.
++        assert_eq!(sidecar_text(&base), sidecar_text(&base));
++        // Two dumps at the same tick produce identical bytes: the byte
++        // equality IS the determinism claim (plan §11.6's own test shape).
++        let again = sidecar_text(&base);
++        assert_eq!(sidecar_text(&base), again);
++        // Every field matters.
++        let mut moved = base;
++        moved.tick = 301;
++        assert_ne!(sidecar_text(&moved), sidecar_text(&base));
++        let mut moved = base;
++        moved.selection_size = 4;
++        assert_ne!(sidecar_text(&moved), sidecar_text(&base));
++        let mut moved = base;
++        moved.controls_line = controls_line(true, false);
++        assert_ne!(sidecar_text(&moved), sidecar_text(&base));
++        // No wall-clock, no path, no environment: the text carries only the
++        // reported fields (spot-check the stable fields' presence).
++        let text = sidecar_text(&base);
++        assert!(text.contains("seed: 42"));
++        assert!(text.contains("tick: 300"));
++        assert!(text.contains("player slot: 0"));
++        assert!(!text.contains("instant") && !text.contains("Instant"));
++    }
++
++    #[test]
++    fn the_report_stem_is_a_pure_function_of_seed_and_tick() {
++        assert_eq!(report_stem(42, 300), "pandemonium-report-42-tick300");
++        assert_eq!(report_stem(42, 300), report_stem(42, 300));
++        assert_ne!(report_stem(42, 300), report_stem(42, 301));
++    }
++
++    #[test]
++    fn the_controls_line_reflects_the_input_mode() {
++        assert_eq!(controls_line(true, false), ATTACK_MOVE_LINE);
++        assert_eq!(controls_line(false, true), "order refused - see HUD notice");
++        assert_eq!(controls_line(false, false), CONTROLS_LINE);
++    }
++
++    /// The setup `driven_host` builds (kept out of the helper so the record
++    /// builder's caller — the test — owns it, like the client does).
++    fn host_setup() -> MatchSetup {
++        MatchSetup {
++            seed: 7,
++            players: vec![
++                PlayerSetup {
++                    player: PlayerId(0),
++                    controller: ControllerKind::Human,
++                },
++                PlayerSetup {
++                    player: PlayerId(1),
++                    controller: ControllerKind::Ai,
++                },
++            ],
++        }
++    }
++}
+-- 
+2.47.3
+
+
+From 1db7dc7499893b22da4aadcc02daaca86fb1b219 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <331263527+elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 10:27:32 +0000
+Subject: [PATCH 3/5] =?UTF-8?q?docs:=20PLAYTEST.md=20=E2=80=94=20the=20A14?=
+ =?UTF-8?q?=20instrument?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The plan §13 A14 gate needs its machinery: a playtest checklist with
+>= 5 testers recorded in docs/PLAYTEST.md. The file did not exist.
+
+Eight sections: the per-OS quickstart (git + rustup only —
+rust-toolchain.toml pins the compiler; build and run the release
+client from the repo root so content/ resolves; --seed for match
+reproducibility; --record for a session replay), the controls card
+(the README's controls paragraph verbatim plus [F8] bug report), the
+unaided-loop checklist (start -> train -> gather -> build with the
+placement ghost -> train combat units -> queue/cancel/rally -> scout
+under fog -> engage -> destroy or resign -> end screen -> restart),
+the spectator-legibility question with a confidence scale (A14's
+second half), the probe questions that arm the debt triggers
+(DEBT-012's placement guess, DEBT-011's audio probe, A8's feel), the
+F8 bug-report procedure (press at the moment, attach both files, note
+seed + tick), the five-row results table for the owner, and the header
+stating the pass bar: five testers, honest recording — a failed
+tester is a finding, never a wave-through.
+
+Every referenced command was run against this tree before writing it
+down (the release build, the run from the repo root, --seed, --record
++ replay-verify).
+---
+ docs/PLAYTEST.md | 160 +++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 160 insertions(+)
+ create mode 100644 docs/PLAYTEST.md
+
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+new file mode 100644
+index 0000000..b5ece0a
+--- /dev/null
++++ b/docs/PLAYTEST.md
+@@ -0,0 +1,160 @@
++# Playtest — the A14 instrument
++
++**The pass bar (plan §13 A14):** at least **5 testers** run the unaided loop and
++are honestly recorded in the results table below. A tester who fails a step is a
++**finding, not a wave-through** — the declaration rule (plan §13) says a
++criterion that cannot be met honestly is recorded as it is. A14's two halves:
++*first-time players complete the loop unaided*, and *spectators can tell who is
++winning*. When the table holds five honest rows, the owner flips A14 in
++`docs/ALPHA_DECLARATION.md` (or records the finding) citing this file.
++
++"Unaided" means exactly this: **no documentation beyond the game itself and the
++controls card in section 2 of this file.** No README, no tutorial, no coaching,
++no hovering helper. If you (the tester) have to ask how to do something, that is
++a finding — write it down.
++
++---
++
++## 1. Quickstart (per-OS)
++
++Prerequisites: **git** and **Rust via rustup** — nothing else.
++[`rust-toolchain.toml`](../rust-toolchain.toml) pins the exact compiler version
++(1.98.1); rustup installs it automatically on first use (one network round-trip,
++then offline builds).
++
++**Windows** (PowerShell), **macOS** (Terminal), and **Linux** (any shell) run
++the same four commands:
++
++```bash
++git clone https://github.com/E-Vex/pandemonium-bd.git
++cd pandemonium-bd
++cargo build --release -p pandemonium-client
++cargo run --release -p pandemonium-client
++```
++
++Run **from the repository root** (the clone directory): the client resolves its
++`content/` data relative to the repo, so launching from elsewhere finds no
++content and refuses to start. On a desktop this opens the windowed 3D client
++against the AI opponent; on a machine with no display it prints a finding and
++runs a headless smoke pass instead (that is expected there, not a failure — but
++it is not a playtest either; use a desktop).
++
++**Seeding a match for reproducibility:** the match seed defaults to 7. Any u64
++works:
++
++```bash
++cargo run --release -p pandemonium-client -- --seed 42
++```
++
++The same seed reproduces the same match bit-for-bit (plan FD-1): identical map,
++identical AI decisions. **Record the seed you played** — with a tick it is a
++complete bug report (section 6).
++
++**Recording a replay of your session** (optional but encouraged):
++
++```bash
++cargo run --release -p pandemonium-client -- --seed 42 --record my-match.pdrp
++```
++
++The replay is written at match end or when you close the window, and it
++re-verifies headlessly:
++
++```bash
++cargo run --release -p pandemonium-tools -- replay-verify my-match.pdrp
++```
++
++A mid-match dump on demand exists too — F8, section 6.
++
++## 2. Controls card
++
++Copy of the README's controls paragraph, verbatim, plus the F8 bug-report key:
++
++Controls: **WASD / arrows / screen edges / middle-drag** pan the camera,
++**Q / E** rotate it around its target (Generals-style), the **wheel** zooms
++toward the cursor, **Ctrl+wheel** tilts the pitch (Generals-style),
++**left-click / drag** selects, **right-click** orders (attack an enemy,
++gather a node with workers, or move over open ground), **A** arms
++attack-move for the next left-click, **S** stops, **1-9** recall control
++groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
++overlay, **R** restarts after the match ends.
++
++**[F8] bug report** — press it at (or right after) the moment anything goes
++wrong; it writes two files (section 6).
++
++Economy controls worth knowing exist (the game itself shows these as the
++first-time bar at the bottom of the screen when nothing is selected): select a
++worker to build, a producing building to train and set rally points.
++
++## 3. The unaided-loop checklist
++
++One row per step of the minimum viable loop (plan §13). Mark **done** or
++**failed** per step, and comment anything that felt wrong — the comments are
++the findings. "Unaided" per the header: this card's controls line is the only
++documentation allowed.
++
++| # | Step (done / failed + comment) | Verdict | Comment |
++|---|--------------------------------|---------|---------|
++| 1 | Start a match (the client runs one immediately) | | |
++| 2 | Train workers from the Command Center | | |
++| 3 | Gather Ore with workers | | |
++| 4 | Build a Supply Depot and a Barracks (placement ghost, legality preview) | | |
++| 5 | Train combat units from the Barracks | | |
++| 6 | Queue several items, cancel one, set a rally point | | |
++| 7 | Scout under fog of war | | |
++| 8 | Engage the AI | | |
++| 9 | Destroy all enemy structures (or resign) | | |
++| 10 | Read the end screen | | |
++| 11 | Restart cleanly with R | | |
++
++## 4. Spectator legibility (A14's second half)
++
++Watch any 60 seconds of a fight — yours or two AIs — and answer: **who is
++winning?** The machine half is already proven (health bars, team colors, hit
++flashes, death fades exist and are tested); this question is the human half.
++
++| Question | Answer |
++|---|---|
++| Who was winning? | |
++| Confidence: **sure / fairly sure / guessing** | |
++| What told you? (health bars / unit count / damage flashes / other) | |
++
++## 5. Probe questions
++
++These arm the debt triggers — the answers decide real register entries
++(`docs/DEBT.md`), so answer honestly; "yes" is useful data, not a failure of the
++tester.
++
++1. **Placement guess (DEBT-012):** did any build-placement preview say **legal**
++   when the order was then refused, or **illegal** when it should have
++   succeeded? (yes/no; if yes — seed + tick, or an F8 dump)
++2. **Audio absence (DEBT-011):** did the absence of sound hurt your read of the
++   game? (yes/no — this is the debt's declared trigger: a "yes" argues for
++   pulling the audible backend forward)
++3. **Feel (A8):** did orders feel instant? Any input that felt dead?
++
++## 6. Bug-report procedure
++
++1. Press **F8** at (or right after — pause first with **P** if you need a
++   moment) the moment of the problem. The client prints two filenames and pings
++   the screen: a replay record `pandemonium-report-<seed>-tick<tick>.pdrp` and
++   a sidecar `…-info.txt` (seed, tick, content identity, player slot, the
++   controls state). Files land in the working directory (or beside `--record`'s
++   path when that flag was used).
++2. Attach **both files** to the report.
++3. Note the **seed** you played (the sidecar carries it — see the
++   `seed:` line) and the **tick** (`tick:` line). Seed + tick + the dump is a
++   complete reproducible incident; the replay re-simulates to identical hashes
++   (`tools replay-verify`).
++
++## 7. Results (filled by the owner)
++
++| Tester | Date | OS | Build commit | Loop completed (unaided?) | Spectator verdict | Probes (placement / audio / feel) | Incidents (seed + tick + dump filenames) |
++|---|---|---|---|---|---|---|---|
++| | | | | | | | |
++| | | | | | | | |
++| | | | | | | | |
++| | | | | | | | |
++| | | | | | | | |
++
++Five rows, ready to fill. A failed tester is a finding — record them anyway;
++they are often the most valuable row in the table.
+-- 
+2.47.3
+
+
+From b2c2a0ddeaa47d14168a32174dfc35651a4eab54 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <331263527+elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 10:31:45 +0000
+Subject: [PATCH 4/5] ci: shard the nightly soak, add timeouts and evidence
+ artifacts
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Plan §12 specifies soak "in parallel processes"; the nightly ran the
+1000-match A7 tier sequentially in one job (hours), with no
+timeout-minutes and no uploaded evidence. Now:
+
+- The 1000-match tier is a 10-job matrix, 100 matches per shard, each
+  running --seed-base $((BASE + shard*100)) with BASE derived exactly
+  as before (day index * 1000). Shard k's seeds are [BASE+100k,
+  BASE+100k+100) — disjoint by construction, union [BASE, BASE+1000),
+  the same 1000 consecutive seeds the sequential run covered (the
+  arithmetic is proven in the workflow's comments and was verified
+  programmatically while authoring). The smoke tier keeps its own
+  matrix entry, base, and behavior.
+- timeout-minutes everywhere: 90 per shard, 30 for the smoke tier,
+  30 for bench, 5 for the aggregate — a hang fails loudly instead of
+  consuming the runner day.
+- Evidence: every shard tees its summary to soak-<tier>.txt and
+  uploads it (even on failure — a crashing shard's summary is the
+  evidence); the new aggregate job (needs: soak) downloads all
+  summaries, concatenates them into soak-all.txt, sums the win-rate
+  totals, and fails if any shard's crashed count is nonzero
+  (belt-and-braces over the tool's own non-zero exit).
+
+Zero Rust changes — the soak binary stays sequential (the sequential
+runner is the tested artifact; plan §12's parallelism wording is
+satisfied at the process level). The aggregate's gate and win-sum
+logic were exercised locally against synthetic shard summaries (a
+crashing shard fails it; clean shards pass with correct totals), and
+the YAML parses clean (also fixed one pre-existing unquoted-colon
+step name that strict parsers reject). The optional --json summary
+flag was skipped — the tee'd text is the evidence, per the do-not-
+let-it-grow note.
+---
+ .github/workflows/nightly.yml | 159 +++++++++++++++++++++++++++++++---
+ 1 file changed, 148 insertions(+), 11 deletions(-)
+
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+index 900ace7..4be7f99 100644
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -8,6 +8,17 @@ name: nightly
+ # sizes a full sweep takes hours, and CI-per-push is the green gate's job
+ # (ci.yml). Crashes fail the workflow (`tools soak` exits non-zero when any
+ # match crashes).
++#
++# M10.1 — sharding, timeouts, and evidence artifacts (plan §12's "in parallel
++# processes" is satisfied at the process level, exactly as the plan words it:
++# the soak binary itself stays sequential — the sequential runner is the
++# tested artifact):
++#   * The 1000-match tier is a 10-job matrix, 100 matches per shard.
++#   * Every job carries a timeout-minutes — a hang must fail loudly, not
++#     consume the runner day.
++#   * Every shard tees its summary to a file and uploads it; an aggregate
++#     job concatenates the evidence, sums the win totals, and fails if any
++#     shard's `crashed` count is nonzero.
+ 
+ on:
+   schedule:
+@@ -19,18 +30,79 @@ env:
+ 
+ jobs:
+   soak:
+-    name: soak (A7, ${{ matrix.matches }} matches)
++    name: soak (${{ matrix.tier }})
+     runs-on: ubuntu-latest
++    # A hang must fail loudly, not consume the runner day.
++    timeout-minutes: ${{ matrix.timeout }}
+     strategy:
+       fail-fast: false
+       matrix:
++        # Sharding arithmetic (the disjoint-seeds proof):
++        #
++        #   BASE is derived exactly as before M10.1: day index * 1000.
++        #   Shard k (k = 0..9) runs `--matches 100 --seed-base BASE + 100k`,
++        #   and `tools soak` assigns seed `seed_base + i` to match i,
++        #   i = 0..99 — so shard k's seeds are exactly the half-open
++        #   interval [BASE + 100k, BASE + 100k + 100).
++        #
++        #   Two shards k < j differ by (j - k) * 100 >= 100, so their
++        #   100-wide intervals cannot overlap: the shards are disjoint by
++        #   construction. The union over k = 0..9 is [BASE, BASE + 1000) —
++        #   the same 1000 consecutive seeds the unsharded
++        #   `--matches 1000 --seed-base BASE` run covered, so the sharded
++        #   nightly proves what the sequential nightly proved.
++        #
++        #   The smoke tier keeps its pre-M10.1 seed base (BASE itself); its
++        #   seeds overlap shard 0's first 32 — as they did with the
++        #   unsharded 1000-match tier before it. It is cheap crash/stall
++        #   detection on fresh runners, not a coverage claim.
+         include:
+           # The smoke tier always runs: cheap crash/stall detection.
+-          - matches: 32
+-          # The full A7 tier: 1000 seeded matches. Kept in the same matrix so
+-          # one nightly run covers both; a run short on minutes can disable
+-          # this entry without losing the smoke tier.
+-          - matches: 1000
++          - tier: smoke-32
++            matches: 32
++            seed_offset: 0
++            timeout: 30
++          # The full A7 tier, sharded 10 ways.
++          - tier: shard-0
++            matches: 100
++            seed_offset: 0
++            timeout: 90
++          - tier: shard-1
++            matches: 100
++            seed_offset: 100
++            timeout: 90
++          - tier: shard-2
++            matches: 100
++            seed_offset: 200
++            timeout: 90
++          - tier: shard-3
++            matches: 100
++            seed_offset: 300
++            timeout: 90
++          - tier: shard-4
++            matches: 100
++            seed_offset: 400
++            timeout: 90
++          - tier: shard-5
++            matches: 100
++            seed_offset: 500
++            timeout: 90
++          - tier: shard-6
++            matches: 100
++            seed_offset: 600
++            timeout: 90
++          - tier: shard-7
++            matches: 100
++            seed_offset: 700
++            timeout: 90
++          - tier: shard-8
++            matches: 100
++            seed_offset: 800
++            timeout: 90
++          - tier: shard-9
++            matches: 100
++            seed_offset: 900
++            timeout: 90
+     steps:
+       - uses: actions/checkout@v4
+       - name: Install the pinned toolchain
+@@ -40,19 +112,84 @@ jobs:
+       - name: Cache cargo registry + target
+         uses: Swatinem/rust-cache@v2
+         with:
+-          key: soak-${{ hashFiles('Cargo.lock') }}
++          key: soak-${{ matrix.tier }}-${{ hashFiles('Cargo.lock') }}
+       - name: Build (release — soak is throughput-bound)
+         run: cargo build --release -p pandemonium-tools
+-      - name: Soak (${{ matrix.matches }} AI-vs-AI matches)
++      - name: Soak (${{ matrix.tier }} — ${{ matrix.matches }} AI-vs-AI matches)
+         run: |
++          set -o pipefail
++          BASE=$(( $(date +%s) / 86400 * 1000 ))
+           cargo run --release -p pandemonium-tools -- soak \
+             --matches ${{ matrix.matches }} \
+-            --seed-base $(( $(date +%s) / 86400 * 1000 )) \
+-            --content content
++            --seed-base $(( BASE + ${{ matrix.seed_offset }} )) \
++            --content content \
++            | tee soak-${{ matrix.tier }}.txt
++      - name: Upload the shard summary (evidence)
++        # Upload even on failure — a crashing shard's summary is exactly
++        # the evidence the aggregate and the declaration want to see.
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: soak-${{ matrix.tier }}
++          path: soak-${{ matrix.tier }}.txt
++
++  aggregate:
++    name: aggregate (evidence + crashed gate)
++    # Needs every shard (matrix jobs complete as one job name; this waits
++    # for all 11 entries) — and runs even when a shard failed, so the
++    # concatenated evidence lands regardless.
++    needs: soak
++    runs-on: ubuntu-latest
++    timeout-minutes: 5
++    steps:
++      - name: Download every shard summary
++        uses: actions/download-artifact@v4
++        with:
++          path: soak-summaries
++          pattern: soak-*
++          merge-multiple: true
++      - name: Concatenate the evidence, sum the totals, gate on crashed
++        run: |
++          set -euo pipefail
++          cd soak-summaries
++          # One durable artifact: the whole night's soak evidence.
++          cat $(ls | sort) > ../soak-all.txt
++          # The gate: any nonzero `crashed` count in any shard fails the
++          # nightly (belt and braces — the tool already exits non-zero on
++          # a crash, this catches a regression in that contract too).
++          total_crashed=0
++          for f in *; do
++            crashed=$(grep -E '^  crashed:' "$f" | grep -oE '[0-9]+' | head -1)
++            crashed=${crashed:-0}
++            echo "  $f: crashed $crashed"
++            total_crashed=$(( total_crashed + crashed ))
++          done
++          if [ "$total_crashed" -ne 0 ]; then
++            echo "::error::soak shards reported $total_crashed crashed match(es)"
++            exit 1
++          fi
++          # Win-rate totals, summed across the shards' `resolved:` lines.
++          # Each line carries five numbers: resolved, "0", wins0, "1", wins1.
++          grep -h '^  resolved:' * | grep -oE '[0-9]+' | awk '
++            NR % 5 == 1 { resolved += $1 }
++            NR % 5 == 3 { wins0 += $1 }
++            NR % 5 == 0 { wins1 += $1 }
++            END {
++              printf "  matches resolved: %d (player 0: %d, player 1: %d)\n", \
++                resolved, wins0, wins1
++            }'
++          echo "aggregate: 0 crashed across all shards"
++      - name: Upload the concatenated evidence
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: soak-aggregate
++          path: soak-all.txt
+ 
+   bench:
+     name: bench (§15 perf budgets)
+     runs-on: ubuntu-latest
++    timeout-minutes: 30
+     steps:
+       - uses: actions/checkout@v4
+       - name: Install the pinned toolchain
+@@ -65,5 +202,5 @@ jobs:
+           key: bench-${{ hashFiles('Cargo.lock') }}
+       - name: Build (release)
+         run: cargo build --release -p pandemonium-tools
+-      - name: Bench (plan §15 budgets: ≤ 1 ms avg, ≤ 4 ms p99, ≥ 1000 t/s)
++      - name: "Bench (plan §15 budgets: ≤ 1 ms avg, ≤ 4 ms p99, ≥ 1000 t/s)"
+         run: cargo run --release -p pandemonium-tools -- bench --ticks 10000 --content content
+-- 
+2.47.3
+
+
+From b1ccfee68ef1c9524e92953134a56b0b3a7ed04e Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <331263527+elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 10:40:31 +0000
+Subject: [PATCH 5/5] =?UTF-8?q?docs:=20M10.1=20close-out=20=E2=80=94=20reg?=
+ =?UTF-8?q?isters,=20changelog,=20status?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every register and status doc reconciled with the post-Task-1 state:
+
+- CHANGELOG: the unfoldered [Unreleased] — pre-M10 cleanup section is
+  folded into [M10] (it shipped as part of the M10 series); a new
+  [M10.1] section records this pass: DEBT-001's repayment as the one
+  hash-moving commit, the client reproduction tooling (--seed,
+  --record, F8), PLAYTEST.md, the nightly sharding, and the register
+  updates with the new pins and test counts.
+- docs/DEBT.md: DEBT-013 logged — render.rs (2473 lines) and main.rs
+  (1782) are monoliths; category code organization; why now: the
+  pre-declaration freeze (the split serves no acceptance criterion
+  and plan §19 schedules the presentation rewrite); replacement
+  plan: the pipeline/terrain/entities/overlay/minimap and
+  input/app/screens splits at the post-alpha pass; repay-when: that
+  rewrite. DEBT-011's and DEBT-012's triggers now name their
+  PLAYTEST.md probes (the audio probe and the placement-guess probe)
+  — the debts' declared triggers finally have their evidence channel.
+- docs/ASSUMPTIONS.md: A-088 (the F8 dump format + the sidecar's
+  determinism scope), A-089 (--record's per-segment write points),
+  A-090 (the 10x100 shard shape + the skipped --json flag) — each
+  citing its plan section.
+- AI-Handoff.md: §2 status rewritten for M10.1 complete with the
+  Next: line pointing at the playtest (run it, fill the table, flip
+  A14, declare); §4 verification block gains the --seed/--record/
+  replay-verify commands and the measured expectations (414 dev /
+  409 release, per-crate counts, the new pins); §5's client line and
+  §6's board gain the M10.1 modules/row; §8's remaining-work list is
+  the playtest and the declaration.
+- docs/ARCHITECTURE.md: status header to M10.1; the client map
+  records report.rs and main.rs's M10.1 additions; a post-alpha
+  refactor map records the intended module boundaries for DEBT-013's
+  split (guidance only — the debt row owns the work).
+- README.md: the contributing section's bug-report promise now names
+  F8 and the two dump files. The stage badge stays 'A14 playtest
+  pending' — the owner flips it after the playtest, not this pass.
+- LICENSE: deliberately untouched (no license chosen); flagged in
+  the final report — a public repo taking external testers needs a
+  license decision, the owner's call.
+---
+ AI-Handoff.md        | 68 ++++++++++++++++++++-------------------
+ CHANGELOG.md         | 76 +++++++++++++++++++++++++++++++++++++++++---
+ README.md            |  6 +++-
+ docs/ARCHITECTURE.md | 49 +++++++++++++++++++++++++---
+ docs/ASSUMPTIONS.md  | 38 ++++++++++++++++++++++
+ docs/DEBT.md         |  5 +--
+ 6 files changed, 198 insertions(+), 44 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index ff57e24..e54f80f 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -31,7 +31,7 @@
+ | Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M9.1 (input hotfix) COMPLETE on top of M9 — the loop is playable, and now *controllable*.** The DEBT-008 human pass finally ran (the project owner played the windowed build) and reported: *"nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears on the screen."* Every symptom was real and every root cause was client-side (the simulation itself was machine-verified through M9 and untouched): (1) the camera's screen-right axis had been **negated since M3** — D panned left, A right, W retreated, S advanced; no sim-side test can catch presentation direction, and nobody had ever played it; (2) the mouse **could not move the camera at all** — plan §11.3's "pan by edge + keys" and "zoom toward the cursor" were never implemented, and the wheel direction was inverted (orbit-only); (3) right-click only ever issued `Move` — **the client had no way to order an attack at all** (§11.3's right-click *context* command was unimplemented); (4) 'A' fired attack-move on key-down *and on every OS key repeat* while also being a pan key; (5) **rejected orders were silent** — `CommandRejected` events were dropped, so every illegal order read as "the controls don't work"; (6) the opening camera framed the map center at 58 tiles out — the starting force read as specks ("nothing appears"); (7) `frames_presented` only advanced in `--frames` verification mode, so M9's flashes and pings **never expired and accumulated forever** in normal play. M9.1 fixes all seven: corrected pan axes (with direction-pinning tests at yaw 0 and 90°), WASD + arrow-key panning at frame-rate-independent speed, edge scrolling + middle-drag grab-pan + wheel zoom-toward-cursor, right-click context resolution (enemy → Attack, node → Gather for workers, ground → Move; `client::orders`), 'A' arms attack-move for the next left-click (HUD line included; Esc/right-click cancels), key-repeat guards, refusal cues (red square at the click point + HUD reason line; the smoke run now pins the wiring with a deliberately invalid order), selection corner brackets, an opening camera focused on the player's start at 26 tiles (re-framed on restart), map-bounds clamping, and a viewport-centered end screen. Machine-verified end to end under Xvfb + llvmpipe with XTEST injection (the DEBT-008 recipe, extended — see §8): a 900-frame windowed run with drag-box selection of the 5 start entities and 2 submitted commands (a context Move and an armed attack-move), the loop healthy through pan, zoom, and middle-drag. 352 dev / 347 release tests green (19 new: 7 camera, 8 context-resolution, 4 feedback). **Zero golden movement** — the fix is 100% presentation/input (no sim/ai/content files touched): demo `0x9d5ba9b565060336`, flagship `0x01b3b60b741f03e9`, content `0x249b69f0ee343a10` all re-verified bit-identical. (M10.1: those were the FNV-era values — the canonical hasher swap repaid DEBT-001 and moved every digest; §4 carries the current pins.) M9 remains complete underneath (the frozen-army chase-order pop, the re-marching wave machine with CC focus, waves of ten — matches resolve in 9.1k–23.3k ticks across a 32-seed sweep, `tests/alpha_loop.rs`; the feel pass: hit flashes, health bars, command pings, the §11.5 audio seam). DEBT-008 is narrowed to its last inch: the human *re-verification* of the fixed build on a real display (the feel judgment). **Next: M10 is complete — the acceptance sweep is recorded in docs/ALPHA_DECLARATION.md** | defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result, derived state per A-066, not hashed — the same reasoning as fog A-059; the defeat check fires only in structure-bearing matches, A-067). `MatchHost` hosts the vs-AI opponent (`with_controllers`), keeps the command log, surfaces the outcome; the client's full loop (hosted AI, end screen, R restart, control groups, context orders, feedback cues) runs through it. A15 green (two fresh hosts from the same seed: identical hashes; with AI controllers: identical logs too). |
++| Status | **M10.1 (pre-declaration hardening & A14 enablement) COMPLETE — the Alpha declaration now waits only on the A14 human playtest; `docs/PLAYTEST.md` is the instrument, F8 the evidence channel.** What this pass did: (1) repaid DEBT-001 — `fx::XxHash64` (the reference XXH64, written in-repo like PCG32) is now the canonical hasher behind the same `write_*`/`finish` surface; the pass's single hash-moving commit re-pinned every golden with its written reason (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262` / map id `0xd38136401ab02ff1`); encodings and format versions unchanged (A-087; `Fnv1a64` remains the replay file checksum). (2) The windowed client joined the reproducibility promise: `--seed <u64>`, `--record <path>` (writes at match end / clean exit; `tools replay-verify` accepts the file), and the §11.6 F8 deterministic bug-report dump (`pandemonium-report-<seed>-tick<tick>.pdrp` + the `-info.txt` sidecar; pure-function assembly in `crates/client/src/report.rs`, re-sim-verified at the client seam, works while paused). (3) `docs/PLAYTEST.md` — the A14 instrument, all eight sections. (4) The nightly soak: sharded 10×100 with disjoint seeds proven in comments, `timeout-minutes` everywhere, per-shard evidence artifacts, and an aggregate job that gates on `crashed`. (5) Registers closed out: DEBT-013 (the client monoliths) logged, DEBT-011/012 triggers sharpened to name their PLAYTEST.md probes, A-087..A-090 logged, ARCHITECTURE carries the post-alpha refactor map. 414 dev / 409 release tests green (20 new: 8 fx, 12 client). **Next: run the playtest (≥ 5 testers through PLAYTEST.md), fill the results table, flip A14 in `docs/ALPHA_DECLARATION.md`, declare the Alpha** |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -61,18 +61,24 @@ cargo run -p pandemonium-tools -- headless --seed 7 --ticks 300
+ cargo run -p pandemonium-tools -- headless --seed 7 --ticks 7200 --p1 ai --p2 ai
+ cargo run -p pandemonium-client             # windowed 3D client; headless smoke pass without a display
+ cargo run -p pandemonium-client -- --frames 900   # windowed smoke: auto-exit + evidence summary
++cargo run -p pandemonium-client -- --seed 42 --record run.pdrp   # named seed + session replay
++cargo run -p pandemonium-tools -- replay-verify run.pdrp         # the record re-verifies (A2)
+ ```
+ 
+-Expected at this handoff: all commands succeed; 352 tests pass in dev
+-(347 in release — the 5 should-panic invariant-checker tests are
+-debug-only by nature — `debug_assert` compiles out in release): 39 fx
+-unit tests, 15 fx property tests, 16 ai unit tests (15 + M9's
+-re-march pin), 105 sim unit tests (103 + M9's two chase-order-pop
+-tests), 4 sim_api unit tests, 8 replay codec tests, 48 engine tests
+-(41 + M9.1's seven camera direction/pan_world/zoom_toward/focus
+-pins), 22 client tests (10 + M9.1's eight context-resolution and
+-four refusal/bracket tests), 11 tools tests, 33 content unit tests,
+-and the acceptance suite: 9 determinism (A1/A2), 4 content-pipeline, 3 movement, 4
++Expected at this handoff: all commands succeed; 414 tests pass in dev
++(409 in release — the 5 should-panic invariant-checker tests are
++debug-only by nature — `debug_assert` compiles out in release): 47 fx
++unit tests (40 + M10.1's seven xxHash64 tests: the reference golden
++vectors, every-split and chunked incremental equality, LE integer
++writes, seed sensitivity), 20 fx property tests (19 + M10.1's
++xxHash64 chunking-invariance property), 16 ai unit tests, 108 sim unit
++tests, 4 sim_api unit tests, 8 replay codec tests, 53 engine tests,
++55 client tests (43 + M10.1's twelve: `report.rs`'s five — the
++re-sim-verified record, F8-during-pause validity, sidecar
++determinism, the stem's purity, the controls line — and the seven
++`--seed`/`--record`/`--frames` parser tests), 17 tools tests, 33
++content unit tests,
++and the acceptance suite: 9 determinism (A1/A2), 5 content-pipeline, 3 movement, 4
+ economy, 7 combat, 5 vision, 2 architecture-law, 8 M7 tests
+ (`tests/ai.rs`: two A5 structural audits, the A5 ledger identity, the
+ A11 battery, the A11 proptest fuzz, completion + determinism, the
+@@ -144,7 +150,7 @@ crates/ai        DONE    Controller trait (plan §9.6 verbatim) + ScriptedContro
+ crates/replay    DONE    canonical LE byte codec + checksummed replay record/validate (re-sim driver lives in sim since M7)
+ crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh, Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5): AudioSink trait, the pure event -> cue mapping, the null counter sink (*engine core)
+                    (*engine core)
+-crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink (*DEBT-008 keeps the human visual pass)
++crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split)
+ crates/tools     DONE    headless (the M1 demo + M7's --p1/--p2 ai|idle controller slots over the real content, per-player evidence lines, --record for both), replay-verify (world resolution by content identity), content-validate (clap CLI)
+ tests/           ACTIVE  pandemonium-tests: architecture_law.rs (A13) + determinism.rs (A1/A2 + spine proofs) + content_pipeline.rs (M2/A3) + movement.rs (M4/P1) + economy.rs (M5/P3) + combat.rs (M6/P2) + vision.rs (M6/A10) + ai.rs (M7: A5 + A11 + AI-vs-AI completion/determinism/golden/log-alone replay)
+ content/         DONE    rules/, entities/ (9 kinds), factions/ (Legion), maps/ (Crossroads 64x64, symmetric, heightmap)
+@@ -174,6 +180,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M9 | Alpha content & feel pass | ✅ **complete** | The M8 gap closed: the frozen-chase-order sim bug fixed (defense orders outliving their dead targets froze both armies; combat stage 1 pops them now — 2 unit tests), the wave machine re-marches on the pressure cadence and focuses the sighted enemy CC (re-pinned + a new pin test), waves of ten / army cap sixteen. `tests/alpha_loop.rs`: AI-vs-AI resolves inside 27000 ticks across seeds (measured 9.1k–23.3k over a 32-seed sweep), end-to-end resolution determinism (same seed → same winner, end tick, log, final hash), and the windowed host's vs-AI loop closes naturally (an idle human's base falls to the AI, `outcome()` surfaces through the end-screen boundary). Feel pass: hit flashes, health bars, command pings (5 unit tests, no GPU needed), the `AudioSink` seam + placeholder cue set (3 unit tests; no audible backend — DEBT-011). Manifest review: no value changed — the stall was code, not content (§10.4 pins hold). Goldens: the demo untouched; the AI flagship re-pinned twice with written reasons |
+ | M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+ | M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (M10 verified them bit-identical at their then-FNV values; M10.1's hasher swap re-pinned them: demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
++| M10.1 | Pre-declaration hardening & A14 enablement | ✅ **complete** | DEBT-001 repaid: xxHash64 is the canonical hasher (one hash-moving commit; every golden re-pinned with its written reason — demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262; encodings and format versions unchanged, A-087). The client joined the reproducibility promise: `--seed`, `--record` (match end / clean exit, `replay-verify`-accepted), and the §11.6 F8 bug-report dump (replay + deterministic sidecar; pure assembly in `client/src/report.rs`, re-sim-verified at the client seam, pause-safe, windowed-verified under Xvfb+XTEST — same-tick `.pdrp` byte-identical). `docs/PLAYTEST.md` written (all eight sections — the A14 instrument). The nightly soak sharded 10×100 (disjoint seeds proven in comments), timeouts on every job, per-shard evidence artifacts + an aggregate crashed-gate. Registers closed: DEBT-013 logged, DEBT-011/012 triggers sharpened to their PLAYTEST.md probes, A-087..A-090, CHANGELOG carries M10.1. 414 dev / 409 release green (20 new tests). Zero golden movement outside Task 1's single swap commit |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+ M4 movement, M5 economy/production/construction, M6 combat & vision, M7
+@@ -616,26 +623,23 @@ event, the `MatchHost` extensions for AI hosting + outcome + log, the
+ windowed client's vs-AI loop with end screen + restart + control groups +
+ hotkeys, and the A15 restart cleanliness proof). What remains, in order:
+ 
+-1. **The human *re*-verification pass of DEBT-008 (narrowed to its last
+-   inch by M9.1)**: the human pass finally RAN (the project owner played
+-   the M9 windowed build on a real display) — and it did its job: it
+-   found every input-layer defect the machine pass is structurally blind
+-   to (mirrored pan axes since M3, no mouse camera control, no attack
+-   order path, key-repeat spam, silent rejections, the illegible opening
+-   zoom, never-expiring cues). M9.1 fixed them all; the machine half is
+-   re-proven (Xvfb + XTEST: 900 frames, 5-entity drag selection, context
+-   Move + armed attack-move). What still needs a human: play the M9.1
+-   build — `cargo run -p pandemonium-client` — through a full vs-AI
+-   match to resolution and judge that the controls now *feel* right
+-   (pan/zoom/edge-scroll/middle-drag, right-click context orders, the
+-   armed-A flow, the refusal cues, the selection brackets, the opening
+-   framing, the end screen + restart). Then DEBT-008 closes.
+-2. **M10 — Stabilization & declaration (Phase 5)**: the full A1–A15
+-   acceptance sweep with written evidence, the 1000-match nightly soak
+-   (A7), benchmark baselines (plan §15), the documentation pass, and
+-   `docs/ALPHA_DECLARATION.md`. DEBT-011 (no audible audio backend)
+-   is a declaration-time finding, not a blocker — plan §11.5's letter
+-   is satisfied by the seam.
++1. **A14 — the human playtest (the declaration's one open gate).** The
++   instrument exists (`docs/PLAYTEST.md`: quickstart, controls card, the
++   unaided-loop checklist, spectator legibility, the debt-arming probes,
++   the F8 procedure, the results table) and the evidence channel exists
++   (F8's replay + sidecar, `--record`, `--seed`). What it needs: the
++   owner distributes the post-M10.1 build, ≥ 5 testers run the loop
++   unaided, the results table fills honestly — a failed tester is a
++   finding, never a wave-through. The same sessions close DEBT-008's
++   human re-verification (play the full vs-AI match to resolution and
++   judge the controls *feel* right) and arm the DEBT-011/DEBT-012
++   triggers through PLAYTEST.md's probes.
++2. **Declare the Alpha (or file the findings).** Flip A14 in
++   `docs/ALPHA_DECLARATION.md` citing PLAYTEST.md, flip the README stage
++   badge, update this file's §2 "Next:", decide the LICENSE (flagged:
++   a public repo taking external playtesters needs one — the owner's
++   copyright, the owner's call), and write the declaration (or record
++   the honest findings, per plan §13's rule).
+ 3. Known limitations to carry forward honestly: the formation-less jam shape
+    (A-040), path-smoothing-free staircases on detours, stalled construction
+    sites when the builder dies (no reassignment command — A-045, carried
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 3941425..5522041 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,11 +7,68 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
+ does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
+ its milestone tag.
+ 
+-## [Unreleased] — pre-M10 cleanup
+-
+-A review pass over M0–M9.1 in preparation for M10 (Stabilization &
+-declaration). No frozen decision changed; no golden hash moved; no
+-dependency bumped.
++## [M10.1] — pre-declaration hardening & A14 enablement
++
++The pass between M10 and the Alpha declaration: the one open gate is A14 (the
++human playtest), and it lacked its enabling machinery. This pass builds it,
++repays the one debt whose trigger had fired (DEBT-001), hardens the nightly
++soak, and closes out the registers — leaving the project one human playtest
++away from the declaration. Not new gameplay, content, balance, audio,
++graphics, multiplayer, or refactoring (plan §0 governs).
++
++- **fx (DEBT-001 repaid — the pass's single hash-moving commit)**:
++  `XxHash64` (the reference XXH64 algorithm, written in-repo like PCG32 —
++  the dependency law forbids `twox-hash`) is now the canonical hasher behind
++  the same incremental `write_*`/`finish` surface; the state hash, the
++  fixture/content hashes, and every checkpoint digest moved in one commit.
++  Golden-tested against reference vectors (stripe boundaries 31/32/33, a
++  nonzero seed) plus a chunking-invariance property. `STATE_ENCODING_VERSION`
++  and the replay `format_version` unchanged (byte layouts identical —
++  A-087; no replay files existed in the wild). `Fnv1a64` remains as the
++  replay *file* checksum. Every pinned golden re-pinned with its written
++  reason (one commit, no split: demo `0xb6fff6659cfb7709`, flagship
++  `0x6e9a18bd7c5f699f`, content hash `0x9bc18c521107b262` / map id
++  `0xd38136401ab02ff1`).
++- **client (plan §6.5/§11.6)**: the windowed player can now participate in
++  the reproducibility promise — `--seed <u64>` (default 7) names the match,
++  `--record <path>` writes a replay at match end / clean exit that
++  `tools replay-verify` accepts, and **F8** is the §11.6 deterministic
++  bug-report dump: a `pandemonium-report-<seed>-tick<tick>.pdrp` replay plus
++  a sidecar `…-info.txt` (seed, tick, content identity, player slot, frame
++  count, selection size, the controls line in effect — no wall-clock), both
++  filenames printed, an on-screen ping cue, works while paused. The assembly
++  lives in the new `crates/client/src/report.rs` as pure functions with
++  tests (the A2 re-sim pattern at the client seam, pause validity, sidecar
++  determinism); parser tests cover `--seed`/`--record`. Verified windowed
++  under Xvfb + XTEST (DEBT-008's recipe): seeds diverge, records verify,
++  two F8 dumps (one mid-run, one paused) replay-verify PASS and the `.pdrp`
++  is byte-identical across same-tick presses. Zero golden movement —
++  client-only.
++- **docs**: `docs/PLAYTEST.md` — the A14 instrument (per-OS quickstart, the
++  controls card, the unaided-loop checklist, spectator legibility, the
++  debt-arming probes, the F8 procedure, the five-row results table, the
++  pass bar).
++- **ci**: the nightly soak is sharded 10×100 (seeds disjoint by construction
++  — the arithmetic proven in comments), `timeout-minutes` on every job
++  (90/shard, 30 smoke, 30 bench), every shard tees + uploads its summary,
++  and an aggregate job concatenates the evidence, sums win rates, and fails
++  on any nonzero `crashed` count. Zero Rust changes.
++- **registers**: DEBT-001 repaid; DEBT-013 (client monoliths) logged with
++  the post-alpha split plan; DEBT-011/012 triggers sharpened to name their
++  PLAYTEST.md probes; A-087..A-090 logged (the no-bump swap, the F8 dump
++  format + sidecar scope, the `--record` per-segment semantics, the shard
++  shape); AI-Handoff §2/§4/§6 refreshed; ARCHITECTURE carries the
++  post-alpha refactor map.
++
++414 dev / 409 release tests green (20 new: 8 fx, 12 client); fmt + clippy
++clean; replay round-trip and `content-validate` re-run PASS at the new
++identity; a 4-match soak spot-check clean.
++
++## [M10] — stabilization & declaration (incl. the pre-M10 cleanup)
++
++The pre-M10 cleanup review pass (formerly `[Unreleased]`) shipped as part of
++the M10 series. No frozen decision changed; no golden hash moved at the time
++(the M10.1 hasher swap above is what moved them); no dependency bumped.
+ 
+ - **ci**: `Swatinem/rust-cache@v2` added to every CI job, keyed on
+   `Cargo.lock` — cuts typical CI time roughly in half on a cache hit.
+@@ -33,6 +90,15 @@ dependency bumped.
+   `Vec2Fx::dist` ↔ `(a - b).len()`, `Fnv1a64` integer-write LE encoding,
+   and `Fx::abs`/`Fx::square` contracts.
+ 
++The M10 declaration itself: the A1–A15 acceptance sweep recorded with
++evidence in `docs/ALPHA_DECLARATION.md` — thirteen criteria pass
++automated, A14 recorded as an honest finding pending the human playtest;
++the 1000-match A7 tier wired nightly; §15 bench baselines recorded
++(0.25 ms avg, 2.22 ms p99, 4060 t/s — all budgets met); the M10
++playability/visual series (command card, fog rendering, minimap,
++lighting, silhouettes, shadows, death fades) landed with zero golden
++movement.
++
+ ## [M9.1] — input hotfix (DEBT-008 human pass findings)
+ 
+ The first human playtest of the windowed client (the project owner, on a
+diff --git a/README.md b/README.md
+index b37f21d..e1403bf 100644
+--- a/README.md
++++ b/README.md
+@@ -385,7 +385,11 @@ the assumptions log; frozen decisions change only through an ADR.
+ Gameplay content is not accepted yet — the content pipeline is **complete** (M2), but the Alpha content manifest is locked per the plan; content is data, so the door opens when the data boundary exists and the Alpha declares. Bug reports, however,
+ are welcome now, and this project makes them unusually actionable: a report that
+ includes the seed and the tick is a reproducible incident. Anything else is a war
+-story.
++story. The windowed client writes that report for you: press **F8** at (or right
++after) the moment of the problem and it drops a replay record
++(`pandemonium-report-<seed>-tick<tick>.pdrp`) plus a sidecar `…-info.txt`
++carrying the seed, the tick, and the content identity — attach both files to the
++issue; the replay re-verifies headlessly (`tools replay-verify`).
+ 
+ ## License
+ 
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 9b17d14..255bd07 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1,9 +1,10 @@
+ # Pandemonium — Architecture
+ 
+-Status: milestone M9.1 complete (input hotfix on top of M9's Alpha content &
+-feel pass); M10 (Stabilization & declaration) is next. The authoritative
+-specification is [`plan.md`](../plan.md) — §2 frozen decisions, §4 workspace law,
+-§5 determinism rules, §10 content.
++Status: M10.1 complete (pre-declaration hardening & A14 enablement on top
++of M10's stabilization & declaration); the Alpha declaration now waits only
++on the A14 human playtest (`docs/PLAYTEST.md` is the instrument). The
++authoritative specification is [`plan.md`](../plan.md) — §2 frozen decisions,
++§4 workspace law, §5 determinism rules, §10 content.
+ This file is the working map of how the code is actually laid out; update it when the
+ shape of the system changes, not for every feature. For current build status and what
+ exists versus what is pending, see [`AI-Handoff.md`](../AI-Handoff.md).
+@@ -312,6 +313,21 @@ crates/client/src/
+                   the host with fresh controllers from the same bundle + seed,
+                   A15); control groups 1-9 (Ctrl+digit assigns, digit recalls);
+                   'S' Stop and 'A' AttackMove hotkeys on the selection.
++                  **M10.1**: `--seed <u64>` names the match; `--record <path>`
++                  writes the segment's replay at match end / clean exit (every
++                  exit path funnels through the winit `exiting` hook); the
++                  per-frame checkpoint trail feeding both lives here.
++  report.rs       M10.1 (plan §6.5/§11.6): the reproduction tooling's pure
++                  assembly — `replay_record` (the ReplayFile built exactly
++                  like the tools' recorder: content hash, map id, the host's
++                  command log, the trail, the forced final), `sidecar_text` +
++                  `SidecarInfo` (the deterministic F8 info file), `report_stem`
++                  (the `<seed>-tick<tick>` filename), `write_files`. F8's
++                  handler in main.rs drives these; the client-seam A2 test
++                  (decode + `run_command_log` re-sim + hash equality), the
++                  pause-validity test, and the sidecar determinism test live
++                  here. Also the M10 command card / minimap / fog / visual
++                  series (ui.rs) and the feel pass's feedback.rs.
+   text.rs         our own text renderer (plan §3.1/§3.2): fontdue rasterizes
+                   the embedded "Pandemonium Sans" (ASCII subset of DejaVu
+                   Sans, renamed per the Bitstream Vera license —
+@@ -332,6 +348,31 @@ made structural. The windowed path is machine-verified on Xvfb + llvmpipe
+ (selection + right-click Move provably work — A-037); only the human visual
+ pass remains (DEBT-008, narrowed).
+ 
++### Post-alpha refactor map (guidance only — DEBT-013 owns the work)
++
++The client grew two monoliths (`render.rs` ~2.5k lines, `main.rs` ~1.8k lines:
++DEBT-013). The split below records the intended module boundaries for the
++post-alpha presentation pass (plan §19 schedules that rewrite on purpose —
++renderer and UI are rewritten then, so no split happens before the Alpha
++declares). Guidance for whoever holds that debt, not a commitment:
++
++- `render/` — the wgpu renderer split by pipeline: `pipeline/` (device,
++  surface, common bind groups), `terrain/` (terrain mesh + fog decal),
++  `entities/` (instanced boxes, silhouettes, shadows, death fades),
++  `overlay/` (world-space cues: selection brackets, health bars, pings,
++  refusal squares), `minimap/` (the composite + its textures).
++- `app/` — the non-input application state: `main.rs`'s `App` struct,
++  match hosting + restart, the checkpoint trail, the `--record`/F8 wiring
++  (report.rs stays the pure seam).
++- `input/` — the winit event translation: camera controls, selection,
++  context orders, placement mode, control groups, hotkeys.
++- `screens/` — the end screen and any future menus (§11.4's shell).
++
++The seam to preserve while splitting: everything above `engine` stays above
++it — `MatchHost::submit`/`advance` remain the only mutation paths, and
++report.rs's pure functions keep the F8/`--record` assembly testable without
++a window.
++
+ ## The replay format (M1)
+ 
+ `crates/replay` encodes/decodes the plan §6.5 field list through its own canonical
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 7b4380a..418cca9 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -753,3 +753,41 @@ confirms or rejects it.
+   for no acceptance value. The swap is the pass's one hash-moving
+   commit; every subsequent task re-verifies zero golden movement
+   against the new pins.
++
++- **A-088 (§11.6, M10.1).** The F8 bug-report dump's shape: a
++  `pandemonium-report-<seed>-tick<tick>.pdrp` replay record (built exactly
++  as the tools' recorder builds one, forced final at the dump's tick) plus
++  a sidecar `-info.txt` carrying seed, tick, content hash, map id, player
++  slot, frame count, selection size, and the controls line in effect
++  (interpreted as the *input mode*: the armed-attack-move instruction, a
++  showing refusal notice, or the standing controls summary — the state a
++  reproducer needs). The sidecar's frame count is presented-frame state, so
++  two dumps at the same tick but different frames differ in exactly that
++  field; the "same tick → identical bytes" property is the pure-function
++  determinism over identical state (pinned by `report.rs`'s unit test —
++  no wall-clock, no paths, no environment), and the `.pdrp` itself is
++  byte-identical across same-tick presses (verified windowed). The dump
++  writes beside `--record`'s path when given, the working directory
++  otherwise.
++
++- **A-089 (§6.5, M10.1).** `--record`'s write points: at the match's end
++  (first `is_finished()` — the log is complete there) and at clean exit
++  (every exit path funnels through the winit `exiting` hook — window
++  close, Escape, the `--frames` budget — writing only when the match never
++  wrote its record). A restart starts a fresh segment: the checkpoint trail
++  and the written-flag reset with the host, so the file on disk always
++  describes the most recent completed or in-progress segment. Each write
++  overwrites the path — the recording is "the run so far", not an archive.
++
++- **A-090 (§12, M10.1).** The nightly soak's shard shape — 10 shards × 100
++  matches — reads plan §12's "in parallel processes" at the process level
++  (the soak binary itself stays sequential; the sequential runner is the
++  tested artifact). 10×100 keeps every shard's runtime inside a 90-minute
++  timeout at the measured ~800-830 ticks/s (~1.6M ticks per shard ≈ 33
++  minutes), leaves headroom for a cold build (~15-20 min) and slower
++  runners, and makes the seed intervals round ([BASE+100k, BASE+100k+100),
++  union [BASE, BASE+1000) — the same 1000 consecutive seeds the sequential
++  run covered). The smoke tier's seeds keep overlapping shard 0's first 32,
++  exactly as they overlapped the unsharded tier before it. The optional
++  `--json` summary flag was skipped: the tee'd text summary is the
++  evidence, and the flag was explicitly allowed to be dropped.
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index 591d35f..3358d22 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -19,5 +19,6 @@ repay-when trigger | status |`
+ | DEBT-008 | The windowed client's *machine* verification is green through M9.1 and the M10 visual pass; its *human* half ran at M9.1 and remains the closing act for every visual change since. History: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion; M8 narrowed the scope to the full vs-AI loop (hosted AI, end screen, restart, control groups, hotkeys); M9 machine-ran the full windowed vs-AI loop to natural resolution (`--frames 40000`, "match ended, player 1 wins (tick 5250)") and landed the feel pass (flashes, health bars, pings). **M9 — the human pass**: the project owner played the windowed build on a real display and reported the input layer was mirrored and half-missing ("nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears") — every symptom real, every root cause client-side (the camera's screen-right axis negated since M3; no mouse camera control — §11.3's edge pan and zoom-toward-cursor unimplemented, wheel inverted; no attack-order path — right-click context resolution unimplemented; 'A' firing attack-move on key-down and key repeats while doubling as a pan key; silent rejections; the 58-tile map-center opening zoom; M9's cues never expiring because the feedback clock only advanced in `--frames` mode). **M9.1** fixed all of it (direction-pinned camera tests, context-resolution tests, refusal-cue tests, the smoke's invalid-order pin, and the extended Xvfb+XTEST input verification: 900 frames, 5-entity drag selection, context Move + armed attack-move submitted). **M10** added the command card (train/build/queue-cancel/rally), fog rendering, the minimap, lighting, silhouettes, and death fades — the human pass now also judges those | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary; env: Xvfb with a screen at least as large as the 800x600 default window — e.g. 1280x800 — userland libEGL/libGLESv2 + a glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst, keyboard focus via `xdotool windowfocus`; no window manager — a WM breaks wgpu's GL surface here) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution with the M10 controls (command card: train from the CC/barracks, place structures with the ghost, cancel queue items, set rallies with a right-click; minimap: click-to-move, right-click orders; fog, silhouettes, death fades), confirm the loop is playable end to end and the visuals read, then close | a human pass on the M10 build | open (narrowed to the re-verification by M9.1/M10) |
+ | DEBT-009 | ~~M3's minimal HUD and debug overlays (plan §11.6) are not implemented~~ repaid: the HUD slice landed — fontdue text atlas (embedded "Pandemonium Sans" subset), screen-space UI pass, resource/population HUD, F3 debug overlay (tick, state hash, entity/selection counts), P pause, `.` single-step | simplification | repaid as the second M3 sub-slice | — | — | repaid (M3) |
+ | DEBT-010 | ~~The A12 `population <= cap` invariant is asserted strictly, with no allowance for the over-cap window classic RTS rules allow when population-providing structures are destroyed while units live~~ decided (M6, A-053): the strict invariant is **relaxed to "spawn-blocking"** — usage may exceed cap when combat destroys population-providing structures, and new spawns are blocked at the spawn gate (already the M5 production behavior — completed items hold at the queue front until headroom returns, A-042); no units die or decay from over-cap. The decision touches A12 only, not §9.4's reading (production/construction semantics are unchanged) | verification | decided as M6's first work item (the brief calls this out as blocking honest combat) | — | M6 combat exit (this row) | retired (M6) |
+-| DEBT-011 | Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence) | simplification | plan §11.5's Alpha scope is the seam ("optionally a few placeholder cues"); a real backend needs a dependency + device decision that buys the Alpha nothing (the machine check is the cue flow, which the smoke run prints) | implement a mixer sink behind the same `AudioSink` trait (the client swaps the sink; nothing above the boundary moves), probably `cpal` + a small PCM cue bank, with an external-crate allow-list amendment | the post-Alpha audio pass (plan §19: renderer, UI skin, audio are rewritten on purpose over time) or a human playtest that demands audible cues | open (M9) |
+-| DEBT-012 | The client's placement-legality preview and train-button requirement check are approximations (A-083/A-084): the preview ignores movers standing in the footprint, and a requirement satisfied by a still-under-construction structure passes the button check | simplification | the command gate is the authority and a wrong guess surfaces through the existing refusal cue; exact client-side checks would duplicate sim state (lifecycle, mover positions) above the boundary | if a human pass reports a confusing refusal, mirror the exact checks into a boundary view (e.g. expose placement verdicts through a PlayerView extension) instead of duplicating sim logic client-side | first human playtest of the command card that reports a wrong green/red guess | open (M10) |
++| DEBT-011 | Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence) | simplification | plan §11.5's Alpha scope is the seam ("optionally a few placeholder cues"); a real backend needs a dependency + device decision that buys the Alpha nothing (the machine check is the cue flow, which the smoke run prints) | implement a mixer sink behind the same `AudioSink` trait (the client swaps the sink; nothing above the boundary moves), probably `cpal` + a small PCM cue bank, with an external-crate allow-list amendment | the post-Alpha audio pass (plan §19: renderer, UI skin, audio are rewritten on purpose over time) — or PLAYTEST.md's audio probe ("did the absence of sound hurt your read of the game?", section 5) reporting a yes: that is the debt's declared trigger with its evidence channel | open (M9) |
++| DEBT-012 | The client's placement-legality preview and train-button requirement check are approximations (A-083/A-084): the preview ignores movers standing in the footprint, and a requirement satisfied by a still-under-construction structure passes the button check | simplification | the command gate is the authority and a wrong guess surfaces through the existing refusal cue; exact client-side checks would duplicate sim state (lifecycle, mover positions) above the boundary | if a human pass reports a confusing refusal, mirror the exact checks into a boundary view (e.g. expose placement verdicts through a PlayerView extension) instead of duplicating sim logic client-side | PLAYTEST.md's placement-guess probe ("did any build-placement preview say legal when the order was refused, or illegal when it should have succeeded?", section 5) reporting a wrong green/red guess — the debt's declared trigger with its evidence channel | open (M10) |
++| DEBT-013 | The client's two monolith files: `crates/client/src/render.rs` (2473 lines) and `crates/client/src/main.rs` (1782 lines pre-M10.1) concentrate the whole presentation — renderer, input handling, app state, HUD assembly, and now the F8/`--record` wiring — in two compilation units | code organization | pre-declaration freeze: the split serves no acceptance criterion, and plan §0's scope law forbids refactoring no test requires; plan §19 schedules the presentation rewrite anyway, so splitting now would be work the rewrite discards | split render.rs into pipeline/terrain/entities/overlay/minimap and main.rs into input/app/screens at the post-alpha presentation pass; the intended boundaries are recorded in `docs/ARCHITECTURE.md`'s post-alpha refactor map (guidance only — this row owns the work) | the post-Alpha renderer/UI rewrite (plan §19) | open (M10.1) |
+-- 
+2.47.3
+
