@@ -1,1 +1,3 @@
 TOKEN.txt
+.env
+*.token
