@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 014, lighting each one as git am applies it in order" width="100%">
+</p>
+
 # Pandemonium patch archive
 
 This is the delivery archive for **Pandemonium**, a classic real-time
