@@ -2,6 +2,10 @@
   <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 014, lighting each one as git am applies it in order" width="100%">
 </p>
 
+<p align="center">
+  <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 14 patches, 95 commits, one history; replay it all with git am; build, destroy, repeat" width="100%">
+</p>
+
 # Pandemonium patch archive
 
 This is the delivery archive for **Pandemonium**, a classic real-time
@@ -20,6 +24,7 @@ them).
 | ---------------- | -------------------------------------------------------------------------- |
 | `patches/`       | The patches, zero-padded and numbered so the listing reads oldest → newest |
 | `NOTES.md`       | Per-patch delivery notes — scope, base commit, verification, open asks     |
+| `assets/`        | Animated SVGs used by this README (banner, tagline, chart, terminal)       |
 | `apply-all.sh`   | A harmless prank: fake progress, a dancing figure, a sad trombone. Applies nothing |
 
 ## The patch chain
@@ -28,6 +33,10 @@ Patches must be applied in numerical order; each one applies on the HEAD
 produced by the one before it. The **Base** column is the source-repo
 commit the patch was generated against, as recorded when it was
 delivered (`—` where no base was recorded).
+
+<p align="center">
+  <img src="assets/commits.svg" alt="Animated bar chart: one bar per patch showing its commit count, from 12 commits in patch 001 up to 14 in patch 014, with a running total that ends at 95 commits" width="100%">
+</p>
 
 | #   | Milestone                         | Patch                                         | Commits | Base                                       |
 | --- | --------------------------------- | --------------------------------------------- | ------- | ------------------------------------------ |
@@ -51,6 +60,13 @@ patch actually does, see the matching note in [NOTES.md](NOTES.md) (not
 every patch has one yet).
 
 ## Applying the patches
+
+<p align="center">
+  <img src="assets/terminal.svg" alt="Animated terminal: cloning pandemonium-bd, checking out the base commit, then git am streaming the 27 commits of patches 013 and 014 one by one" width="100%">
+</p>
+
+The animation replays patches 013 and 014 (27 commits). The copy-pasteable
+version:
 
 ```sh
 git clone https://github.com/E-Vex/pandemonium-bd.git
