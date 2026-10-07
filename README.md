@@ -20,7 +20,7 @@ them).
 | ---------------- | -------------------------------------------------------------------------- |
 | `patches/`       | The patches, zero-padded and numbered so the listing reads oldest → newest |
 | `NOTES.md`       | Per-patch delivery notes — scope, base commit, verification, open asks     |
-| `apply-all.sh`   | Applies the patches to a checkout of the source repo, in order             |
+| `apply-all.sh`   | A harmless prank: fake progress, a dancing figure, a sad trombone. Applies nothing |
 
 ## The patch chain
 
@@ -57,11 +57,16 @@ git clone https://github.com/E-Vex/pandemonium-bd.git
 cd pandemonium-bd
 git checkout <base commit of the first patch you want>
 
-# apply everything, or a range (patch numbers):
-../stationRepo/apply-all.sh .            # all patches
-../stationRepo/apply-all.sh . 013 014    # only 013 through 014
+# apply everything, in order:
+git am ../stationRepo/patches/*.patch
+
+# or a range, e.g. only 013 and 014:
+git am ../stationRepo/patches/013-*.patch ../stationRepo/patches/014-*.patch
 ```
 
-The script refuses to run on a dirty tree and stops at the first patch
-that fails, leaving `git am` in progress so you can inspect it
+Start from a clean working tree. `git am` stops at the first patch that
+fails and leaves the session in progress so you can inspect it
 (`git am --abort` to back out).
+
+> `apply-all.sh` in this repo is a joke — run it for a laugh, but it
+> applies nothing.
