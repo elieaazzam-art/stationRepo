@@ -4,7 +4,7 @@
 
 <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 15 patches · 111 commits · one history; every milestone, kept as a patch; build. destroy. repeat." width="100%">
 
-# 🔥 PANDEMONIUM · PATCH ARCHIVE
+# PANDEMONIUM · PATCH ARCHIVE
 
 **The complete delivery history of a classic real-time strategy game, built in Rust —**
 **every milestone preserved as a numbered `git format-patch` file.**
@@ -13,9 +13,9 @@
 [![Source repo][source-shield]][source-link]
 [![Patches][patches-shield]][chain-link]
 [![Commits archived][commits-shield]][chain-link]
-[![Language][toplanguage-shield]](#-tech-stack--shields)
-[![Shell][shell-shield]](#-tech-stack--shields)
-[![Theme][theme-shield]](#-the-inferno-theme-)
+[![Language][toplanguage-shield]](#tech-stack--shields)
+[![Shell][shell-shield]](#tech-stack--shields)
+[![Theme][theme-shield]](#the-inferno-theme)
 [![Stars][stars-shield]][repo-link]
 
 [![GitHub stars][stars-flat]][repo-link]
@@ -23,26 +23,26 @@
 [![GitHub issues][issues-flat]][issues-link]
 [![GitHub last commit][commit-flat]][commits-link]
 [![GitHub top language][lang-flat]][repo-link]
-[![License][license-flat]](#-license)
+[![License][license-flat]](#license)
 
 <br />
 
-**`⚓ Explore the archive`**
+**`Explore the archive`**
 
-<a href="#-overview"><img src="https://img.shields.io/badge/%20-Overview-FF3EA5?style=for-the-badge&labelColor=2D1743&logo=bookstack&logoColor=FFB020" alt="Overview"></a>
-<a href="#-table-of-contents"><img src="https://img.shields.io/badge/%20-Contents-9A5CA0?style=for-the-badge&labelColor=2D1743&logo=book&logoColor=F3E8FF" alt="Contents"></a>
-<a href="#-tech-stack--shields"><img src="https://img.shields.io/badge/%20-Tech%20Stack-FF8C00?style=for-the-badge&labelColor=2D1743&logo=rust&logoColor=white" alt="Tech Stack"></a>
-<a href="#-key-features"><img src="https://img.shields.io/badge/%20-Features-BD00FF?style=for-the-badge&labelColor=2D1743&logo=superhums&logoColor=FFD166" alt="Features"></a>
-<a href="#-the-patch-chain"><img src="https://img.shields.io/badge/%20-Patch%20Chain-FFD166?style=for-the-badge&labelColor=2D1743&logo=git&logoColor=FF3EA5" alt="Patch Chain"></a>
-<a href="#-installation--usage"><img src="https://img.shields.io/badge/%20-Usage-2ECC71?style=for-the-badge&labelColor=2D1743&logo=gnubash&logoColor=white" alt="Usage"></a>
-<a href="#-architecture--delivery-flow"><img src="https://img.shields.io/badge/%20-Architecture-FFB020?style=for-the-badge&labelColor=2D1743&logo=schema&logoColor=F3E8FF" alt="Architecture"></a>
-<a href="#-demo--showcase"><img src="https://img.shields.io/badge/%20-Demo-F3E8FF?style=for-the-badge&labelColor=2D1743&logo=youtube&logoColor=FF3EA5" alt="Demo"></a>
+<a href="#overview"><img src="https://img.shields.io/badge/%20-Overview-FF3EA5?style=for-the-badge&labelColor=2D1743&logo=bookstack&logoColor=FFB020" alt="Overview"></a>
+<a href="#table-of-contents"><img src="https://img.shields.io/badge/%20-Contents-9A5CA0?style=for-the-badge&labelColor=2D1743&logo=book&logoColor=F3E8FF" alt="Contents"></a>
+<a href="#tech-stack--shields"><img src="https://img.shields.io/badge/%20-Tech%20Stack-FF8C00?style=for-the-badge&labelColor=2D1743&logo=rust&logoColor=white" alt="Tech Stack"></a>
+<a href="#key-features"><img src="https://img.shields.io/badge/%20-Features-BD00FF?style=for-the-badge&labelColor=2D1743&logo=superhums&logoColor=FFD166" alt="Features"></a>
+<a href="#the-patch-chain"><img src="https://img.shields.io/badge/%20-Patch%20Chain-FFD166?style=for-the-badge&labelColor=2D1743&logo=git&logoColor=FF3EA5" alt="Patch Chain"></a>
+<a href="#installation--usage"><img src="https://img.shields.io/badge/%20-Usage-2ECC71?style=for-the-badge&labelColor=2D1743&logo=gnubash&logoColor=white" alt="Usage"></a>
+<a href="#architecture--delivery-flow"><img src="https://img.shields.io/badge/%20-Architecture-FFB020?style=for-the-badge&labelColor=2D1743&logo=schema&logoColor=F3E8FF" alt="Architecture"></a>
+<a href="#demo--showcase"><img src="https://img.shields.io/badge/%20-Demo-F3E8FF?style=for-the-badge&labelColor=2D1743&logo=youtube&logoColor=FF3EA5" alt="Demo"></a>
 
 </div>
 
 ---
 
-## 📜 Overview
+## Overview
 
 This is the **delivery archive** for [**Pandemonium**](https://github.com/E-Vex/pandemonium-bd), a classic
 real-time strategy game built in Rust with a *Generals: Zero Hour*-style feel. The game's source code lives
@@ -54,47 +54,47 @@ their original messages.
 > **Archive, not installer.** The patches are a record of what was delivered — kept for reference and
 > history, **not meant to be applied**. Treat `patches/` like git-bisect evidence, not an update channel.
 
-> **Theme: 🔥 Inferno.** This README is styled for a dark, volcanic look — an eggplant-black canvas
+> **Theme: Inferno.** This README is styled for a dark, volcanic look — an eggplant-black canvas
 > (`#150A1E`) with hot magenta (`#FF3EA5`), ember orange (`#FF8C00` / `#FFB020`) and gold (`#FFD166`)
 > accents, lit by a purple-to-flame gradient (`#BD00FF → #FF8C00`). Patches glow like embers along the
 > chain. All assets honor `prefers-reduced-motion` and render cleanly in GitHub **dark and light** modes.
 
-### 🎯 At a glance
+### At a glance
 
 | Metric | Value | Meaning |
 | :--- | :---: | :--- |
-| 🗂️ **Patches** | **16 files / 15 deliveries** | Numbered `001`–`016`, zero-padded, oldest → newest |
-| 📦 **Commits archived** | **111** | Every delivery commit, message intact |
-| 🏗️ **Milestones** | **M6 → M10.2** | Combat vision → AI → match rules → polish phases |
-| ✅ **Quality gates** | **Green end-to-end** | `fmt` · `clippy -D warnings` · 350+ tests · pinned goldens |
-| 🧪 **Determinism** | **Zero golden movement** | Bit-identical hashes re-verified per delivery |
+| **Patches** | **16 files / 15 deliveries** | Numbered `001`–`016`, zero-padded, oldest → newest |
+| **Commits archived** | **111** | Every delivery commit, message intact |
+| **Milestones** | **M6 → M10.2** | Combat vision → AI → match rules → polish phases |
+| **Quality gates** | **Green end-to-end** | `fmt` · `clippy -D warnings` · 350+ tests · pinned goldens |
+| **Determinism** | **Zero golden movement** | Bit-identical hashes re-verified per delivery |
 
 ---
 
-## 🗂️ Table of Contents
+## Table of Contents
 
-- [📜 Overview](#-overview)
-- [🛠 Tech Stack & Shields](#-tech-stack--shields)
-- [✨ Key Features](#-key-features)
-- [🔗 The Patch Chain](#-the-patch-chain)
-  - [📖 Per-patch notes](#-per-patch-notes)
-- [📁 Repository Layout](#-repository-layout)
-- [🚀 Installation & Usage](#-installation--usage)
-  - [🧾 Verifying a patch file](#-verifying-a-patch-file)
-  - [🎭 The RUNME.sh easter egg](#-the-runmesh-easter-egg)
-- [🏛 Architecture & Delivery Flow](#-architecture--delivery-flow)
-- [🎬 Demo & Showcase](#-demo--showcase)
-- [🌋 The Inferno Theme](#-the-inferno-theme-)
-- [🤝 Contributing](#-contributing)
-- [🧭 Roadmap](#-roadmap)
-- [📄 License](#-license)
-- [📬 Contact & Credits](#-contact--credits)
+- [Overview](#overview)
+- [Tech Stack & Shields](#tech-stack--shields)
+- [Key Features](#key-features)
+- [The Patch Chain](#the-patch-chain)
+  - [Per-patch notes](#per-patch-notes)
+- [Repository Layout](#repository-layout)
+- [Installation & Usage](#installation--usage)
+  - [Verifying a patch file](#verifying-a-patch-file)
+  - [The RUNME.sh easter egg](#the-runmesh-easter-egg)
+- [Architecture & Delivery Flow](#architecture--delivery-flow)
+- [Demo & Showcase](#demo--showcase)
+- [The Inferno Theme](#the-inferno-theme)
+- [Contributing](#contributing)
+- [Roadmap](#roadmap)
+- [License](#license)
+- [Contact & Credits](#contact--credits)
 
 ---
 
 <div align="center">
 
-## 🛠 Tech Stack & Shields
+## Tech Stack & Shields
 
 *The tools that forge the archive.*
 
@@ -117,31 +117,31 @@ their original messages.
 [![Markdown][md-shield]](https://daringfireball.net/projects/markdown/)
 [![Shields.io][shieldsshield]](https://shields.io)
 [![GitHub][gh-shield]](https://docs.github.com)
-[![Clippy][clippy-shield]](#-key-features)
-[![Golden tests][golden-shield]](#-key-features)
+[![Clippy][clippy-shield]](#key-features)
+[![Golden tests][golden-shield]](#key-features)
 
 </div>
 
 ---
 
-## ✨ Key Features
+## Key Features
 
 > One milestone in, one immutable artifact out — the whole project history fits in a folder listing.
 
-| Feature | Icon | What it gives you |
-| :--- | :---: | :--- |
-| **Numbered patch chain** | 🔢 | Zero-padded `001`–`016` names so `ls` reads chronologically, oldest → newest |
-| **Faithful `git format-patch` output** | 📜 | Original commit messages, authorship and diffs — nothing rewritten |
-| **Base-commit provenance** | 🧬 | Each patch records the exact source SHA it was generated against |
-| **Per-patch delivery notes** | 🧾 | [`NOTES.md`](NOTES.md): scope, verification results, open asks — appended, never edited mid-file |
-| **Green-gated deliveries** | ✅ | fmt + `clippy -D warnings` + full test suites before any patch ships |
-| **Bit-identical goldens** | 🧊 | Pinned demo / flagship / content hashes re-verified — determinism is a contract |
-| **Animated Inferno assets** | 🌋 | SVG banner, typewriter tagline and flame-chart in [`assets/`](assets) |
-| **Reduced-motion friendly** | ♿ | Every animation degrades gracefully under `prefers-reduced-motion` |
-| **One scripted easter egg** | 🎭 | [`RUNME.sh`](RUNME.sh) — fake progress bar, dancing figure, sad trombone |
+| Feature | What it gives you |
+| :--- | :--- |
+| **Numbered patch chain** | Zero-padded `001`–`016` names so `ls` reads chronologically, oldest → newest |
+| **Faithful `git format-patch` output** | Original commit messages, authorship and diffs — nothing rewritten |
+| **Base-commit provenance** | Each patch records the exact source SHA it was generated against |
+| **Per-patch delivery notes** | [`NOTES.md`](NOTES.md): scope, verification results, open asks — appended, never edited mid-file |
+| **Green-gated deliveries** | fmt + `clippy -D warnings` + full test suites before any patch ships |
+| **Bit-identical goldens** | Pinned demo / flagship / content hashes re-verified — determinism is a contract |
+| **Animated Inferno assets** | SVG banner, typewriter tagline and flame-chart in [`assets/`](assets) |
+| **Reduced-motion friendly** | Every animation degrades gracefully under `prefers-reduced-motion` |
+| **One scripted easter egg** | [`RUNME.sh`](RUNME.sh) — fake progress bar, dancing figure, sad trombone |
 
 <details>
-<summary>🧊 <b>Why "zero golden movement" matters</b> — click to expand</summary>
+<summary><b>Why "zero golden movement" matters</b> — click to expand</summary>
 
 <br>
 
@@ -156,7 +156,7 @@ changed — and what provably did *not*.
 
 ---
 
-## 🔗 The Patch Chain
+## The Patch Chain
 
 Patches are numbered in delivery order, oldest → newest, and are kept here as an **archive** — they are not
 meant to be applied. The **Base** column is the source-repo commit each patch was generated against, as
@@ -166,7 +166,7 @@ recorded at delivery time (`—` where no base was recorded).
 <img src="assets/commits.svg" alt="Animated flame-chart: bars of ember gradient color grow one by one for each patch, from 12 commits in patch 001 up to 16 in patch 015, ending at a glowing 111-commit total" width="100%">
 </div>
 
-| № | Milestone | Patch | Commits | Base |
+| No. | Milestone | Patch | Commits | Base |
 | :-: | :--- | :--- | :-: | :--- |
 | 001 | M6 | [`001-m6-combat-vision.patch`](patches/001-m6-combat-vision.patch) | 12 | — |
 | 002 | M6 | [`002-m6-readme-update.patch`](patches/002-m6-readme-update.patch) | 1 | — |
@@ -188,14 +188,14 @@ recorded at delivery time (`—` where no base was recorded).
 
 Commit counts are the number of commits inside each patch file. **Total: 111 commits archived.**
 
-### 📖 Per-patch notes
+### Per-patch notes
 
 Detailed delivery notes — scope, base commit, verification transcript, open asks — live in
 [`NOTES.md`](NOTES.md), ordered oldest → newest. New notes are **appended at the bottom, never inserted in
 the middle**.
 
 <details>
-<summary>🔍 <b>Milestone digest</b> — what each era delivered (click to expand)</summary>
+<summary><b>Milestone digest</b> — what each era delivered (click to expand)</summary>
 
 <br>
 
@@ -211,34 +211,34 @@ the middle**.
 
 ---
 
-## 📁 Repository Layout
+## Repository Layout
 
 ```text
 stationRepo/
-├── patches/            # 🗄️  The archive — 16 numbered git format-patch files (001 → 016)
+├── patches/            #  The archive — 16 numbered git format-patch files (001 → 016)
 │   ├── 001-m6-combat-vision.patch
 │   ├── ...             #    zero-padded: the listing reads oldest → newest
 │   └── 016-m10.2-phase4-audio-v2.patch
-├── assets/             # 🎨  Animated SVGs powering this README
+├── assets/             #  Animated SVGs powering this README
 │   ├── banner.svg      #       ember travelling the patch chain
 │   ├── tagline.svg     #       typewriter tagline
 │   └── commits.svg     #       flame-chart, 111 commits
-├── NOTES.md            # 🧾  Per-patch delivery notes (append-only)
-├── CHANGELOG.md        # 📰  Repo-level changelog
-├── RUNME.sh            # 🎭  A harmless prank — see below
-├── README.md           # 👑  You are here
-└── .gitignore          # 🚫  Build dirs + secret files ignored
+├── NOTES.md            #  Per-patch delivery notes (append-only)
+├── CHANGELOG.md        #  Repo-level changelog
+├── RUNME.sh            #  A harmless prank — see below
+├── README.md           #  You are here
+└── .gitignore          #  Build dirs + secret files ignored
 ```
 
 ---
 
-## 🚀 Installation & Usage
+## Installation & Usage
 
 There is nothing to install or build — this repository contains **no source code**. Clone it to read the
 history, inspect any delivery, or enjoy the easter egg.
 
 <details open>
-<summary>📥 <b>Step 1 — Clone the archive</b></summary>
+<summary><b>Step 1 — Clone the archive</b></summary>
 
 ```bash
 git clone https://github.com/elieaazzam-art/stationRepo.git
@@ -251,7 +251,7 @@ ls patches/
 </details>
 
 <details>
-<summary>🔎 <b>Step 2 — Read a delivery like an email</b></summary>
+<summary><b>Step 2 — Read a delivery like an email</b></summary>
 
 Every file is RFC-2822-style `git format-patch` output: header lines, then one section per commit with its
 message and diff.
@@ -266,13 +266,13 @@ git apply --stat patches/013-m10.2-phase1-controls.patch
 
 </details>
 
-### 🧾 Verifying a patch file
+### Verifying a patch file
 
 Want proof a patch applies cleanly against its recorded base? Do it in a **throwaway clone of the source
 repo** — never against your working copy, and never permanently in this archive:
 
 <details>
-<summary>✅ <b>Dry-run check (applies nothing)</b></summary>
+<summary><b>Dry-run check (applies nothing)</b></summary>
 
 ```bash
 # 1. get the source repo and check out the patch's recorded base commit
@@ -289,15 +289,15 @@ git am --abort 2>/dev/null; cd .. && rm -rf pandemonium-bd
 ```
 
 > [!TIP]
-> If `--check` fails, the base SHA recorded in [The Patch Chain](#-the-patch-chain) is the place to look
+> If `--check` fails, the base SHA recorded in [The Patch Chain](#the-patch-chain) is the place to look
 > first — several patches chain off a previous patch's HEAD rather than a tagged release.
 
 </details>
 
-### 🎭 The `RUNME.sh` easter egg
+### The `RUNME.sh` easter egg
 
 <details>
-<summary>🃏 <b>What happens if you run it?</b> (spoilers: nothing dangerous)</summary>
+<summary><b>What happens if you run it?</b> (spoilers: nothing dangerous)</summary>
 
 <br>
 
@@ -316,7 +316,7 @@ patch run.
 
 ---
 
-## 🏛 Architecture & Delivery Flow
+## Architecture & Delivery Flow
 
 How a milestone travels from the source repo into this archive:
 
@@ -349,9 +349,9 @@ How a milestone travels from the source repo into this archive:
 
 ---
 
-## 🎬 Demo & Showcase
+## Demo & Showcase
 
-> 🎥 **GIF / screenshot slots — drop media into [`assets/`](assets) and it will light up automatically.**
+> **GIF / screenshot slots — drop media into [`assets/`](assets) and it will light up automatically.**
 
 <div align="center">
 
@@ -359,15 +359,15 @@ How a milestone travels from the source repo into this archive:
 <tr>
 <td align="center" width="33%">
 <img src="https://placehold.co/320x180/150A1E/FF3EA5?text=%E2%96%B6+Gameplay+GIF&font=mono" alt="Gameplay capture placeholder"><br>
-<b>⚔️ Gameplay</b><br><sub>M10.2 combat & controls in motion<br><i>(replace with <code>assets/gameplay.gif</code>)</i></sub>
+<b>Gameplay</b><br><sub>M10.2 combat & controls in motion<br><i>(replace with <code>assets/gameplay.gif</code>)</i></sub>
 </td>
 <td align="center" width="33%">
-<img src="https://placehold.co/320x180/150A1E/FFB020?text=%F0%9F%8E%9B+Menus+%26+HUD&font=mono" alt="Menus placeholder"><br>
-<b>🎛 Menus & HUD</b><br><sub>Phase 3 settings & legibility pass<br><i>(replace with <code>assets/menus.png</code>)</i></sub>
+<img src="https://placehold.co/320x180/150A1E/FFB020?text=Menus+%26+HUD&font=mono" alt="Menus placeholder"><br>
+<b>Menus & HUD</b><br><sub>Phase 3 settings & legibility pass<br><i>(replace with <code>assets/menus.png</code>)</i></sub>
 </td>
 <td align="center" width="33%">
-<img src="https://placehold.co/320x180/150A1E/BD00FF?text=%F0%9F%8E%A7+Terminal&font=mono" alt="Terminal placeholder"><br>
-<b>🎭 Terminal vibes</b><br><sub><code>RUNME.sh</code> in action (screen-record!)<br><i>(replace with <code>assets/runme.gif</code>)</i></sub>
+<img src="https://placehold.co/320x180/150A1E/BD00FF?text=Terminal&font=mono" alt="Terminal placeholder"><br>
+<b>Terminal vibes</b><br><sub><code>RUNME.sh</code> in action (screen-record!)<br><i>(replace with <code>assets/runme.gif</code>)</i></sub>
 </td>
 </tr>
 </table>
@@ -376,7 +376,7 @@ How a milestone travels from the source repo into this archive:
 
 ---
 
-## 🌋 The Inferno Theme
+## The Inferno Theme
 
 <p align="center">
 <code>#150A1E</code> · <code>#2D1743</code> · <code>#46266B</code> · <code>#BD00FF</code> · <code>#FF3EA5</code> · <code>#FF8C00</code> · <code>#FFB020</code> · <code>#FFD166</code> · <code>#F3E8FF</code>
@@ -384,52 +384,52 @@ How a milestone travels from the source repo into this archive:
 
 | Swatch | Token | Role |
 | :---: | :--- | :--- |
-| ⬛ | `#150A1E` | Eggplant-black canvas |
-| 🟪 | `#2D1743` / `#46266B` | Panel fills & borders |
-| 🟣 | `#BD00FF` | Purple side of the flame gradient |
-| 🩷 | `#FF3EA5` | Hot magenta — primary accent |
-| 🟠 | `#FF8C00` / `#FFB020` | Ember orange — heat & chart fire |
-| 🟡 | `#FFD166` | Gold — numbers & highlights |
-| ⬜ | `#F3E8FF` | Lilac text |
+| ![Swatch](https://img.shields.io/badge/_-150A1E-150A1E?style=flat-square) | `#150A1E` | Eggplant-black canvas |
+| ![Swatch](https://img.shields.io/badge/_-2D1743-2D1743?style=flat-square) | `#2D1743` / `#46266B` | Panel fills & borders |
+| ![Swatch](https://img.shields.io/badge/_-BD00FF-BD00FF?style=flat-square) | `#BD00FF` | Purple side of the flame gradient |
+| ![Swatch](https://img.shields.io/badge/_-FF3EA5-FF3EA5?style=flat-square) | `#FF3EA5` | Hot magenta — primary accent |
+| ![Swatch](https://img.shields.io/badge/_-FF8C00-FF8C00?style=flat-square) | `#FF8C00` / `#FFB020` | Ember orange — heat & chart fire |
+| ![Swatch](https://img.shields.io/badge/_-FFD166-FFD166?style=flat-square) | `#FFD166` | Gold — numbers & highlights |
+| ![Swatch](https://img.shields.io/badge/_-F3E8FF-F3E8FF?style=flat-square) | `#F3E8FF` | Lilac text |
 
 All animated assets ([`assets/`](assets)) share this palette, respect `prefers-reduced-motion`, and carry
 descriptive `alt` text so the archive stays readable in any theme or screen reader.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome — docs, notes, and metadata keep this archive honest.
 
-1. 🍴 Fork the repository
-2. 🌱 Create your branch: `git checkout -b docs/my-note`
-3. 📝 Make your change (notes are **append-only**; never rewrite patch history)
-4. 📸 Add a line to [`CHANGELOG.md`](CHANGELOG.md)
-5. 🔀 Open a Pull Request
+1. Fork the repository
+2. Create your branch: `git checkout -b docs/my-note`
+3. Make your change (notes are **append-only**; never rewrite patch history)
+4. Add a line to [`CHANGELOG.md`](CHANGELOG.md)
+5. Open a Pull Request
 
 > [!NOTE]
 > `patches/*.patch` files are immutable historical artifacts. Corrections belong in a new note or a new
 > patch delivery (as `016-v2` demonstrates), never in-place edits.
 
-## 🧭 Roadmap
+## Roadmap
 
 | Status | Milestone | Scope |
 | :---: | :--- | :--- |
-| ✅ | **M6 – M9.1** | Combat vision, AI commands, match rules, alpha feel, input hotfix |
-| ✅ | **pre-M10 – M10.1** | Cleanup & review pass, stabilization & declaration, decal fix, hardening |
-| ✅ | **M10.2 Phases 1–4** | Controls, visual legibility, menus & settings, audio (v2 rebased) |
-| 🚧 | **Next deliveries** | Continue upstream in [E-Vex/pandemonium-bd](https://github.com/E-Vex/pandemonium-bd) — archived here as `017…` |
+| **Done** | **M6 – M9.1** | Combat vision, AI commands, match rules, alpha feel, input hotfix |
+| **Done** | **pre-M10 – M10.1** | Cleanup & review pass, stabilization & declaration, decal fix, hardening |
+| **Done** | **M10.2 Phases 1–4** | Controls, visual legibility, menus & settings, audio (v2 rebased) |
+| **Next** | **Next deliveries** | Continue upstream in [E-Vex/pandemonium-bd](https://github.com/E-Vex/pandemonium-bd) — archived here as `017…` |
 
 ---
 
-## 📄 License
+## License
 
 No license file ships with this archive yet; all rights are presumed reserved by the authors. A deliberate
 SPDX choice (MIT / Apache-2.0 / CC0 for docs) is tracked as an open ask — until then, treat the contents as
 **reference material**. *(The badge above shows* `license · pending`*, matching GitHub's* `NOASSERTION`*
 report:.)*
 
-## 📬 Contact & Credits
+## Contact & Credits
 
 <div align="center">
 
@@ -441,7 +441,7 @@ report:.)*
 </tr>
 </table>
 
-<sub><b>🔥 Inferno theme</b> — eggplant-black canvas (<code>#150A1E</code>), ember accents
+<sub><b>Inferno theme</b> — eggplant-black canvas (<code>#150A1E</code>), ember accents
 (<code>#FF3EA5</code> / <code>#FF8C00</code> / <code>#FFD166</code>) and lilac text
 (<code>#F3E8FF</code>) across all animated assets.</sub>
 
@@ -451,17 +451,17 @@ report:.)*
 
 <br />
 
-<sub>⛓️ 15 patches · 111 commits · one history — made with <b>Rust</b>, <b>git</b> and fire.</sub>
+<sub>15 patches · 111 commits · one history — made with <b>Rust</b>, <b>git</b> and fire.</sub>
 
 </div>
 
 <!-- ─────────────────────────── reference-style shields ─────────────────────────── -->
 [status-shield]: https://img.shields.io/badge/status-active_archive-2ECC71?style=for-the-badge&logo=checkmarx&logoColor=white
-[status-link]: #-the-patch-chain
+[status-link]: #the-patch-chain
 [source-shield]: https://img.shields.io/badge/source-E--Vex%2Fpandemonium--bd-FF8C00?style=for-the-badge&logo=rust&logoColor=white
 [source-link]: https://github.com/E-Vex/pandemonium-bd
 [patches-shield]: https://img.shields.io/badge/patches-15-FF3EA5?style=for-the-badge&labelColor=2D1743
-[chain-link]: #-the-patch-chain
+[chain-link]: #the-patch-chain
 [commits-shield]: https://img.shields.io/badge/commits-111-FFD166?style=for-the-badge&labelColor=2D1743
 [toplanguage-shield]: https://img.shields.io/badge/language-Rust-DEA584?style=for-the-badge&logo=rust&logoColor=white
 [shell-shield]: https://img.shields.io/badge/tooling-Shell-4EAA25?style=for-the-badge&logo=gnubash&logoColor=white
