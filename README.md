@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 015, lighting each one as git am applies it in order" width="100%">
+  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 015, lighting each one in order" width="100%">
 </p>
 
 <p align="center">
-  <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 15 patches, 111 commits, one history; replay it all with git am; build, destroy, repeat" width="100%">
+  <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 15 patches, 111 commits, one history; every milestone, kept as a patch; build, destroy, repeat" width="100%">
 </p>
 
 # Pandemonium patch archive
@@ -11,28 +11,26 @@
 This is the delivery archive for **Pandemonium**, a classic real-time
 strategy game built in Rust. The game's source code lives in its own
 repository (`E-Vex/pandemonium-bd`) — this repo holds no source. Instead,
-each milestone of work is delivered here as a numbered patch file: the
+each milestone of work is archived here as a numbered patch file: the
 output of `git format-patch`, containing that milestone's commits in
-order and with their original messages. Replaying the patches onto the
-source repository rebuilds the project's history — same commits, same
-messages, same trees (commit hashes differ, because `git am` re-stamps
-them).
+order and with their original messages. The patches are a record of what
+was delivered — kept for reference and history, not meant to be applied.
 
 ## Layout
 
 | Path             | What it is                                                                 |
 | ---------------- | -------------------------------------------------------------------------- |
-| `patches/`       | The patches, zero-padded and numbered so the listing reads oldest → newest |
+| `patches/`       | The archived patches, zero-padded and numbered so the listing reads oldest → newest |
 | `NOTES.md`       | Per-patch delivery notes — scope, base commit, verification, open asks     |
-| `assets/`        | Animated SVGs used by this README (banner, tagline, chart, terminal)       |
+| `assets/`        | Animated SVGs used by this README (banner, tagline, chart)                 |
 | `apply-all.sh`   | A harmless prank: fake progress, a dancing figure, a sad trombone. Applies nothing |
 
 ## The patch chain
 
-Patches must be applied in numerical order; each one applies on the HEAD
-produced by the one before it. The **Base** column is the source-repo
-commit the patch was generated against, as recorded when it was
-delivered (`—` where no base was recorded).
+Patches are numbered in delivery order, oldest → newest, and are kept
+here as an archive — they are not meant to be applied. The **Base**
+column is the source-repo commit each patch was generated against, as
+recorded when it was delivered (`—` where no base was recorded).
 
 <p align="center">
   <img src="assets/commits.svg" alt="Animated bar chart: one bar per patch showing its commit count, from 12 commits in patch 001 up to 16 in patch 015, with a running total that ends at 111 commits" width="100%">
@@ -59,31 +57,3 @@ delivered (`—` where no base was recorded).
 Commit counts are the number of commits in each patch file. For what each
 patch actually does, see the matching note in [NOTES.md](NOTES.md) (not
 every patch has one yet).
-
-## Applying the patches
-
-<p align="center">
-  <img src="assets/terminal.svg" alt="Animated terminal: cloning pandemonium-bd, checking out the base commit, then git am streaming the 27 commits of patches 013 and 014 one by one" width="100%">
-</p>
-
-The animation replays patches 013 and 014 (27 commits). The copy-pasteable
-version:
-
-```sh
-git clone https://github.com/E-Vex/pandemonium-bd.git
-cd pandemonium-bd
-git checkout <base commit of the first patch you want>
-
-# apply everything, in order:
-git am ../stationRepo/patches/*.patch
-
-# or a range, e.g. only 013 and 014:
-git am ../stationRepo/patches/013-*.patch ../stationRepo/patches/014-*.patch
-```
-
-Start from a clean working tree. `git am` stops at the first patch that
-fails and leaves the session in progress so you can inspect it
-(`git am --abort` to back out).
-
-> `apply-all.sh` in this repo is a joke — run it for a laugh, but it
-> applies nothing.

@@ -1,7 +1,7 @@
 # Patch notes
 
 Detailed delivery notes for the patches that have one, ordered oldest →
-newest. The index of all patches and the apply instructions live in
+newest. The index of all patches lives in
 [README.md](README.md). **New notes are appended at the bottom of this
 file — never inserted in the middle.**
 

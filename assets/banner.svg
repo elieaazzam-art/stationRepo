@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 290" width="900" height="290" role="img">
 <title>Pandemonium patch archive</title>
-<desc>A packet travels along the chain of 15 patches, lighting each one as it is applied in order.</desc>
+<desc>A packet travels along the chain of 15 patches, lighting each one in order, oldest to newest.</desc>
 <style>
 .nd{fill:#eef2f7;stroke:#b4c0d0;stroke-width:2}
 .lbl{fill:#64748b;font:600 10px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;text-anchor:middle}
@@ -43,7 +43,7 @@
 <circle class="ember e10" cx="339" cy="112" r="1.9" fill="#3b82f6"/>
 <circle class="ember e11" cx="554" cy="109" r="1.6" fill="#3b82f6"/>
 <text x="450" y="126" font-family="'Helvetica Neue',Arial,sans-serif" font-weight="700" font-size="13" letter-spacing="8" text-anchor="middle" fill="#475569">PATCH ARCHIVE</text>
-<text x="450" y="148" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" text-anchor="middle" fill="#64748b">git am patches/*.patch  -&gt;  replay the history</text>
+<text x="450" y="148" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="12" text-anchor="middle" fill="#64748b">git format-patch deliveries  ·  source lives in E-Vex/pandemonium-bd</text>
 <line x1="70" y1="190" x2="830" y2="190" stroke="#d3dbe6" stroke-width="3" stroke-linecap="round"/>
 <line class="prog" x1="70" y1="190" x2="830" y2="190" stroke="#2563eb" stroke-width="9" stroke-linecap="round" opacity=".25" filter="url(#blur2)"/>
 <line class="prog" x1="70" y1="190" x2="830" y2="190" stroke="#2563eb" stroke-width="3" stroke-linecap="round"/>
@@ -93,21 +93,21 @@
 <circle class="nd n14" cx="830.0" cy="190" r="7"/>
 <text class="lbl l14" x="830.0" y="216">015</text>
 <g class="pk"><circle cx="70" cy="190" r="11" fill="#2563eb" opacity=".55" filter="url(#blur2)"/><circle cx="70" cy="190" r="4.5" fill="#1e3a8a"/></g>
-<rect x="205" y="236" width="490" height="30" rx="8" fill="#fbfcfe" stroke="#dde4ee"/>
-<text class="nm t0" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/001-m6-combat-vision.patch</text>
-<text class="nm t1" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/002-m6-readme-update.patch</text>
-<text class="nm t2" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/003-m7-ai-commands.patch</text>
-<text class="nm t3" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/004-m8-match-rules.patch</text>
-<text class="nm t4" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/005-m8-readme-update.patch</text>
-<text class="nm t5" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/006-m9-alpha-content-feel-pass.patch</text>
-<text class="nm t6" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/007-m9.1-input-hotfix.patch</text>
-<text class="nm t7" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/008-pre-m10-cleanup.patch</text>
-<text class="nm t8" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/009-pre-m10-review-and-scaffolding.patch</text>
-<text class="nm t9" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/010-m10-stabilization-and-declaration.patch</text>
-<text class="nm t10" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/011-m10.1-decal-render-fix.patch</text>
-<text class="nm t11" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/012-m10.1-pre-declaration-hardening.patch</text>
-<text class="nm t12" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/013-m10.2-phase1-controls.patch</text>
-<text class="nm t13" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/014-m10.2-phase2-visual-legibility.patch</text>
-<text class="nm t14" x="450" y="256"><tspan fill="#2563eb">$ git am </tspan>patches/015-m10.2-phase3-menus-settings.patch</text>
-<text class="done" x="450" y="256"><tspan fill="#16a34a">OK </tspan>history rebuilt: same commits, same trees</text>
+<rect x="155" y="236" width="590" height="30" rx="8" fill="#fbfcfe" stroke="#dde4ee"/>
+<text class="nm t0" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>001-m6-combat-vision.patch<tspan fill="#64748b"> · 12 commits</tspan></text>
+<text class="nm t1" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>002-m6-readme-update.patch<tspan fill="#64748b"> · 1 commit</tspan></text>
+<text class="nm t2" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>003-m7-ai-commands.patch<tspan fill="#64748b"> · 7 commits</tspan></text>
+<text class="nm t3" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>004-m8-match-rules.patch<tspan fill="#64748b"> · 6 commits</tspan></text>
+<text class="nm t4" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>005-m8-readme-update.patch<tspan fill="#64748b"> · 1 commit</tspan></text>
+<text class="nm t5" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>006-m9-alpha-content-feel-pass.patch<tspan fill="#64748b"> · 6 commits</tspan></text>
+<text class="nm t6" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>007-m9.1-input-hotfix.patch<tspan fill="#64748b"> · 4 commits</tspan></text>
+<text class="nm t7" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>008-pre-m10-cleanup.patch<tspan fill="#64748b"> · 7 commits</tspan></text>
+<text class="nm t8" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>009-pre-m10-review-and-scaffolding.patch<tspan fill="#64748b"> · 8 commits</tspan></text>
+<text class="nm t9" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>010-m10-stabilization-and-declaration.patch<tspan fill="#64748b"> · 10 commits</tspan></text>
+<text class="nm t10" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>011-m10.1-decal-render-fix.patch<tspan fill="#64748b"> · 1 commit</tspan></text>
+<text class="nm t11" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>012-m10.1-pre-declaration-hardening.patch<tspan fill="#64748b"> · 5 commits</tspan></text>
+<text class="nm t12" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>013-m10.2-phase1-controls.patch<tspan fill="#64748b"> · 13 commits</tspan></text>
+<text class="nm t13" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>014-m10.2-phase2-visual-legibility.patch<tspan fill="#64748b"> · 14 commits</tspan></text>
+<text class="nm t14" x="450" y="256"><tspan fill="#2563eb">patches/</tspan>015-m10.2-phase3-menus-settings.patch<tspan fill="#64748b"> · 16 commits</tspan></text>
+<text class="done" x="450" y="256"><tspan fill="#16a34a">OK </tspan>15 patches archived · 111 commits</text>
 </svg>

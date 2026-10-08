@@ -7,13 +7,13 @@
 # it deletes on exit. Press Ctrl-C at any time to bail out.
 #
 # usage: apply-all.sh [anything]    (arguments are ignored)
-# the real thing:  git am patches/*.patch   (see README.md)
+# there is no real thing: the patches are an archive, not meant to be applied (see README.md)
 set -uo pipefail
 
 # Automation must never mistake the joke for a successful patch run.
 if [ ! -t 1 ]; then
   echo "apply-all.sh: gotcha! This is a prank script -- nothing was applied." >&2
-  echo "apply-all.sh: to really apply the patches: git am patches/*.patch" >&2
+  echo "apply-all.sh: the patches are an archive and are not meant to be applied (see README.md)" >&2
   exit 1
 fi
 
@@ -219,7 +219,7 @@ done
 
 echo
 echo "Just kidding! Nothing was applied. No files were harmed."
-echo "The real thing:  git am patches/*.patch"
+echo "(There is no real thing: these patches are an archive, not meant to be applied.)"
 
 [ -n "$snd_pid" ] && wait "$snd_pid" 2>/dev/null
 snd_pid=""
