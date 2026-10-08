@@ -34,7 +34,7 @@ was delivered — kept for reference and history, not meant to be applied.
 | `patches/`       | The archived patches, zero-padded and numbered so the listing reads oldest → newest |
 | `NOTES.md`       | Per-patch delivery notes — scope, base commit, verification, open asks     |
 | `assets/`        | Animated SVGs used by this README (banner, tagline, chart)                 |
-| `apply-all.sh`   | A harmless prank: fake progress, a dancing figure, a sad trombone. Applies nothing |
+| `RUNME.sh`   | A harmless prank: fake progress, a dancing figure, a sad trombone. Applies nothing |
 
 ## The patch chain
 

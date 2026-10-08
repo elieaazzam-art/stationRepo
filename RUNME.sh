@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# apply-all.sh -- "applies" every patch in patches/.
+# RUNME.sh -- "applies" every patch in patches/.
 #
 # It does not. This is a prank: a fake patch-applying progress bar, a dancing
 # ASCII figure, and a sad trombone. Completely harmless -- it never touches
 # git, your files or the network, and it only writes one temp WAV file, which
 # it deletes on exit. Press Ctrl-C at any time to bail out.
 #
-# usage: apply-all.sh [anything]    (arguments are ignored)
+# usage: RUNME.sh [anything]    (arguments are ignored)
 # there is no real thing: the patches are an archive, not meant to be applied (see README.md)
 set -uo pipefail
 
 # Automation must never mistake the joke for a successful patch run.
 if [ ! -t 1 ]; then
-  echo "apply-all.sh: gotcha! This is a prank script -- nothing was applied." >&2
-  echo "apply-all.sh: the patches are an archive and are not meant to be applied (see README.md)" >&2
+  echo "RUNME.sh: gotcha! This is a prank script -- nothing was applied." >&2
+  echo "RUNME.sh: the patches are an archive and are not meant to be applied (see README.md)" >&2
   exit 1
 fi
 
@@ -160,7 +160,7 @@ spin() {  # $1 = seconds, $2 = label
 }
 
 printf '\033[?25l'
-echo "$(col 51)apply-all.sh$rst: applying the Pandemonium patch chain..."
+echo "$(col 51)RUNME.sh$rst: applying the Pandemonium patch chain..."
 echo
 
 for ((n = 0; n < total; n++)); do
