@@ -61,28 +61,4 @@ How a milestone travels from the source repo into this archive:
                                               └──────────────────────────────┘
 ```
 
-## Demo & Showcase
-
-> **GIF / screenshot slots — drop media into [`assets/`](assets) and it will light up automatically.**
-
-<div align="center">
-
-<table>
-<tr>
-<td align="center" width="33%">
-<img src="https://placehold.co/320x180/150A1E/FF3EA5?text=%E2%96%B6+Gameplay+GIF&font=mono" alt="Gameplay capture placeholder"><br>
-<b>Gameplay</b><br><sub>M10.2 combat & controls in motion<br><i>(replace with <code>assets/gameplay.gif</code>)</i></sub>
-</td>
-<td align="center" width="33%">
-<img src="https://placehold.co/320x180/150A1E/FFB020?text=Menus+%26+HUD&font=mono" alt="Menus placeholder"><br>
-<b>Menus & HUD</b><br><sub>Phase 3 settings & legibility pass<br><i>(replace with <code>assets/menus.png</code>)</i></sub>
-</td>
-<td align="center" width="33%">
-<img src="https://placehold.co/320x180/150A1E/BD00FF?text=Terminal&font=mono" alt="Terminal placeholder"><br>
-<b>Terminal vibes</b><br><sub><code>RUNME.sh</code> in action (screen-record!)<br><i>(replace with <code>assets/runme.gif</code>)</i></sub>
-</td>
-</tr>
-</table>
-
-</div>
 
