@@ -64,6 +64,7 @@ recorded when it was delivered (`—` where no base was recorded).
 | 013 | M10.2 Phase 1 (Controls)          | `013-m10.2-phase1-controls.patch`             | 13      | `pandemonium-bd` master (bdf1266)          |
 | 014 | M10.2 Phase 2 (Visual legibility) | `014-m10.2-phase2-visual-legibility.patch`    | 14      | Phase 1 HEAD (d84203e)                     |
 | 015 | M10.2 Phase 3 (Menus & settings)  | `015-m10.2-phase3-menus-settings.patch`       | 16      | master (404e906) — the Phase 2 HEAD        |
+| 016 | M10.2 Phase 4 (Audio)             | `016-m10.2-phase4-audio.patch`                | 5       | Phase 3 HEAD (1210cbd)                     |
 
 Commit counts are the number of commits in each patch file. For what each
 patch actually does, see the matching note in [NOTES.md](NOTES.md) (not

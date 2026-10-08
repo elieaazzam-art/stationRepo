@@ -515,3 +515,136 @@ Phase 4 (audio) only, DEBT-017 added (the one-map terrain-mesh renderer
 note). Scope: Phase 3 only. Phase 4 remains specified in
 docs/PLAN-M10.2.md; the audio backend is pre-chosen (rodio, A-100), its
 allow-list amendment + ADR due then.
+
+
+## M10.2 Phase 4 note (audio)
+
+`patches/016-m10.2-phase4-audio.patch` — 5 commits, base
+`1210cbd2aba3826776f25d94a9ca23f166a221ed` (the Phase 3 delivery HEAD of
+E-Vex/pandemonium-bd; the patch applies directly on top of it — master has
+since carried two housekeeping commits past it, both ancestors-in-law to
+nothing in this patch).
+
+Scope: PLAN-M10.2 §4 (audio) only, per the owner's go-ahead (A-119: the
+Phase 3 re-test verdict cleared the way, 2026-10-08). The goal, in the
+plan's own words: "simple sounds that make events feel real." What landed:
+
+- **§4.1 the backend** — rodio 0.22.2 joins the client as its only new
+  external crate, `default-features = false, features = ["playback"]`:
+  the decoder formats and the noise/rand machinery stay off because every
+  sound this pass makes is synthesized PCM. The allow-list amendment and
+  ADR-0002 (the owner's pre-choice A-100, the resolved version, the
+  feature trim, the alternatives considered) landed in the same commit.
+  rodio 0.22 renamed the stream owner: `MixerDeviceSink` is the old
+  `OutputStream`'s successor — it is boxed inside the sink's arm enum and
+  lives for the App's whole lifetime (dropping it silences everything;
+  the match reset never re-probes, it only clears counters and the
+  rate-limit windows).
+- **§4.2 the sounds** — `crates/client/src/sound.rs`, pure: the `CueBank`
+  synthesizes the nine cues' mono 44100 Hz PCM at startup (one fixed
+  sample rate, logged at startup; every buffer under a second, pairwise
+  distinct by construction, soft-limited into the rail, deterministic —
+  two runs synthesize identical banks; no asset files). Six cues come
+  from the existing `cue_for` event mapping (attack landed, unit lost,
+  unit ready, structure done, delivery, match ended); three are
+  client-side moments with no sim event — command ack, selection click,
+  UI click — and arrive through a new `AudioSink::on_cue` method on the
+  engine seam. The three have no `cue_for` arm BY DESIGN: nothing below
+  the boundary learned anything, and the null sink counts them on their
+  own counter (the wiring oracle the tests read).
+- **§4.3 the fallback** — the sink's constructor probes the device once.
+  On ANY failure (no device, Xvfb, CI) it falls back to the engine's
+  `NullAudioSink` silently: no panic, no stderr spam, one honest startup
+  line. A Linux `/dev/snd` pre-check skips the probe entirely on machines
+  with no kernel sound stack — libasound's config parser would otherwise
+  print a stderr burst on its way to the same conclusion (A-124). A
+  device lost mid-session (the stream's error callback flags it) degrades
+  to the null arm: one line, once, counting continues, never a panic, and
+  the render loop is never blocked (voicing is an infallible channel send
+  to rodio's mixing thread).
+- **§4.4 the controls and the limiter** — master volume is live (the
+  settings row drives the sink directly; A-115 semantics: changes apply
+  immediately, Done saves, Esc leaves this run's value unsaved), and
+  `muted` joins as the eighth config key right after it (settings row 5;
+  fullscreen/debug shift to rows 6/7, Done to 8; keyboard and mouse both
+  reach it — the focus map and the ui.rs button-id tests pin the
+  nine-row layout). Mute beats volume and never zeros it (A-125:
+  unmuting restores the loudness the player set; a Phase 3 seven-key
+  file parses with mute off). The rate limiter is a pure struct in
+  `sound.rs`, one 80 ms window PER CUE (a fight's attack storm does not
+  silence the loss cues), sitting between the cue source and the sink
+  arm — the drop path is one array lookup, so a big fight costs almost
+  nothing until a voice survives the window.
+- **the wiring (thin, in `main.rs`)** — the step's events still feed the
+  sink after the step (FD-9's order kept); a submitted order
+  acknowledges on the direct path ("acknowledged" = submitted, stamped
+  and handed to the host — NOT non-rejected; the sim's verdict surfaces
+  separately through the refusal feedback, A-120; spectate's silence
+  carries over); every user-driven selection change funnels through one
+  `set_selection` gate that cues the membership change (a redundant
+  re-select is not a click, A-122); every menu row activation — Enter,
+  mouse click, or the end screen's R shortcut — funnels through one
+  `menu_activate` core that cues the UI click (A-121).
+
+The honesty rule for this pass: **the machine cannot hear.** Every
+machine-verified run (CI, Xvfb) takes the null arm, and the evidence
+lines say exactly what the audio did — the arm first (active (rodio,
+44100 Hz) / null fallback (no device), plus [muted] when muted), then the
+cues' three fates (fed / voiced / dropped, and the client-side count) —
+in the `--frames` windowed summary and the headless smoke. The machine
+claims wiring, distinctness-by-construction, and counting; it never
+claims the sounds are good.
+
+Verification performed on the delivery tree and re-performed on a fresh
+clone + `git am`:
+
+- cargo fmt --all -- --check                          PASS
+- cargo clippy --workspace --all-targets -- -D warnings  PASS
+- cargo test --workspace (dev, 546 tests)             PASS
+- cargo test --workspace --release (541 tests)        PASS
+- golden hashes bit-identical to M10.1/Phases 1-3:
+    demo     0xb6fff6659cfb7709  (seed 7, 300 ticks)
+    flagship 0x6e9a18bd7c5f699f  (seed 7, 7200 ticks, AI vs AI)
+    content  0x9bc18c521107b262  (map id 0xd38136401ab02ff1)
+- the headless smoke constructs the real audio sink: the startup probe
+  prints its one honest line (null fallback on the CI machine), the
+  events flow, and the smoke's audio wiring line reports the counted
+  fates; the smoke asserts the sink was fed, never that anything was
+  audible.
+- Xvfb + llvmpipe + XTEST (the machine half of the phase exit, DEBT-008
+  recipe): a menu-only run (the null fallback's own evidence), a
+  600-frame match run started through the real menu keys (the match
+  ran, event cues counted 4/4/0), the settings pass — volume down 5%
+  (row 4, Left), mute on (row 5, Enter), Done (row 8, Enter) — with the
+  config file round-tripping `master_volume=0.95` / `muted=true`, a
+  relaunch reporting "loaded the file" and the `[muted]` audio line, and
+  an Esc-discard run on a fresh config that writes nothing (the
+  unsaved-but-live mute still showed in that run's own audio line).
+  The three client-side cues counted in the real binary (3 client-side
+  on the settings run — the Settings open, the mute toggle, and Done).
+
+What to re-test (the human half — this phase's re-test is entirely about
+ears; the machine cannot hear):
+
+- sounds actually play on real hardware (the startup line should say
+  "active (rodio), 44100 Hz, 9 synthesized cues");
+- each of the nine moments makes its sound and they are distinct:
+  attack landed (a low thud), unit lost (a descending two-step), unit
+  ready (a rising chirp), structure done (a low chord), delivery (a
+  bright ding), match ended (a three-tone fanfare), command ack /
+  selection click / UI click (three short blips you can tell apart);
+- volume changes loudness live while playing; mute silences everything;
+  both persist after Done + relaunch (and Esc discards, as the settings
+  screen documents);
+- a big fight reads as a heartbeat, not noise (the per-cue 80 ms
+  limiter) — and units dying in that fight are still audible over the
+  attack thuds;
+- nothing from Phases 1-3 regressed (controls, visuals, menus,
+  settings).
+
+Registers: ASSUMPTIONS A-119..A-125, DEBT-011 repaid (the audible
+backend, the synthesized bank, the limiter, the fallback, volume + mute,
+the direct-path cues), DEBT-015 closed (all four playtest-1 phases
+delivered; the A14 >=5-tester playtest gate is the owner's, not a
+debt). Scope: Phase 4 only — the milestone's last. Next: the owner's
+Phase 4 re-test, then the A14 playtest.
