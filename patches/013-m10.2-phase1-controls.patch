@@ -1,0 +1,2805 @@
+From a685f97940532fd140d2916158aef43a56d6d488 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 19:44:09 +0000
+Subject: [PATCH 01/13] =?UTF-8?q?docs(m10.2):=20the=20plan=20=E2=80=94=20p?=
+ =?UTF-8?q?laytest-1=20findings,=20four=20phases,=20delivery=20rules?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The project owner's first human playtest of the windowed client (post-M10.1)
+produced four findings in priority order: controls, visual legibility, menus
+and settings, audio. A14 (the Alpha declaration) is blocked until they are
+fixed and re-tested.
+
+This file records the milestone specification verbatim: the global rules
+(presentation/input only above the sim boundary, zero golden hash movement,
+commit-after-every-small-change, gates per commit, direction-pinning tests
+for every input change, ADR + allow-list for new crates, register updates),
+the four phases with their exits, and the delivery protocol (local branch
+m10.2 from master, never squashed, one format-patch file verified by
+git am on a fresh clone of the base commit, then uploaded to the owner's
+delivery repository — the token stays out-of-band and out of every file,
+commit message, and log).
+---
+ docs/PLAN-M10.2.md | 170 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 170 insertions(+)
+ create mode 100644 docs/PLAN-M10.2.md
+
+diff --git a/docs/PLAN-M10.2.md b/docs/PLAN-M10.2.md
+new file mode 100644
+index 0000000..ce8d53f
+--- /dev/null
++++ b/docs/PLAN-M10.2.md
+@@ -0,0 +1,170 @@
++# Pandemonium — Playtest-1 Findings: Implementation Plan (M10.2)
++
++> Location in repo: `docs/PLAN-M10.2.md`
++> Source: the project owner's first human playtest of the windowed client (after M10.1).
++> Authority: this file is the specification for milestone M10.2. It does not replace `plan.md`; it extends it for this milestone only.
++
++## Context
++
++The project owner played the windowed client on a real display (first human pass after M10.1). The Alpha declaration (A14) is blocked until these findings are fixed and re-tested.
++
++Four findings, in priority order:
++
++1. Controls
++2. Visual legibility
++3. Menu and settings
++4. Audio
++
++Read `AI-Handoff.md` and `plan.md` §0, §2, §11 first.
++
++## Global rules for this milestone
++
++- All work is presentation/input only: it lives in `crates/client` and `crates/engine`, above the sim boundary. **Zero golden hash movement.** If any golden moves, stop and revert.
++- Do not touch `crates/sim`, `sim_api`, `fx`, `ai`, `content`. Do not change `content/` files (that would move the content hash).
++- **Commit after every small change.** One small step = one commit; 100+ commits is expected and wanted. Never squash.
++- Every commit must pass: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (dev). The release-profile tests (`cargo test --workspace --release`) run at the end of every phase and before the final report.
++- Every input or camera change needs direction-pinning tests (which way in world coordinates, at yaw 0 and 90), per the M9.1 lesson. Filter winit key repeats.
++- New external crates need an update to the dependency allow-list in `tests/architecture_law.rs` and an ADR in `docs/adr/` with the reason. Prefer no new crates where practical.
++- Log guesses in `docs/ASSUMPTIONS.md` (continue from A-090), simplifications in `docs/DEBT.md`. Update `AI-Handoff.md` at the end (status board, snapshot, gotchas).
++- Record the owner's findings in `docs/PLAYTEST.md` as tester result #1.
++
++## Phase 1 — Controls (highest priority): match C&C Generals: Zero Hour
++
++Goal: a player who knows Generals ZH can play without reading anything.
++
++### 1.1 Audit first
++
++Write down what each mouse button and key currently does in `crates/client` (`main.rs`, `orders.rs`). The owner reports that unit movement happens with the LEFT button. The handoff says M9.1 moved it to right-click context orders. Find out which is true in the current code. Rule to enforce:
++
++- Left click on ground = never issues an order. Left click selects, left drag box-selects.
++- Right click = the only way to command units (context-sensitive: ground = Move, enemy = Attack, ore node = Gather, own production building = rally point).
++- Click on empty ground with a selection and nothing else = nothing happens.
++
++### 1.2 Camera scroll, Generals ZH style
++
++- Hold the RIGHT mouse button and drag to scroll the map. The map follows the drag direction in a natural way (like grabbing the ground). This is the main way the owner wants to move.
++- The right button also issues commands. Resolve the conflict with a drag threshold: press and release with less than about 6 pixels of movement = command; movement beyond the threshold = camera scroll and NO command on release. Make the threshold a named constant.
++- Edge scroll: widen the trigger zone to a sensible band (about 12–16 px), scale speed with depth into the band, and make it work on all four edges and corners. Add a toggle in settings (Phase 3). The owner currently experiences it as unusable (the screen only moves when the cursor reaches the very last pixel), so test at the real window sizes, including fullscreen.
++- Keep WASD and arrow keys. Keep wheel zoom toward cursor. Keep Q/E rotate.
++- Middle-drag rotates the camera (Generals does this). Keep Ctrl+wheel pitch if it exists.
++
++### 1.3 Unit control parity with Generals ZH
++
++- Double-click a unit selects all visible units of the same kind.
++- Shift+click adds or removes from the selection; shift+box adds.
++- Ctrl+number sets a control group, number recalls it, double-tap number centers the camera on the group. Check the existing 1–9 implementation against this.
++- S = Stop, A then click = attack-move (keep the existing armed-A flow), Escape cancels an armed command or clears the selection.
++- Space or a similar key to jump to the last event or base (optional, only if cheap).
++- Cursor feedback: change the cursor or draw a small marker for Move / Attack / invalid, and keep the command ping.
++
++### 1.4 Tests
++
++Pure functions for the right-button state machine (press, move, release with and without threshold), edge-scroll vector from cursor position and window size, drag-scroll direction at yaw 0 and 90. Machine-verify with Xvfb + XTEST per DEBT-008.
++
++**Exit:** documented control card (update the README and `docs/PLAYTEST.md` controls card), all tests green, owner re-test.
++
++## Phase 2 — Visual legibility
++
++Goal: at a glance, the player knows what each thing is. Not pretty, just clear.
++
++### 2.1 Distinct silhouettes per kind
++
++Build simple procedural meshes from primitives in the client (no asset files needed):
++
++- Worker: small, round-ish body with a visible tool shape.
++- Rifleman: small humanoid-ish capsule or box with a thin rifle.
++- Raider: medium fast-looking wedge or buggy shape.
++- Guardian/tank: large body with a turret and a barrel.
++- Command center: large, tall, with a distinct roof or tower so it reads as the base.
++- Barracks: wide, low, with a flag or door.
++- Supply depot: small box with a stacked-crates look.
++- Turret: pedestal with a rotating-looking barrel.
++- Ore node: crystal cluster in a bright color that contrasts with the ground.
++
++The mapping from kind to mesh lives in the client, keyed by the kind name from the bundle, with a fallback based on capability shape (has Footprint = building box, has Move = unit box). Do NOT add presentation data to `content/` files.
++
++### 2.2 Team identification
++
++A strong team color band or banner on every entity, plus a ground ring under each unit. Colors must be distinguishable for color-blind players (check blue/orange or similar, not red/green).
++
++### 2.3 Selection and info
++
++A bright selection ring, a larger health bar for selected entities, and an info panel in the HUD that shows the selected entity's NAME, health, and (for buildings) production queue. Hovering an entity shows its name tooltip.
++
++### 2.4 Minimap
++
++Distinct markers for own, enemy, ore. Make sure buildings are visibly larger than units.
++
++### 2.5 Ground contrast
++
++Make terrain colors calmer and lower in saturation than units, so entities pop. Rock walls and blocked terrain must read as obstacles.
++
++### 2.6 Tests
++
++Mesh generation is pure data: test vertex counts and that each kind resolves to a unique mesh. Test the name lookup for the info panel.
++
++**Exit:** a stranger can identify command center, worker, and tank in a screenshot without a legend. Capture screenshots under Xvfb and include them in the delivery notes.
++
++## Phase 3 — Menu and settings
++
++Goal: a proper start flow instead of dropping straight into a match.
++
++### 3.1 Application state machine
++
++Client-side state machine: `MainMenu -> (Settings | NewMatch) -> InMatch -> (PauseMenu | EndScreen) -> MainMenu`. Pure data and transitions, unit-tested. Nothing here touches the sim.
++
++### 3.2 Main menu
++
++New Match, Settings, Quit.
++
++### 3.3 New Match screen
++
++- Mode: Player vs AI, AI vs AI (spectate), Sandbox (no opponent, for testing).
++- Seed: random by default, editable (this uses the existing `--seed` path).
++- Map: the existing Crossroads, listed from the bundle (supports more maps later).
++- Start button. Starting a match reuses the existing drop + reconstruct path (A-014/A15 style), so determinism is unchanged.
++
++### 3.4 Settings
++
++Edge scroll on/off, scroll speed, camera zoom limits, master volume (Phase 4), fullscreen toggle, show debug overlay by default. Persist to a small config file in the user config directory using a simple hand-written `key=value` format (no serde in the client path unless the allow-list already permits it). Load with safe defaults when the file is missing or malformed.
++
++### 3.5 Pause menu
++
++Esc during a match opens Resume, Settings, Restart, Quit to Menu. The match pauses through the existing MatchHost pause.
++
++### 3.6 UI implementation
++
++Reuse the existing fontdue text renderer and UI overlay pass. Buttons are plain rectangles with hover states. Keep it keyboard and mouse navigable.
++
++**Exit:** the game starts at the menu, a match can be started in each mode, settings persist across runs, and tests cover the state machine and config parser (including corrupt files).
++
++## Phase 4 — Audio
++
++Goal: simple sounds that make events feel real. The seam already exists: `engine/src/audio.rs` has the `AudioSink` trait and the `cue_for` mapping.
++
++- **4.1** Add one audio backend implementing `AudioSink` in the client. Choose the smallest dependable option (for example rodio or cpal-based) and justify it in an ADR; update the architecture-law allow-list for the client crate only.
++- **4.2** Sounds are generated procedurally at startup (simple synthesized beeps, clicks, thuds, short noise bursts) so no asset licensing is needed and the repo stays small. One distinct sound per cue: attack landed, unit lost, unit ready, structure done, resource delivery, match ended, command acknowledged, selection click, UI click.
++- **4.3** If no audio device exists (CI, headless), fall back to the `NullAudioSink` silently. Never crash or block the render loop.
++- **4.4** Master volume and a mute toggle in settings. Rate-limit repeated cues (for example many attacks per tick) so it does not become noise.
++- **4.5** Tests: cue-to-sound mapping, rate limiting logic, fallback path. Log DEBT-011 progress.
++
++## Phase 5 — Verification and handoff
++
++- Full green gate in dev and release; golden hashes bit-identical to the M10.1 values (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`).
++- Xvfb + XTEST smoke for the new input paths, plus screenshots for Phase 2.
++- Update the `docs/PLAYTEST.md` controls card and add the owner's feedback as result #1; schedule the full A14 playtest (5+ testers) only after the owner confirms the fixes feel right.
++- Update `AI-Handoff.md` (status board M10.2, snapshot, gotchas such as the right-button threshold and the menu state machine), the README controls, and the CHANGELOG.
++- **Delivery:** export every commit as one single patch file (`git format-patch --stdout`), verify it applies cleanly with `git am` on a fresh clone of the base commit, and hand it to the owner as specified in the agent prompt.
++
++## Out of scope for this milestone
++
++New units, new factions, AI behavior changes, real art assets, networking, any sim change.
++
++## Delivery (the agent prompt's instructions, restated for the record)
++
++- The plan lives in this file (`docs/PLAN-M10.2.md`); if it is not in the repo yet, the first commit adds it.
++- Do not push to E-Vex/pandemonium-bd. Create a local branch `m10.2` from `master` and commit every small change there, per the commit policy. Never squash.
++- At the end, export all commits as ONE patch file that keeps every commit and its message: `git format-patch --stdout <base-commit>..m10.2 > m10.2-all-commits.patch`.
++- Verify the patch: fresh clone, check out the base commit, run `git am m10.2-all-commits.patch`, then the full green gate (fmt, clippy, dev tests, release tests) and confirm the three golden hashes are unchanged.
++- Upload only that one file, plus a short README.txt with the base commit hash, to the owner's delivery repository (folder `m10.2/`), using the token supplied out-of-band in the agent prompt. **The token is never written into any file, commit message, log, or output.**
++- Tell the owner the base commit hash and the exact command to apply the patch.
+-- 
+2.47.3
+
+
+From 5d10b4ca60301bfd4b60ee785dcde6c28b30b3d8 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 19:44:53 +0000
+Subject: [PATCH 02/13] docs(playtest): record the owner's playtest-1 as result
+ #1 + the controls audit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Result #1 (the row + the detail section): the owner's first human pass over
+the windowed client post-M10.1 did not complete the unaided loop — the
+controls got in the way first. Four findings in priority order: controls,
+visual legibility, menus/settings, audio. Full specification:
+docs/PLAN-M10.2.md.
+
+The §1.1 audit of main.rs + orders.rs at the base commit answers the plan's
+question: a plain left click issues NO order in the current code — context
+orders (Move/Attack/Gather/rally) have been right-button-only since M9.1.
+The left-button order paths that do exist: the armed-A attack-move, the
+bottom-bar buttons, and the placement confirm. The audit also found the
+dead branch: right-press disarms armed-A before the minimap right-click
+check reads it, so the armed minimap attack-move path can never fire —
+the M10.2 right-button rework removes it.
+---
+ docs/PLAYTEST.md | 55 +++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 54 insertions(+), 1 deletion(-)
+
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+index b5ece0a..946ba30 100644
+--- a/docs/PLAYTEST.md
++++ b/docs/PLAYTEST.md
+@@ -150,7 +150,7 @@ tester.
+ 
+ | Tester | Date | OS | Build commit | Loop completed (unaided?) | Spectator verdict | Probes (placement / audio / feel) | Incidents (seed + tick + dump filenames) |
+ |---|---|---|---|---|---|---|---|
+-| | | | | | | | |
++| owner (playtest-1) | 2026-10 (post-M10.1) | desktop, real display | bdf1266 | **no** — controls unusable (finding #1, detail below) | not reached | feel: the four findings below | none filed (findings went to `docs/PLAN-M10.2.md` instead) |
+ | | | | | | | | |
+ | | | | | | | | |
+ | | | | | | | | |
+@@ -158,3 +158,56 @@ tester.
+ 
+ Five rows, ready to fill. A failed tester is a finding — record them anyway;
+ they are often the most valuable row in the table.
++
++### Result #1 in detail — the owner's playtest-1 (M10.2's source)
++
++The first human pass over the windowed client after M10.1. The formal A14
++loop (section 3) was not completed — the controls got in the way first. Four
++findings, in the owner's priority order (the full specification is
++`docs/PLAN-M10.2.md`):
++
++1. **Controls** — not Generals ZH: no right-drag map scroll, edge scroll
++   reads as broken (only the very last pixel row triggers it), the button
++   semantics are unclear (the owner reported "unit movement happens with the
++   LEFT button").
++2. **Visual legibility** — at a glance you cannot tell what anything is
++   (silhouettes, team identification, minimap, ground contrast).
++3. **Menu and settings** — the game drops straight into a match; no menu,
++   no settings, no pause menu.
++4. **Audio** — no sound at all (DEBT-011, expected at this stage).
++
++#### The controls audit (PLAN-M10.2 §1.1 — what the code actually did)
++
++Audit of `crates/client/src/main.rs` + `orders.rs` at the base commit
++(bdf1266), pre-M10.2:
++
++| Input | Behavior in code |
++|---|---|
++| Left press | UI button hit-test first (train / build placement / queue cancel), then minimap click-to-focus, then placement confirm, then armed-A attack-move fires, else starts a selection drag |
++| Left release | Drag beyond `CLICK_SLOP` (0.01 NDC) = box select; otherwise single-click select (own entities within 0.05 NDC; empty ground **clears** the selection) |
++| Right press | Cancels placement, disarms armed-A, then: minimap right-click orders Move at the mapped point, else the context order (rally point for a selected producer / Attack on an enemy / Gather on a node with workers / Move on ground) |
++| Right drag | Nothing (no right-drag camera scroll exists) |
++| Middle drag | Pan (grab-the-ground) |
++| Wheel | Zoom toward cursor; Ctrl+wheel = pitch |
++| W/A/S/D + arrows | Pan (A also arms attack-move; S also stops) |
++| Q / E | Rotate |
++| 1–9 / Ctrl+1–9 | Recall / assign control groups (no double-tap centering) |
++| P, `.`, F3, F8 | Pause, single-step, debug overlay, bug report |
++| R / Esc | Restart after the match ends / cancel armed order or placement, else quit |
++| Edge scroll | 24 px binary full-speed zone on all four edges (focused windows only) |
++
++**Audit verdict on "movement happens with the LEFT button":** false for a
++plain left-click in the current code — since M9.1, context orders
++(Move/Attack/Gather/rally) issue on the **right** button only
++(`orders::resolve_context_order`). What the owner can have hit with the left
++button: the armed-**A** attack-move (fires on left-click), the bottom-bar
++buttons, and the placement confirm — all three are order-issuing left clicks.
++The plan's rule (left = select only) is therefore *almost* already law; the
++audit additionally found one real inconsistency: on right-press the code
++disarms armed-A **before** the minimap right-click branch checks it, so the
++armed minimap attack-move path is dead code — M10.2 §1 reworks the whole
++right-button path as a state machine and removes the dead branch.
++
++The re-test for this row: after M10.2 Phase 1, the owner replays the loop
++with the updated controls card (section 2) — the row above is then updated
++or a second row is added for the re-test pass.
+-- 
+2.47.3
+
+
+From 9bfa4095a6c5e8ab09aafa8b80441a77d9796eab Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 19:59:56 +0000
+Subject: [PATCH 03/13] =?UTF-8?q?feat(client):=20the=20Generals=20ZH=20cam?=
+ =?UTF-8?q?era=20=E2=80=94=20right-drag=20scroll,=20middle-drag=20rotate,?=
+ =?UTF-8?q?=20the=20depth-scaled=20edge=20band=20(PLAN=20=C2=A71.2)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The owner's #1 finding, the camera half. Four changes, one seam:
+
+- The right button is now a state machine (input.rs, pure, 14 tests):
+  press-and-release under RIGHT_DRAG_COMMAND_MAX_PX (6 px) is the command
+  click; travel beyond it becomes the Generals-style grab-and-drag map
+  scroll, and the release then orders NOTHING. The press records, the
+  release decides. A press whose ground point is off-screen (above the
+  horizon) re-grabs at the threshold crossing, so a drag that starts on
+  the sky still scrolls.
+- Right-click ordering itself moves to the RELEASE: the context order
+  (rally/attack/gather/move) fires on a sub-threshold release at the
+  release position; a minimap right-click orders at the mapped point and
+  now honors an armed-at-press attack-move (fixing the dead branch the
+  §1.1 audit found — the old code disarmed before the minimap check read
+  it); a right-click over the bottom-bar buttons is swallowed (UI is not
+  a world order); right-press still cancels placement and consumes the
+  whole gesture.
+- Middle-drag now ROTATES the camera (Generals middle-drag; it panned
+  before). Horizontal travel orbits at MIDDLE_DRAG_RAD_PER_PX, direction
+  pinned to match E (orbit right) at yaw 0 and 90.
+- Edge scrolling: the old 24 px binary full-speed zone becomes a 14 px
+  band whose speed scales linearly with the cursor's depth into it —
+  the owner's 'only the very last pixel works' finding was the snap.
+  All four edges, corners combine, focused windows only, and a wired
+  edge_scroll_enabled flag awaits the Phase 3 settings toggle.
+
+Direction pinned at yaw 0 and yaw 90 for the grab-scroll (the world
+follows the drag; camera-relative, not world-fixed) and the rotate.
+Zero golden movement: presentation/input only.
+---
+ crates/client/src/input.rs | 373 +++++++++++++++++++++++++++++++++++++
+ crates/client/src/main.rs  | 238 ++++++++++++++++-------
+ 2 files changed, 540 insertions(+), 71 deletions(-)
+ create mode 100644 crates/client/src/input.rs
+
+diff --git a/crates/client/src/input.rs b/crates/client/src/input.rs
+new file mode 100644
+index 0000000..fd413a3
+--- /dev/null
++++ b/crates/client/src/input.rs
+@@ -0,0 +1,373 @@
++//! Input-layer pure logic (M10.2, PLAN §1.2 — the Generals ZH camera
++//! controls): the right-button state machine that disambiguates "command
++//! click" from "camera drag", the depth-scaled edge-scroll band, and the
++//! middle-drag rotation rate.
++//!
++//! Everything here is pure data-in/data-out over pixels and (for the
++//! direction-pinned tests) the engine's `RtsCamera` — the same
++//! module-free testability discipline as `orders.rs` and `feedback.rs`.
++//! The `main.rs` event handlers stay thin: they translate winit events
++//! into calls here and act on the returned decision. No simulation state
++//! is read or written; the command gate stays the sole authority on
++//! legality (FD-2).
++//!
++//! Direction conventions are pinned by tests at yaw 0 and yaw 90 (the M9.1
++//! lesson: presentation direction is invisible to the golden hashes, so
++//! only tests can keep it honest).
++
++/// How far (in pixels) the cursor may travel between a right-button press
++/// and its release for the gesture to count as a command click rather than
++/// a camera drag (PLAN §1.2: "less than about 6 pixels of movement =
++/// command; movement beyond the threshold = camera scroll and NO command on
++/// release"). One named constant, deliberately small: a command click is a
++/// click, not a small drag.
++pub const RIGHT_DRAG_COMMAND_MAX_PX: f64 = 6.0;
++
++/// How wide (in pixels) the screen-edge scroll band is (PLAN §1.2: "about
++/// 12–16 px"). The old M9.1 behavior was a 24 px zone that switched on at
++/// full speed the instant the cursor crossed it — the owner read it as
++/// "only the very last pixel works", so the band is narrower and the speed
++/// now *scales with depth* into it ([`edge_scroll_vector`]).
++pub const EDGE_SCROLL_BAND_PX: f64 = 14.0;
++
++/// How much camera yaw one pixel of middle-drag horizontal travel is worth
++/// (radians per pixel). A full turn is `TAU / MIDDLE_DRAG_RAD_PER_PX` ≈
++/// 1257 px of drag — slow enough to aim, fast enough to re-orient.
++pub const MIDDLE_DRAG_RAD_PER_PX: f32 = 0.005;
++
++/// The right button's disambiguation state (PLAN §1.2). The right button is
++/// overloaded: a press-and-release with almost no travel issues the context
++/// command; travel beyond [`RIGHT_DRAG_COMMAND_MAX_PX`] becomes the
++/// Generals-style grab-and-drag map scroll, and the release then orders
++/// nothing.
++#[derive(Clone, Copy, Debug, PartialEq)]
++pub enum RightButton {
++    /// Not pressed.
++    Idle,
++    /// Pressed, but the cursor has not yet left the command threshold —
++    /// this still might become a command click.
++    Pressed {
++        /// The press position in window pixels.
++        start: (f64, f64),
++    },
++    /// Pressed and past the threshold — this gesture is a camera drag now,
++    /// and its release must not issue a command.
++    Dragging {
++        /// The press position in window pixels.
++        start: (f64, f64),
++    },
++}
++
++impl RightButton {
++    /// A fresh, unpressed state.
++    pub fn new() -> Self {
++        Self::Idle
++    }
++
++    /// The button went down at `at` (window pixels).
++    pub fn press(&mut self, at: (f64, f64)) {
++        *self = Self::Pressed { start: at };
++    }
++
++    /// The cursor moved while the button is held. Returns `true` on the
++    /// single event where the gesture crosses the threshold into a drag
++    /// (the caller starts grab-scrolling there); the caller is also free to
++    /// poll [`RightButton::is_dragging`] per move.
++    pub fn moved(&mut self, at: (f64, f64)) -> bool {
++        let Self::Pressed { start } = *self else {
++            return false; // idle, or already a drag
++        };
++        if pixel_distance(start, at) > RIGHT_DRAG_COMMAND_MAX_PX {
++            *self = Self::Dragging { start };
++            true
++        } else {
++            false
++        }
++    }
++
++    /// The button came up at `at` (window pixels). `None` when the button
++    /// was not pressed (the press was swallowed, e.g. by a placement
++    /// cancel) or the gesture was already over (a stray release).
++    pub fn release(&mut self, at: (f64, f64)) -> Option<RightRelease> {
++        match *self {
++            Self::Idle => None,
++            Self::Pressed { start } => {
++                *self = Self::Idle;
++                Some(if pixel_distance(start, at) <= RIGHT_DRAG_COMMAND_MAX_PX {
++                    RightRelease::Command
++                } else {
++                    RightRelease::Scroll
++                })
++            }
++            Self::Dragging { .. } => {
++                *self = Self::Idle;
++                Some(RightRelease::Scroll)
++            }
++        }
++    }
++
++    /// Whether the held gesture is past the threshold (a camera drag).
++    pub fn is_dragging(&self) -> bool {
++        matches!(self, Self::Dragging { .. })
++    }
++}
++
++impl Default for RightButton {
++    fn default() -> Self {
++        Self::new()
++    }
++}
++
++/// What a right-button release means (see [`RightButton::release`]).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum RightRelease {
++    /// Press-to-release travel stayed under the threshold: this is the
++    /// command click — issue the context order at the release position.
++    Command,
++    /// The gesture was (or became) a camera drag: order nothing.
++    Scroll,
++}
++
++/// Euclidean pixel distance between two window positions.
++pub fn pixel_distance(a: (f64, f64), b: (f64, f64)) -> f64 {
++    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
++    (dx * dx + dy * dy).sqrt()
++}
++
++/// The depth-scaled edge-scroll direction (PLAN §1.2) for a cursor at
++/// `cursor` (window pixels) in a `window`-sized viewport. Each component of
++/// the returned pair is a signed fraction of full pan speed (−1..1):
++/// positive `x` pans screen-right, positive `z` pans screen-up — the same
++/// signs the held-key pan uses. The magnitude grows linearly with the
++/// cursor's depth into the [`EDGE_SCROLL_BAND_PX`] band, so the cursor at
++/// the window edge scrolls at full speed and halfway into the band at half
++/// speed. All four edges work and corners combine both axes.
++///
++/// The middle of the window returns `(0, 0)`, and so does any window too
++/// small to have a middle (the caller never sees NaN).
++pub fn edge_scroll_vector(cursor: (f64, f64), window: (f64, f64)) -> (f32, f32) {
++    let band = EDGE_SCROLL_BAND_PX;
++    let depth = |distance_from_edge: f64| -> f32 {
++        (1.0 - (distance_from_edge / band).clamp(0.0, 1.0)) as f32
++    };
++    let (w, h) = window;
++    if w <= 0.0 || h <= 0.0 {
++        return (0.0, 0.0);
++    }
++    let mut x = 0.0;
++    let mut z = 0.0;
++    // Left edge: depth grows as the cursor approaches x = 0.
++    x -= depth(cursor.0);
++    // Right edge: depth grows as the cursor approaches x = w.
++    x += depth(w - 1.0 - cursor.0);
++    // Top edge: depth grows as the cursor approaches y = 0; panning
++    // "up-screen" is +z (forward), matching the held-key convention.
++    z += depth(cursor.1);
++    // Bottom edge.
++    z -= depth(h - 1.0 - cursor.1);
++    (x, z)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pandemonium_engine::RtsCamera;
++
++    // ---- right-button state machine -------------------------------------
++
++    #[test]
++    fn a_short_press_release_stays_a_command() {
++        let mut right = RightButton::new();
++        right.press((100.0, 100.0));
++        // A tiny jitter stays under the threshold.
++        right.moved((103.0, 101.0));
++        assert_eq!(right.release((102.5, 99.0)), Some(RightRelease::Command));
++        assert_eq!(right, RightButton::Idle);
++    }
++
++    #[test]
++    fn a_release_exactly_at_the_threshold_is_still_a_command() {
++        // "less than about 6 pixels" — exactly 6 is the boundary and stays
++        // a command (the drag must be unambiguous).
++        let mut right = RightButton::new();
++        right.press((10.0, 10.0));
++        assert_eq!(right.release((10.0, 16.0)), Some(RightRelease::Command));
++    }
++
++    #[test]
++    fn travel_beyond_the_threshold_becomes_a_scroll_and_orders_nothing() {
++        let mut right = RightButton::new();
++        right.press((100.0, 100.0));
++        let crossed = right.moved((120.0, 100.0));
++        assert!(crossed, "the crossing event reports the drag start");
++        assert!(right.is_dragging());
++        // More travel, a lift, even a return to the press point: the
++        // release is a scroll and never a command.
++        right.moved((100.0, 100.0));
++        assert_eq!(right.release((100.0, 100.0)), Some(RightRelease::Scroll));
++        assert_eq!(right, RightButton::Idle);
++    }
++
++    #[test]
++    fn a_diagonal_drag_crosses_on_euclidean_distance() {
++        // 4 px right + 4 px down = ~5.66 px: under; 5 + 5 = ~7.07: over.
++        let mut right = RightButton::new();
++        right.press((0.0, 0.0));
++        assert!(!right.moved((4.0, 4.0)));
++        assert!(right.moved((5.0, 5.0)));
++        assert_eq!(right.release((5.0, 5.0)), Some(RightRelease::Scroll));
++    }
++
++    #[test]
++    fn a_release_without_a_press_is_ignored() {
++        // A swallowed press (placement cancel leaves the machine idle)
++        // never turns into a command.
++        let mut right = RightButton::new();
++        assert_eq!(right.release((5.0, 5.0)), None);
++    }
++
++    #[test]
++    fn moves_while_idle_do_nothing() {
++        let mut right = RightButton::new();
++        assert!(!right.moved((500.0, 500.0)));
++        assert_eq!(right, RightButton::Idle);
++    }
++
++    // ---- edge scroll band ------------------------------------------------
++
++    #[test]
++    fn the_interior_scrolls_nothing() {
++        let window = (1920.0, 1080.0);
++        assert_eq!(edge_scroll_vector((960.0, 540.0), window), (0.0, 0.0));
++        // Just outside the band: dead zone by design (the band fades in
++        // instead of snapping — the M9.1 finding was the snap).
++        let (x, z) = edge_scroll_vector((20.0, 540.0), window);
++        assert_eq!((x, z), (0.0, 0.0));
++    }
++
++    #[test]
++    fn each_edge_points_its_own_way_and_scales_with_depth() {
++        let window = (1920.0, 1080.0);
++        // Left edge, full depth: pan screen-left only.
++        assert_eq!(edge_scroll_vector((0.0, 540.0), window).0, -1.0);
++        // Half into the band: half speed.
++        let half = edge_scroll_vector((EDGE_SCROLL_BAND_PX * 0.5, 540.0), window).0;
++        assert!(
++            (half - (-0.5)).abs() < 1e-3,
++            "half depth, half speed: {half}"
++        );
++        // Right edge: screen-right.
++        assert_eq!(edge_scroll_vector((1919.0, 540.0), window).0, 1.0);
++        // Top edge: up-screen (+z), the held-key W convention.
++        assert_eq!(edge_scroll_vector((960.0, 0.0), window).1, 1.0);
++        // Bottom edge: down-screen (-z).
++        assert_eq!(edge_scroll_vector((960.0, 1079.0), window).1, -1.0);
++    }
++
++    #[test]
++    fn corners_combine_both_axes() {
++        let window = (1920.0, 1080.0);
++        // Top-left: pan up-screen and left at full depth.
++        assert_eq!(edge_scroll_vector((0.0, 0.0), window), (-1.0, 1.0));
++        // Bottom-right.
++        assert_eq!(edge_scroll_vector((1919.0, 1079.0), window), (1.0, -1.0));
++    }
++
++    #[test]
++    fn the_band_works_at_real_window_sizes() {
++        // The owner tested at real sizes including fullscreen; the band is
++        // absolute pixels, so it behaves the same everywhere.
++        for window in [(1280.0, 720.0), (1920.0, 1080.0), (2560.0, 1440.0)] {
++            let (w, h) = window;
++            assert_eq!(edge_scroll_vector((0.0, h / 2.0), window).0, -1.0);
++            assert_eq!(edge_scroll_vector((w - 1.0, h / 2.0), window).0, 1.0);
++            assert_eq!(edge_scroll_vector((w / 2.0, 0.0), window).1, 1.0);
++            assert_eq!(edge_scroll_vector((w / 2.0, h - 1.0), window).1, -1.0);
++            assert_eq!(edge_scroll_vector((w / 2.0, h / 2.0), window), (0.0, 0.0));
++        }
++    }
++
++    #[test]
++    fn degenerate_windows_stay_quiet() {
++        assert_eq!(edge_scroll_vector((0.0, 0.0), (0.0, 0.0)), (0.0, 0.0));
++        assert_eq!(edge_scroll_vector((0.0, 0.0), (-5.0, 10.0)), (0.0, 0.0));
++    }
++
++    // ---- direction pinning: right-drag scroll, yaw 0 and 90 --------------
++
++    #[test]
++    fn right_drag_scroll_follows_the_cursor_at_yaw_0() {
++        // Grab-the-ground: press at the screen center's ground point, drag
++        // the cursor screen-right; the camera pans so the grabbed point
++        // follows — the world appears to move left, the target moves LEFT
++        // (−x world at yaw 0, where screen-right is +x).
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(32.0, 32.0, 24.0);
++        let before = camera.target();
++        let anchor = camera
++            .ground_point(glam::Vec2::new(0.0, 0.0))
++            .expect("center ground");
++        // The cursor moves screen-right (NDC x: 0.0 -> 0.2).
++        let current = camera
++            .ground_point(glam::Vec2::new(0.2, 0.0))
++            .expect("ground");
++        camera.pan_world(anchor - current);
++        let after = camera.target();
++        assert!(
++            after.x < before.x,
++            "yaw 0: dragging right moves the view left ({:?} -> {:?})",
++            before,
++            after
++        );
++    }
++
++    #[test]
++    fn right_drag_scroll_follows_the_cursor_at_yaw_90() {
++        // At yaw 90° the screen-right axis is −z world; the same drag must
++        // move the target +z — the grab direction is camera-relative, not
++        // world-fixed (the M9.1 mirrored-axes lesson, pinned per axis).
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(32.0, 32.0, 24.0);
++        camera.rotate(std::f32::consts::FRAC_PI_2);
++        let before = camera.target();
++        let anchor = camera
++            .ground_point(glam::Vec2::new(0.0, 0.0))
++            .expect("center ground");
++        let current = camera
++            .ground_point(glam::Vec2::new(0.2, 0.0))
++            .expect("ground");
++        camera.pan_world(anchor - current);
++        let after = camera.target();
++        assert!(
++            after.z > before.z,
++            "yaw 90: dragging right moves the target +z ({:?} -> {:?})",
++            before,
++            after
++        );
++    }
++
++    // ---- direction pinning: middle-drag rotate ---------------------------
++
++    #[test]
++    fn middle_drag_right_orbits_the_same_way_e_does() {
++        // E (orbit right) applies a positive yaw rate; a rightward
++        // middle-drag must apply positive yaw too, at both pinned yaws.
++        // The wiring's exact formula: yaw delta = radians per pixel * dx.
++        let delta_of = |dx_px: f32| MIDDLE_DRAG_RAD_PER_PX * dx_px;
++        assert!(delta_of(120.0) > 0.0);
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        for yaw in [0.0f32, std::f32::consts::FRAC_PI_2] {
++            camera.rotate(yaw - camera.yaw());
++            let before = camera.yaw();
++            camera.rotate(delta_of(120.0));
++            assert!(
++                camera.yaw() > before,
++                "yaw {yaw}: rightward middle-drag increases yaw"
++            );
++            camera.rotate(delta_of(-120.0));
++            assert!((camera.yaw() - before).abs() < 1e-6, "symmetric back");
++        }
++        // The scale: one pixel is MIDDLE_DRAG_RAD_PER_PX.
++        assert!((delta_of(1.0) - MIDDLE_DRAG_RAD_PER_PX).abs() < 1e-6);
++    }
++}
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 1b2cea5..e77c8ac 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -11,6 +11,7 @@
+ //! of M3 needs a display and is recorded as such (plan §13 honest declaration).
+ 
+ mod feedback;
++mod input;
+ mod orders;
+ mod render;
+ mod report;
+@@ -24,6 +25,7 @@ use std::time::Instant;
+ 
+ use anyhow::Context;
+ use feedback::FeedbackState;
++use input::{RightButton, RightRelease};
+ use pandemonium_ai::Controller;
+ use pandemonium_content::ContentBundle;
+ use pandemonium_engine::audio::{AudioSink, NullAudioSink};
+@@ -74,10 +76,6 @@ const PITCH_PER_WHEEL_NOTCH: f32 = pandemonium_engine::camera::DEFAULT_PITCH_PER
+ /// The frame-delta clamp for camera motion — a stall must not teleport the
+ /// view when the loop resumes.
+ const MAX_PAN_FRAME_SECONDS: f32 = 0.05;
+-/// How close (in pixels) the cursor must sit to a window border for edge
+-/// scrolling (plan §11.3: "pan by edge + keys" — M9.1: the edge half was
+-/// missing entirely, so the mouse could not move the camera at all).
+-const EDGE_SCROLL_PX: f64 = 24.0;
+ /// The opening camera distance from the player's start anchor (M9.1: the
+ /// old map-center default at 58 tiles out rendered the starting force as
+ /// specks — "nothing appears on the screen").
+@@ -188,9 +186,26 @@ struct App {
+     keys: BTreeSet<Key<&'static str>>,
+     /// M8: the current keyboard modifiers (Ctrl for control-group assignment).
+     modifiers: ModifiersState,
+-    /// M9.1: the middle-drag pan anchor — the ground point grabbed when the
+-    /// middle button went down (None when not dragging).
+-    middle_anchor: Option<glam::Vec3>,
++    /// M10.2 (PLAN §1.2): the right button's disambiguation state — a
++    /// press-and-release under [`input::RIGHT_DRAG_COMMAND_MAX_PX`] is the
++    /// command click; travel beyond it is the Generals-style grab-and-drag
++    /// map scroll (and the release then orders nothing).
++    right_button: RightButton,
++    /// M10.2 (PLAN §1.2): the ground point grabbed at the right-button
++    /// press — the anchor the drag keeps under the cursor while scrolling.
++    right_anchor: Option<glam::Vec3>,
++    /// M10.2: whether attack-move was armed when the right button went
++    /// down (the minimap right-click honors it as an attack-move order; a
++    /// world right-click disarms and issues the context order).
++    right_press_armed: bool,
++    /// M10.2 (PLAN §1.2): the middle button's last cursor position while
++    /// held — horizontal travel rotates the camera (Generals-style
++    /// middle-drag rotate; it panned before this pass).
++    middle_last: Option<(f64, f64)>,
++    /// M10.2 (PLAN §1.2): whether edge scrolling is on (the settings toggle
++    /// itself is Phase 3; the flag is wired now so the toggle only flips a
++    /// bool then). The band width and depth scaling live in `input.rs`.
++    edge_scroll_enabled: bool,
+     /// M9.1: whether the window has keyboard focus (edge scrolling runs
+     /// focused only, so an unfocused game never steals the desktop).
+     focused: bool,
+@@ -344,7 +359,11 @@ impl App {
+             drag_current: None,
+             keys: BTreeSet::new(),
+             modifiers: ModifiersState::empty(),
+-            middle_anchor: None,
++            right_button: RightButton::new(),
++            right_anchor: None,
++            right_press_armed: false,
++            middle_last: None,
++            edge_scroll_enabled: true,
+             focused: true,
+             attack_move_armed: false,
+             last_order: None,
+@@ -408,6 +427,12 @@ impl App {
+         self.latest_view = None;
+         self.placement = None;
+         self.ui_buttons.clear();
++        // M10.2: the input-layer additions reset with the match — the right
++        // button's gesture state and the middle-drag rotate anchor.
++        self.right_button = RightButton::new();
++        self.right_anchor = None;
++        self.right_press_armed = false;
++        self.middle_last = None;
+         // M10.1: the recording state restarts with the match — the new
+         // segment gets its own tick-0 checkpoint and its own end-of-match
+         // record write.
+@@ -918,17 +943,46 @@ impl ApplicationHandler for App {
+             }
+             WindowEvent::CursorMoved { position, .. } => {
+                 let _ = self.drag_current.insert((position.x, position.y));
+-                // M9.1: middle-drag panning — the grabbed ground point
+-                // follows the cursor ("grab the ground and pull").
+-                if let Some(anchor) = self.middle_anchor {
+-                    let Some(window) = &self.window else {
+-                        return;
+-                    };
+-                    let ndc = Self::to_ndc(window, position.x, position.y);
+-                    if let Some(current) = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1)) {
+-                        self.camera.pan_world(anchor - current);
++                // M10.2 (PLAN §1.2): right-drag map scrolling — once the
++                // right button's gesture crosses the command threshold, the
++                // ground point grabbed at the press follows the cursor
++                // ("grab the ground and pull", Generals ZH style). The same
++                // anchor math the old middle-drag pan used; the release of
++                // a scrolled gesture issues no command.
++                if self.right_button.moved((position.x, position.y)) {
++                    // The crossing event: grab the ground under the press
++                    // if it was not grabbed yet (a press with no ground
++                    // under it grabs at the first crossing instead).
++                    if self.right_anchor.is_none() {
++                        let ndc = Self::to_ndc(
++                            self.window.as_ref().expect("window exists in CursorMoved"),
++                            position.x,
++                            position.y,
++                        );
++                        self.right_anchor = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1));
+                     }
+                 }
++                if self.right_button.is_dragging() {
++                    if let Some(anchor) = self.right_anchor {
++                        let Some(window) = &self.window else {
++                            return;
++                        };
++                        let ndc = Self::to_ndc(window, position.x, position.y);
++                        if let Some(current) =
++                            self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1))
++                        {
++                            self.camera.pan_world(anchor - current);
++                        }
++                    }
++                }
++                // M10.2 (PLAN §1.2): middle-drag rotates the camera
++                // (Generals does this — it panned before). Horizontal
++                // travel orbits the view; vertical travel is inert.
++                if let Some((last_x, _)) = self.middle_last {
++                    let dx = (position.x - last_x) as f32;
++                    self.camera.rotate(input::MIDDLE_DRAG_RAD_PER_PX * dx);
++                    self.middle_last = Some((position.x, position.y));
++                }
+                 // Placement mode tracks the cursor's ground tile for the
+                 // ghost (plan §11.3's placement preview).
+                 if self.placement.is_some() {
+@@ -1003,53 +1057,98 @@ impl ApplicationHandler for App {
+                             }
+                         }
+                     }
+-                    // M9.1 (plan §11.3): the right-click context command —
+-                    // attack/gather/move resolved from what is under the
+-                    // cursor. It also cancels an armed attack-move and an
+-                    // armed placement (any other order disarms).
++                    // M10.2 (PLAN §1.2): the right button is the command
++                    // button *and*, held and dragged past the threshold,
++                    // the map-scroll grab (Generals ZH style). The press
++                    // only records; the RELEASE decides — press-to-release
++                    // travel under `input::RIGHT_DRAG_COMMAND_MAX_PX` is
++                    // the context command, beyond it the drag has already
++                    // scrolled and the release orders nothing.
+                     (MouseButton::Right, ElementState::Pressed) => {
+                         if self.placement.take().is_some() {
+-                            return; // right-click cancels placement, orders nothing
++                            // Right-click cancels placement and orders
++                            // nothing: the whole gesture is consumed (the
++                            // machine stays Idle, so the release is a
++                            // no-op too).
++                            self.attack_move_armed = false;
++                            return;
+                         }
++                        // Capture whether attack-move was armed at the
++                        // press: the minimap release honors it as an
++                        // attack-move order (the old dead branch the §1.1
++                        // audit found — the disarm used to precede the
++                        // check), a world release disarms.
++                        self.right_press_armed = self.attack_move_armed;
+                         self.attack_move_armed = false;
+-                        // A minimap right-click orders at the mapped ground
+-                        // point (armed attack-move included).
+-                        let minimap_hit = self.renderer.as_ref().and_then(|renderer| {
+-                            renderer.minimap_hit(cursor.0 as f32, cursor.1 as f32)
+-                        });
+-                        if let Some((world_x, world_z)) = minimap_hit {
+-                            if !self.selection.is_empty() {
+-                                let target = MatchHost::world_to_logical(world_x, world_z);
+-                                if self.attack_move_armed {
+-                                    self.attack_move_armed = false;
+-                                    self.submit_order(
+-                                        CommandKind::AttackMove {
+-                                            units: self.selection.clone(),
+-                                            target,
+-                                        },
+-                                        Some(target),
+-                                    );
+-                                } else {
+-                                    self.submit_order(
+-                                        CommandKind::Move {
+-                                            units: self.selection.clone(),
+-                                            target,
+-                                        },
+-                                        Some(target),
+-                                    );
++                        self.right_button.press(cursor);
++                        // Grab the ground under the press for the
++                        // potential drag (None above the horizon; the
++                        // crossing event re-grabs).
++                        self.right_anchor = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1));
++                    }
++                    (MouseButton::Right, ElementState::Released) => {
++                        // The release decides what the gesture was. A
++                        // camera drag (or a swallowed press) orders nothing.
++                        self.right_anchor = None;
++                        let armed_at_press = self.right_press_armed;
++                        self.right_press_armed = false;
++                        match self.right_button.release(cursor) {
++                            Some(RightRelease::Command) => {
++                                // UI buttons swallow the right-click
++                                // (right-clicking the command card is not
++                                // a world order).
++                                if self
++                                    .ui_buttons
++                                    .iter()
++                                    .any(|button| button.contains(cursor.0 as f32, cursor.1 as f32))
++                                {
++                                    return;
+                                 }
++                                // A minimap right-click orders at the
++                                // mapped ground point (attack-move when
++                                // the gesture began armed).
++                                let minimap_hit = self.renderer.as_ref().and_then(|renderer| {
++                                    renderer.minimap_hit(cursor.0 as f32, cursor.1 as f32)
++                                });
++                                if let Some((world_x, world_z)) = minimap_hit {
++                                    if !self.selection.is_empty() {
++                                        let target = MatchHost::world_to_logical(world_x, world_z);
++                                        if armed_at_press {
++                                            self.submit_order(
++                                                CommandKind::AttackMove {
++                                                    units: self.selection.clone(),
++                                                    target,
++                                                },
++                                                Some(target),
++                                            );
++                                        } else {
++                                            self.submit_order(
++                                                CommandKind::Move {
++                                                    units: self.selection.clone(),
++                                                    target,
++                                                },
++                                                Some(target),
++                                            );
++                                        }
++                                    }
++                                    return;
++                                }
++                                self.issue_context_order(ndc);
++                            }
++                            Some(RightRelease::Scroll) | None => {
++                                // The drag already scrolled; order nothing.
+                             }
+-                            return;
+                         }
+-                        self.issue_context_order(ndc);
+                     }
+-                    // M9.1: middle-drag panning grabs the ground on press.
++                    // M10.2 (PLAN §1.2): middle-drag rotates the camera
++                    // (Generals does this — it panned before this pass).
++                    // The press only anchors the cursor; CursorMoved turns
++                    // horizontal travel into yaw.
+                     (MouseButton::Middle, ElementState::Pressed) => {
+-                        self.middle_anchor =
+-                            self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1));
++                        self.middle_last = Some(cursor);
+                     }
+                     (MouseButton::Middle, ElementState::Released) => {
+-                        self.middle_anchor = None;
++                        self.middle_last = None;
+                     }
+                     _ => {}
+                 }
+@@ -1245,27 +1344,24 @@ impl ApplicationHandler for App {
+         if self.keys.contains(&Key::Character("d")) {
+             dx += pan;
+         }
+-        // M9.1 (plan §11.3: "pan by edge + keys"): a cursor resting on a
+-        // window border pans toward that border, corners combine. Focused
+-        // windows only — an unfocused game never scrolls the desktop.
+-        if self.focused {
++        // M10.2 (PLAN §1.2): edge scrolling — a depth-scaled band instead
++        // of the old binary zone. The cursor at the window edge scrolls at
++        // full speed, halfway into the `input::EDGE_SCROLL_BAND_PX` band at
++        // half speed, and the interior not at all; all four edges work and
++        // corners combine (the vector carries both axes). Focused windows
++        // only — an unfocused game never scrolls the desktop. The band is
++        // toggleable (`edge_scroll_enabled`); the settings screen that
++        // flips it is Phase 3.
++        if self.focused && self.edge_scroll_enabled {
+             if let (Some(window), Some((mx, my))) = (&self.window, self.drag_current) {
+                 let size = window.inner_size();
+                 if size.width > 0 && size.height > 0 {
+-                    let (width, height) = (size.width as f64, size.height as f64);
+-                    let margin = EDGE_SCROLL_PX;
+-                    if mx < margin {
+-                        dx -= pan;
+-                    }
+-                    if mx > width - margin {
+-                        dx += pan;
+-                    }
+-                    if my < margin {
+-                        dz += pan;
+-                    }
+-                    if my > height - margin {
+-                        dz -= pan;
+-                    }
++                    let (scale_x, scale_z) = input::edge_scroll_vector(
++                        (mx, my),
++                        (size.width as f64, size.height as f64),
++                    );
++                    dx += pan * scale_x;
++                    dz += pan * scale_z;
+                 }
+             }
+         }
+-- 
+2.47.3
+
+
+From 7c8b61b66c7e711b4f74da2fd5d0f156675c5751 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:05:45 +0000
+Subject: [PATCH 04/13] =?UTF-8?q?feat(client):=20selection=20parity=20?=
+ =?UTF-8?q?=E2=80=94=20shift+click=20toggle,=20shift+box=20union,=20double?=
+ =?UTF-8?q?-click=20select-all,=20empty-ground=20no-op=20(PLAN=20=C2=A71.3?=
+ =?UTF-8?q?)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Generals ZH selection half. click_select/box_select split into pure
+picks (pick_own_entity, box_pick) plus the release handler's decision:
+
+- Shift+click TOGGLES: an unselected pick joins, a selected pick leaves
+  (input::shift_click_selection, order preserved).
+- Shift+box ADDS: the box's picks union into the current selection
+  instead of replacing it (input::union_selection, no duplicates).
+- Double-click on a unit selects all VISIBLE units of the same kind —
+  same owner, same kind, fog-filtered view snapshot (input::
+  same_kind_selection); a 350 ms window (DOUBLE_CLICK_MS) gates it, and
+  shift+double-click unions rather than replaces.
+- A single click on EMPTY GROUND does nothing at all now: never an order
+  (left never orders — that was already true), and no silent deselect
+  either (PLAN §1.1's 'click on empty ground with a selection and
+  nothing else = nothing happens'); Escape is the deselect key.
+
+Four unit tests pin the pure functions. Zero golden movement:
+presentation/input only.
+---
+ crates/client/src/input.rs | 136 +++++++++++++++++++++++++++++++++++++
+ crates/client/src/main.rs  |  76 ++++++++++++++++++---
+ 2 files changed, 201 insertions(+), 11 deletions(-)
+
+diff --git a/crates/client/src/input.rs b/crates/client/src/input.rs
+index fd413a3..577d833 100644
+--- a/crates/client/src/input.rs
++++ b/crates/client/src/input.rs
+@@ -15,6 +15,9 @@
+ //! lesson: presentation direction is invisible to the golden hashes, so
+ //! only tests can keep it honest).
+ 
++use pandemonium_engine::RenderEntity;
++use pandemonium_sim_api::EntityId;
++
+ /// How far (in pixels) the cursor may travel between a right-button press
+ /// and its release for the gesture to count as a command click rather than
+ /// a camera drag (PLAN §1.2: "less than about 6 pixels of movement =
+@@ -168,10 +171,68 @@ pub fn edge_scroll_vector(cursor: (f64, f64), window: (f64, f64)) -> (f32, f32)
+     (x, z)
+ }
+ 
++/// How long (in milliseconds) two left clicks may sit apart and still count
++/// as one double click (the same-kind select-all of PLAN §1.3). Generals
++/// uses a similar few-hundred-millisecond window; long enough for a
++/// deliberate double press, short enough that two unrelated clicks never
++/// combine.
++pub const DOUBLE_CLICK_MS: u64 = 350;
++
++/// Whether two clicks `elapsed_ms` apart count as one double click
++/// ([`DOUBLE_CLICK_MS`] is the window).
++pub fn is_double_click(elapsed_ms: u64) -> bool {
++    elapsed_ms <= DOUBLE_CLICK_MS
++}
++
++/// Shift+click on a picked entity (PLAN §1.3: "Shift+click adds or removes
++/// from the selection"): the picked id toggles — absent it is appended,
++/// present it is removed. Order is otherwise preserved.
++pub fn shift_click_selection(current: &[EntityId], picked: EntityId) -> Vec<EntityId> {
++    let mut next = current.to_vec();
++    if let Some(index) = next.iter().position(|id| *id == picked) {
++        next.remove(index);
++    } else {
++        next.push(picked);
++    }
++    next
++}
++
++/// Shift+box selection (PLAN §1.3: "shift+box adds"): the box's picked ids
++/// join the current selection, keeping the current order first and the box's
++/// ascending snapshot order after; ids already selected are not duplicated.
++pub fn union_selection(current: &[EntityId], picked: &[EntityId]) -> Vec<EntityId> {
++    let mut next = current.to_vec();
++    for id in picked {
++        if !next.contains(id) {
++            next.push(*id);
++        }
++    }
++    next
++}
++
++/// Double-click on a picked entity (PLAN §1.3: "selects all visible units
++/// of the same kind"): every snapshot entity of the clicked entity's kind
++/// owned by the same player, in snapshot order. The snapshot the caller
++/// passes is the fog-filtered view, so "visible" is already the truth.
++/// `None` when the clicked entity is not in the snapshot (nothing to
++/// expand).
++pub fn same_kind_selection(entities: &[RenderEntity], clicked: EntityId) -> Option<Vec<EntityId>> {
++    let clicked = entities.iter().find(|entity| entity.id == clicked)?;
++    let (owner, kind) = (clicked.owner, clicked.kind);
++    Some(
++        entities
++            .iter()
++            .filter(|entity| entity.owner == owner && entity.kind == kind)
++            .map(|entity| entity.id)
++            .collect(),
++    )
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+     use pandemonium_engine::RtsCamera;
++    use pandemonium_sim_api::{KindId, MoveState, PlayerId};
+ 
+     // ---- right-button state machine -------------------------------------
+ 
+@@ -346,6 +407,81 @@ mod tests {
+         );
+     }
+ 
++    // ---- selection parity -------------------------------------------------
++
++    fn entity(id: u64, owner: PlayerId, kind: KindId) -> RenderEntity {
++        RenderEntity {
++            id: EntityId(id),
++            owner,
++            kind,
++            pos: glam::Vec3::new(id as f32, 0.0, 100.0 - id as f32),
++            facing: glam::Vec3::ZERO,
++            hp_fraction_milli: 1000,
++            move_state: MoveState::Idle,
++        }
++    }
++
++    #[test]
++    fn shift_click_toggles_membership() {
++        let current = vec![EntityId(1), EntityId(2)];
++        // Absent: appended.
++        assert_eq!(
++            shift_click_selection(&current, EntityId(3)),
++            vec![EntityId(1), EntityId(2), EntityId(3)]
++        );
++        // Present: removed.
++        assert_eq!(
++            shift_click_selection(&current, EntityId(1)),
++            vec![EntityId(2)]
++        );
++        // An empty selection takes the pick.
++        assert_eq!(shift_click_selection(&[], EntityId(3)), vec![EntityId(3)]);
++    }
++
++    #[test]
++    fn shift_box_unions_without_duplicates() {
++        let current = vec![EntityId(1), EntityId(2)];
++        let picked = vec![EntityId(2), EntityId(4), EntityId(3)];
++        assert_eq!(
++            union_selection(&current, &picked),
++            vec![EntityId(1), EntityId(2), EntityId(4), EntityId(3)]
++        );
++        assert_eq!(union_selection(&[], &picked), picked);
++        assert!(!union_selection(&current, &[]).is_empty());
++    }
++
++    #[test]
++    fn double_click_expands_to_all_visible_same_kind_same_owner() {
++        let own = PlayerId(0);
++        let other = PlayerId(1);
++        let entities = vec![
++            entity(1, own, KindId(2)),
++            entity(2, own, KindId(2)),
++            entity(3, other, KindId(2)), // enemy same kind: never joined
++            entity(4, own, KindId(5)),   // own other kind
++            entity(5, own, KindId(2)),
++        ];
++        assert_eq!(
++            same_kind_selection(&entities, EntityId(2)),
++            Some(vec![EntityId(1), EntityId(2), EntityId(5)])
++        );
++        // The enemy's double-click (were it clickable) expands to its own
++        // side's kind members only.
++        assert_eq!(
++            same_kind_selection(&entities, EntityId(3)),
++            Some(vec![EntityId(3)])
++        );
++        // An id outside the snapshot expands to nothing.
++        assert_eq!(same_kind_selection(&entities, EntityId(99)), None);
++    }
++
++    #[test]
++    fn the_double_click_window_is_a_few_hundred_ms() {
++        assert!(is_double_click(0));
++        assert!(is_double_click(DOUBLE_CLICK_MS));
++        assert!(!is_double_click(DOUBLE_CLICK_MS + 1));
++    }
++
+     // ---- direction pinning: middle-drag rotate ---------------------------
+ 
+     #[test]
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index e77c8ac..e89d77e 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -202,6 +202,9 @@ struct App {
+     /// held — horizontal travel rotates the camera (Generals-style
+     /// middle-drag rotate; it panned before this pass).
+     middle_last: Option<(f64, f64)>,
++    /// M10.2 (PLAN §1.3): when the last left *click* (not drag) landed —
++    /// the double-click window's clock for same-kind select-all.
++    last_left_click: Option<Instant>,
+     /// M10.2 (PLAN §1.2): whether edge scrolling is on (the settings toggle
+     /// itself is Phase 3; the flag is wired now so the toggle only flips a
+     /// bool then). The band width and depth scaling live in `input.rs`.
+@@ -363,6 +366,7 @@ impl App {
+             right_anchor: None,
+             right_press_armed: false,
+             middle_last: None,
++            last_left_click: None,
+             edge_scroll_enabled: true,
+             focused: true,
+             attack_move_armed: false,
+@@ -428,11 +432,13 @@ impl App {
+         self.placement = None;
+         self.ui_buttons.clear();
+         // M10.2: the input-layer additions reset with the match — the right
+-        // button's gesture state and the middle-drag rotate anchor.
++        // button's gesture state, the middle-drag rotate anchor, and the
++        // double-click clock.
+         self.right_button = RightButton::new();
+         self.right_anchor = None;
+         self.right_press_armed = false;
+         self.middle_last = None;
++        self.last_left_click = None;
+         // M10.1: the recording state restarts with the match — the new
+         // segment gets its own tick-0 checkpoint and its own end-of-match
+         // record write.
+@@ -593,8 +599,12 @@ impl App {
+         Self::to_ndc(window, x, y)
+     }
+ 
+-    /// Single-click selection: the nearest own entity to the cursor.
+-    fn click_select(&mut self, ndc: (f32, f32)) {
++    /// The pick under a single left click: the nearest own entity to the
++    /// cursor within the pick radius (`None` on empty ground). M10.2
++    /// (PLAN §1.1): what the *click then does* is the release handler's
++    /// decision — select, shift-toggle, or double-click expand — this only
++    /// answers "what is under the cursor".
++    fn pick_own_entity(&self, ndc: (f32, f32)) -> Option<EntityId> {
+         let snapshot = self.view_snapshot();
+         let mut best: Option<(f32, EntityId)> = None;
+         for entity in &snapshot.entities {
+@@ -607,11 +617,12 @@ impl App {
+                 best = Some((distance, entity.id));
+             }
+         }
+-        self.selection = best.map(|(_, id)| vec![id]).unwrap_or_default();
++        best.map(|(_, id)| id)
+     }
+ 
+-    /// Drag-box selection over own entities.
+-    fn box_select(&mut self, a: (f32, f32), b: (f32, f32)) {
++    /// The ids inside a drag box over own entities (M10.2: the pure pick —
++    /// shift-union vs replace is the release handler's decision).
++    fn box_pick(&self, a: (f32, f32), b: (f32, f32)) -> Vec<EntityId> {
+         let snapshot = self.view_snapshot();
+         let own: Vec<pandemonium_engine::RenderEntity> = snapshot
+             .entities
+@@ -619,9 +630,8 @@ impl App {
+             .filter(|entity| entity.owner == HUMAN)
+             .copied()
+             .collect();
+-        self.selection =
+-            self.camera
+-                .box_select(&own, glam::Vec2::new(a.0, a.1), glam::Vec2::new(b.0, b.1));
++        self.camera
++            .box_select(&own, glam::Vec2::new(a.0, a.1), glam::Vec2::new(b.0, b.1))
+     }
+ 
+     /// The one place orders enter the host: stamps the seq, pings the
+@@ -1050,10 +1060,54 @@ impl ApplicationHandler for App {
+                             let start_ndc = Self::to_ndc(window, start.0, start.1);
+                             let dragged = (start_ndc.0 - ndc.0).abs() > CLICK_SLOP
+                                 || (start_ndc.1 - ndc.1).abs() > CLICK_SLOP;
++                            let shift = self.modifiers.shift_key();
+                             if dragged {
+-                                self.box_select(start_ndc, ndc);
++                                // Box select (M10.2 PLAN §1.3: shift+box
++                                // ADDS to the selection instead of
++                                // replacing it).
++                                let picked = self.box_pick(start_ndc, ndc);
++                                self.selection = if shift {
++                                    input::union_selection(&self.selection, &picked)
++                                } else {
++                                    picked
++                                };
+                             } else {
+-                                self.click_select(ndc);
++                                // A click. M10.2 (PLAN §1.3): a double click
++                                // (two clicks inside the window) selects
++                                // all visible units of the same kind.
++                                let now = Instant::now();
++                                let double = self.last_left_click.is_some_and(|then| {
++                                    input::is_double_click(
++                                        now.duration_since(then).as_millis() as u64
++                                    )
++                                });
++                                self.last_left_click = Some(now);
++                                if let Some(picked) = self.pick_own_entity(ndc) {
++                                    if double {
++                                        let same_kind = input::same_kind_selection(
++                                            &self.view_snapshot().entities,
++                                            picked,
++                                        )
++                                        .unwrap_or_default();
++                                        self.selection = if shift {
++                                            input::union_selection(&self.selection, &same_kind)
++                                        } else {
++                                            same_kind
++                                        };
++                                    } else if shift {
++                                        // Shift+click toggles membership.
++                                        self.selection =
++                                            input::shift_click_selection(&self.selection, picked);
++                                    } else {
++                                        self.selection = vec![picked];
++                                    }
++                                }
++                                // else: a click on empty ground. PLAN §1.1:
++                                // "Click on empty ground with a selection
++                                // and nothing else = nothing happens" —
++                                // never an order (left never orders), and
++                                // not even a deselect; Escape clears the
++                                // selection.
+                             }
+                         }
+                     }
+-- 
+2.47.3
+
+
+From e184c94a2dbadc28879d474de25a1d7057d6db24 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:10:29 +0000
+Subject: [PATCH 05/13] =?UTF-8?q?feat(client):=20control-group=20double-ta?=
+ =?UTF-8?q?p=20centers=20the=20camera=20on=20the=20group=20(PLAN=20=C2=A71?=
+ =?UTF-8?q?.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ctrl+digit assigns, digit recalls — and now a double tap of the same
+digit inside DOUBLE_TAP_MS (350 ms) recalls AND jumps the camera to the
+group's live members' center of mass (input::group_center: dead ids
+weigh nothing, a stale group reference is harmless), keeping the current
+zoom distance. An assign (Ctrl+digit) breaks the double-tap chain — the
+next double tap must be two recalls.
+
+Two unit tests pin the window and the centroid. Zero golden movement:
+presentation/input only.
+---
+ crates/client/src/input.rs | 50 ++++++++++++++++++++++++++++++++++++++
+ crates/client/src/main.rs  | 33 ++++++++++++++++++++++++-
+ 2 files changed, 82 insertions(+), 1 deletion(-)
+
+diff --git a/crates/client/src/input.rs b/crates/client/src/input.rs
+index 577d833..bb881d5 100644
+--- a/crates/client/src/input.rs
++++ b/crates/client/src/input.rs
+@@ -228,6 +228,34 @@ pub fn same_kind_selection(entities: &[RenderEntity], clicked: EntityId) -> Opti
+     )
+ }
+ 
++/// How long (in milliseconds) two presses of the same control-group digit
++/// may sit apart and still count as one double tap (the group-centering
++/// camera jump of PLAN §1.3).
++pub const DOUBLE_TAP_MS: u64 = 350;
++
++/// Whether two presses of the same control-group digit `elapsed_ms` apart
++/// count as one double tap ([`DOUBLE_TAP_MS`] is the window).
++pub fn is_double_tap(elapsed_ms: u64) -> bool {
++    elapsed_ms <= DOUBLE_TAP_MS
++}
++
++/// The ground-plane center (world x, z) of a control group's live members —
++/// the double-tap camera jump's target (PLAN §1.3). Dead or absent ids are
++/// skipped (a stale group reference is harmless); `None` when no member is
++/// in the snapshot.
++pub fn group_center(entities: &[RenderEntity], group: &[EntityId]) -> Option<(f32, f32)> {
++    let mut sum = (0.0f32, 0.0f32);
++    let mut count = 0u32;
++    for id in group {
++        if let Some(entity) = entities.iter().find(|entity| entity.id == *id) {
++            sum.0 += entity.pos.x;
++            sum.1 += entity.pos.z;
++            count += 1;
++        }
++    }
++    (count > 0).then(|| (sum.0 / count as f32, sum.1 / count as f32))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -482,6 +510,28 @@ mod tests {
+         assert!(!is_double_click(DOUBLE_CLICK_MS + 1));
+     }
+ 
++    #[test]
++    fn the_double_tap_window_matches_the_double_click_window() {
++        assert!(is_double_tap(0));
++        assert!(is_double_tap(DOUBLE_TAP_MS));
++        assert!(!is_double_tap(DOUBLE_TAP_MS + 1));
++    }
++
++    #[test]
++    fn group_center_averages_live_members_and_skips_the_dead() {
++        let entities = vec![
++            entity(1, PlayerId(0), KindId(2)),
++            entity(2, PlayerId(0), KindId(2)),
++        ];
++        let group = vec![EntityId(1), EntityId(2), EntityId(77)]; // 77 is dead
++        let center = group_center(&entities, &group).expect("live members exist");
++        // entity(1) sits at (1, 99), entity(2) at (2, 98): mean (1.5, 98.5).
++        assert!((center.0 - 1.5).abs() < 1e-4 && (center.1 - 98.5).abs() < 1e-4);
++        // A fully dead group centers nowhere.
++        assert_eq!(group_center(&entities, &[EntityId(77)]), None);
++        assert_eq!(group_center(&entities, &[]), None);
++    }
++
+     // ---- direction pinning: middle-drag rotate ---------------------------
+ 
+     #[test]
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index e89d77e..ec715dd 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -205,6 +205,9 @@ struct App {
+     /// M10.2 (PLAN §1.3): when the last left *click* (not drag) landed —
+     /// the double-click window's clock for same-kind select-all.
+     last_left_click: Option<Instant>,
++    /// M10.2 (PLAN §1.3): the last control-group digit press and when it
++    /// landed — a double tap recalls the group and centers the camera on it.
++    last_digit_press: Option<(usize, Instant)>,
+     /// M10.2 (PLAN §1.2): whether edge scrolling is on (the settings toggle
+     /// itself is Phase 3; the flag is wired now so the toggle only flips a
+     /// bool then). The band width and depth scaling live in `input.rs`.
+@@ -367,6 +370,7 @@ impl App {
+             right_press_armed: false,
+             middle_last: None,
+             last_left_click: None,
++            last_digit_press: None,
+             edge_scroll_enabled: true,
+             focused: true,
+             attack_move_armed: false,
+@@ -439,6 +443,7 @@ impl App {
+         self.right_press_armed = false;
+         self.middle_last = None;
+         self.last_left_click = None;
++        self.last_digit_press = None;
+         // M10.1: the recording state restarts with the match — the new
+         // segment gets its own tick-0 checkpoint and its own end-of-match
+         // record write.
+@@ -1308,7 +1313,10 @@ impl ApplicationHandler for App {
+                             self.collect_checkpoints(&outcome);
+                         }
+                         // M8 (plan §11.3): control groups 1-9. Ctrl+digit
+-                        // assigns the current selection; digit alone recalls.
++                        // assigns the current selection; digit alone
++                        // recalls. M10.2 (PLAN §1.3): a double tap of the
++                        // same digit within DOUBLE_TAP_MS recalls AND
++                        // centers the camera on the group's live members.
+                         // Digit 0 is unused (9 groups, 1-9).
+                         winit::keyboard::KeyCode::Digit1
+                         | winit::keyboard::KeyCode::Digit2
+@@ -1324,8 +1332,31 @@ impl ApplicationHandler for App {
+                             let index = digit_to_group_index(code) - 1;
+                             if self.modifiers.control_key() {
+                                 self.assign_control_group(index);
++                                // An assign breaks the double-tap chain —
++                                // the next double tap must be two recalls.
++                                self.last_digit_press = None;
+                             } else {
++                                let now = Instant::now();
++                                let double_tap =
++                                    self.last_digit_press.is_some_and(|(last_index, then)| {
++                                        last_index == index
++                                            && input::is_double_tap(
++                                                now.duration_since(then).as_millis() as u64,
++                                            )
++                                    });
+                                 self.recall_control_group(index);
++                                if double_tap {
++                                    // Center the camera on the group's
++                                    // live members (dead ids weigh nothing).
++                                    if let Some((x, z)) = input::group_center(
++                                        &self.view_snapshot().entities,
++                                        &self.control_groups[index],
++                                    ) {
++                                        let distance = self.camera.distance();
++                                        self.camera.focus(x, z, distance);
++                                    }
++                                }
++                                self.last_digit_press = Some((index, now));
+                             }
+                         }
+                         // M8 (plan §9.7, A15): 'R' restarts the match when
+-- 
+2.47.3
+
+
+From 0db0c1b6a59246a89c89bf318d139c13fbea1312 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:15:08 +0000
+Subject: [PATCH 06/13] =?UTF-8?q?feat(client):=20the=20Escape=20ladder=20a?=
+ =?UTF-8?q?nd=20the=20Space=20jump=20(PLAN=20=C2=A71.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Escape now climbs one rung per press instead of jumping to quit: armed
+command, then placement, then the selection, and only with nothing armed,
+placed, or selected does it close the window (the old code quit on the
+first press whenever nothing was armed — an accidental Esc with units
+selected cost the player their window, not just their selection; and
+with empty-ground clicks no longer deselecting, Escape is the deselect
+key, per the plan's 'Escape cancels an armed command or clears the
+selection').
+
+Space (the plan's optional 'jump to the last event or base' — cheap, so
+it exists) centers the camera on the most recent DEATH's position, else
+the player's start anchor, keeping the zoom distance. Deaths are the
+event class a player most wants to look at; attack hits would thrash
+the target every combat tick.
+
+Two unit tests pin the ladder order and the fallback. Zero golden
+movement: presentation/input only.
+---
+ crates/client/src/input.rs | 55 ++++++++++++++++++++++++++++++++++++++
+ crates/client/src/main.rs  | 50 ++++++++++++++++++++++++++++------
+ 2 files changed, 97 insertions(+), 8 deletions(-)
+
+diff --git a/crates/client/src/input.rs b/crates/client/src/input.rs
+index bb881d5..4642475 100644
+--- a/crates/client/src/input.rs
++++ b/crates/client/src/input.rs
+@@ -256,6 +256,41 @@ pub fn group_center(entities: &[RenderEntity], group: &[EntityId]) -> Option<(f3
+     (count > 0).then(|| (sum.0 / count as f32, sum.1 / count as f32))
+ }
+ 
++/// What Escape does first (PLAN §1.3: "Escape cancels an armed command or
++/// clears the selection"): the cancellation ladder, one rung at a time per
++/// press — armed command, placement, selection, quit.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum EscapeAction {
++    /// An armed attack-move was pending — cancel it.
++    CancelArmed,
++    /// A structure placement was pending — cancel it.
++    CancelPlacement,
++    /// Something is selected — clear the selection.
++    ClearSelection,
++    /// Nothing armed, placing, or selected — quit the application.
++    Quit,
++}
++
++/// Resolves one Escape press to its next action, in ladder order.
++pub fn escape_action(armed: bool, placing: bool, selection_nonempty: bool) -> EscapeAction {
++    if armed {
++        EscapeAction::CancelArmed
++    } else if placing {
++        EscapeAction::CancelPlacement
++    } else if selection_nonempty {
++        EscapeAction::ClearSelection
++    } else {
++        EscapeAction::Quit
++    }
++}
++
++/// Space's jump target (PLAN §1.3: "jump to the last event or base"): the
++/// last event's ground position when one is known, else the player's start
++/// anchor. The caller decides which event class it tracks.
++pub fn jump_target(last_event: Option<(f32, f32)>, start_anchor: (f32, f32)) -> (f32, f32) {
++    last_event.unwrap_or(start_anchor)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -532,6 +567,26 @@ mod tests {
+         assert_eq!(group_center(&entities, &[]), None);
+     }
+ 
++    #[test]
++    fn escape_climbs_the_ladder_one_rung_per_press() {
++        assert_eq!(escape_action(true, true, true), EscapeAction::CancelArmed);
++        assert_eq!(
++            escape_action(false, true, true),
++            EscapeAction::CancelPlacement
++        );
++        assert_eq!(
++            escape_action(false, false, true),
++            EscapeAction::ClearSelection
++        );
++        assert_eq!(escape_action(false, false, false), EscapeAction::Quit);
++    }
++
++    #[test]
++    fn jump_target_prefers_the_last_event_else_the_base() {
++        assert_eq!(jump_target(None, (10.0, 20.0)), (10.0, 20.0));
++        assert_eq!(jump_target(Some((33.0, 44.0)), (10.0, 20.0)), (33.0, 44.0));
++    }
++
+     // ---- direction pinning: middle-drag rotate ---------------------------
+ 
+     #[test]
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index ec715dd..64bf903 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -208,6 +208,10 @@ struct App {
+     /// M10.2 (PLAN §1.3): the last control-group digit press and when it
+     /// landed — a double tap recalls the group and centers the camera on it.
+     last_digit_press: Option<(usize, Instant)>,
++    /// M10.2 (PLAN §1.3): the last death's ground position (the Space
++    /// jump's preferred target, else the start anchor — "jump to the last
++    /// event or base").
++    last_event_ground: Option<(f32, f32)>,
+     /// M10.2 (PLAN §1.2): whether edge scrolling is on (the settings toggle
+     /// itself is Phase 3; the flag is wired now so the toggle only flips a
+     /// bool then). The band width and depth scaling live in `input.rs`.
+@@ -371,6 +375,7 @@ impl App {
+             middle_last: None,
+             last_left_click: None,
+             last_digit_press: None,
++            last_event_ground: None,
+             edge_scroll_enabled: true,
+             focused: true,
+             attack_move_armed: false,
+@@ -444,6 +449,7 @@ impl App {
+         self.middle_last = None;
+         self.last_left_click = None;
+         self.last_digit_press = None;
++        self.last_event_ground = None;
+         // M10.1: the recording state restarts with the match — the new
+         // segment gets its own tick-0 checkpoint and its own end-of-match
+         // record write.
+@@ -1368,16 +1374,41 @@ impl ApplicationHandler for App {
+                             }
+                         }
+                         winit::keyboard::KeyCode::Escape if pressed => {
+-                            // M9.1: Esc cancels an armed attack-move first,
+-                            // then placement; with nothing armed it quits.
+-                            if self.attack_move_armed {
+-                                self.attack_move_armed = false;
+-                            } else if self.placement.take().is_some() {
+-                                // placement cancelled
+-                            } else {
+-                                event_loop.exit();
++                            // M10.2 (PLAN §1.3): Escape climbs the ladder
++                            // one rung per press — armed command, then
++                            // placement, then the selection, and only then
++                            // quit (the old code quit on the first press
++                            // whenever nothing was armed; an accidental
++                            // Esc with units selected cost the player
++                            // their window, not just their selection).
++                            match input::escape_action(
++                                self.attack_move_armed,
++                                self.placement.is_some(),
++                                !self.selection.is_empty(),
++                            ) {
++                                input::EscapeAction::CancelArmed => {
++                                    self.attack_move_armed = false;
++                                }
++                                input::EscapeAction::CancelPlacement => {
++                                    self.placement = None;
++                                }
++                                input::EscapeAction::ClearSelection => {
++                                    self.selection.clear();
++                                }
++                                input::EscapeAction::Quit => event_loop.exit(),
+                             }
+                         }
++                        // M10.2 (PLAN §1.3, the "only if cheap" extra):
++                        // Space jumps the camera to the last event's
++                        // position (the most recent death — the class of
++                        // event a player most wants to look at), else the
++                        // player's base. The zoom distance is kept.
++                        winit::keyboard::KeyCode::Space if pressed => {
++                            let (x, z) =
++                                input::jump_target(self.last_event_ground, self.start_anchor);
++                            let distance = self.camera.distance();
++                            self.camera.focus(x, z, distance);
++                        }
+                         _ => {}
+                     }
+                 }
+@@ -1541,6 +1572,9 @@ impl App {
+                 }
+                 Event::Died { entity } => {
+                     if let Some(&(pos, kind, owner)) = self.last_seen.get(entity) {
++                        // M10.2 (PLAN §1.3): the most recent death is the
++                        // Space jump's "last event".
++                        self.last_event_ground = Some((pos.x, pos.z));
+                         self.feedback.death(pos, kind, owner, self.frames_presented);
+                     }
+                 }
+-- 
+2.47.3
+
+
+From f5a8ff3357550bdd2f7100073dedd6bf1f952d9a Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:22:54 +0000
+Subject: [PATCH 07/13] =?UTF-8?q?feat(client):=20cursor=20order=20feedback?=
+ =?UTF-8?q?=20=E2=80=94=20the=20ground=20marker=20and=20the=20armed=20cros?=
+ =?UTF-8?q?shair=20(PLAN=20=C2=A71.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Before pressing, the player now SEES what the next click would do:
+
+- A small marker (filled square in a hollow outline, feedback.rs) at the
+  GROUND point under the cursor — it sticks to the world, not the pixel
+  — colored by the would-be order: green Move, red Attack, amber
+  Gather, blue rally, orange armed attack-move. It resolves through the
+  same context-order machinery that issues the order (the single
+  selected-producer rally case extracted into
+  selection_is_single_producer so both paths agree), so the preview
+  cannot lie. Placement mode suppresses it (the ghost is that mode's
+  marker) and an empty selection draws nothing — the plan's 'invalid'
+  reads cleanest as silence.
+- The window cursor becomes a crosshair while attack-move is armed
+  (set on change, not per frame).
+- The command ping stays: the marker previews, the ping confirms.
+
+The marker's colors avoid the red/green confusion pair by value as
+well as hue (the plan's §2.2 color-blind note, applied early because
+it is free here). Four unit tests pin the colors, the quad geometry,
+and the silences. Zero golden movement: presentation/input only.
+---
+ crates/client/src/feedback.rs | 134 ++++++++++++++++++++++++++++++++++
+ crates/client/src/input.rs    | 133 +++++++++++++++++++++++++++++++++
+ crates/client/src/main.rs     | 106 ++++++++++++++++++++++-----
+ 3 files changed, 354 insertions(+), 19 deletions(-)
+
+diff --git a/crates/client/src/feedback.rs b/crates/client/src/feedback.rs
+index b013037..ceed516 100644
+--- a/crates/client/src/feedback.rs
++++ b/crates/client/src/feedback.rs
+@@ -11,6 +11,7 @@
+ //! and color thresholds, the flash bookkeeping, and the expiry. The
+ //! pixel-level "does it read well" judgement is the human half of DEBT-008.
+ 
++use crate::input::CursorOrderHint;
+ use crate::text::{TextAtlas, UiQuad};
+ use pandemonium_engine::{logical_to_world, RenderSnapshot, RtsCamera};
+ use pandemonium_sim_api::{EntityId, Event, KindId, PlayerId, RejectReason, Vec2Fx};
+@@ -355,9 +356,142 @@ pub fn rejection_text(reason: RejectReason) -> &'static str {
+     }
+ }
+ 
++/// The cursor order-feedback marker's color per hint (M10.2, PLAN §1.3's
++/// "draw a small marker for Move / Attack / invalid"): green Move, red
++/// Attack, amber Gather, blue rally, orange attack-move — and no marker at
++/// all when nothing is orderable (`None`: the plan's "invalid" reads
++/// cleanest as silence; a permanent gray marker under a cursor with
++/// nothing selected would be noise). The colors avoid the red/green
++/// confusion pair by value as well as hue (the plan's §2.2 color-blind
++/// note, applied early where cheap).
++pub fn cursor_marker_color(hint: CursorOrderHint) -> Option<[f32; 4]> {
++    match hint {
++        CursorOrderHint::Move => Some([0.35, 1.0, 0.45, 0.9]),
++        CursorOrderHint::Attack => Some([1.0, 0.35, 0.30, 0.9]),
++        CursorOrderHint::Gather => Some([1.0, 0.78, 0.30, 0.9]),
++        CursorOrderHint::Rally => Some([0.45, 0.75, 1.0, 0.9]),
++        CursorOrderHint::AttackMove => Some([1.0, 0.55, 0.25, 0.9]),
++        CursorOrderHint::None => None,
++    }
++}
++
++/// Builds the cursor's order-feedback marker quads (M10.2, PLAN §1.3): a
++/// small filled square inside a hollow outline, drawn at the ground point
++/// under the cursor (it sticks to the world, not the pixel), in the hint's
++/// color. Nothing orderable or no ground under the cursor draws nothing.
++pub fn cursor_marker_quads(
++    atlas: &TextAtlas,
++    hint: CursorOrderHint,
++    ground: Option<glam::Vec3>,
++    camera: &RtsCamera,
++    viewport: (f32, f32),
++) -> Vec<UiQuad> {
++    /// Half the outline square's side, in pixels.
++    const HALF: f32 = 8.0;
++    /// Outline stroke thickness, in pixels.
++    const THICK: f32 = 1.5;
++    /// Half the filled center square's side, in pixels.
++    const CENTER: f32 = 3.0;
++    let Some(color) = cursor_marker_color(hint) else {
++        return Vec::new();
++    };
++    let Some(ground) = ground else {
++        return Vec::new();
++    };
++    let ndc = camera.project(ground);
++    if !ndc.x.is_finite() || !ndc.y.is_finite() {
++        return Vec::new();
++    }
++    let (cx, cy) = ndc_to_pixels((ndc.x, ndc.y), viewport);
++    let (left, right) = (cx - HALF, cx + HALF);
++    let (top, bottom) = (cy - HALF, cy + HALF);
++    let mut quads =
++        vec![atlas.solid_rect(cx - CENTER, cy - CENTER, 2.0 * CENTER, 2.0 * CENTER, color)];
++    // The hollow outline: one thin rect per side.
++    quads.push(atlas.solid_rect(left, top, 2.0 * HALF, THICK, color));
++    quads.push(atlas.solid_rect(left, bottom - THICK, 2.0 * HALF, THICK, color));
++    quads.push(atlas.solid_rect(left, top, THICK, 2.0 * HALF, color));
++    quads.push(atlas.solid_rect(right - THICK, top, THICK, 2.0 * HALF, color));
++    quads
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    use crate::input::CursorOrderHint;
++
++    #[test]
++    fn the_cursor_marker_colors_name_the_order_and_none_is_silent() {
++        assert_eq!(
++            cursor_marker_color(CursorOrderHint::Move),
++            Some([0.35, 1.0, 0.45, 0.9])
++        );
++        assert_eq!(
++            cursor_marker_color(CursorOrderHint::Attack),
++            Some([1.0, 0.35, 0.30, 0.9])
++        );
++        assert_eq!(
++            cursor_marker_color(CursorOrderHint::Gather),
++            Some([1.0, 0.78, 0.30, 0.9])
++        );
++        assert_eq!(
++            cursor_marker_color(CursorOrderHint::Rally),
++            Some([0.45, 0.75, 1.0, 0.9])
++        );
++        assert_eq!(
++            cursor_marker_color(CursorOrderHint::AttackMove),
++            Some([1.0, 0.55, 0.25, 0.9])
++        );
++        assert_eq!(cursor_marker_color(CursorOrderHint::None), None);
++    }
++
++    #[test]
++    fn the_cursor_marker_draws_five_quads_at_the_ground_point() {
++        let mut camera = RtsCamera::new(16, 16, 16.0 / 9.0);
++        camera.focus(8.0, 8.0, 20.0);
++        let atlas = TextAtlas::new();
++        let ground = Some(glam::Vec3::new(8.0, 0.0, 8.0));
++        let quads = cursor_marker_quads(
++            &atlas,
++            CursorOrderHint::Move,
++            ground,
++            &camera,
++            (1920.0, 1080.0),
++        );
++        // One filled center + four outline sides, all in the hint color.
++        assert_eq!(quads.len(), 5);
++        assert_eq!(quads[0].color, [0.35, 1.0, 0.45, 0.9]);
++        assert_eq!(quads[1].color, [0.35, 1.0, 0.45, 0.9]);
++        // The center square is 6 px wide, the outline rects 16 px.
++        assert!((quads[0].w - 6.0).abs() < 1e-3);
++        assert!((quads[1].w - 16.0).abs() < 1e-3);
++    }
++
++    #[test]
++    fn the_cursor_marker_is_silent_when_nothing_is_orderable_or_off_ground() {
++        let mut camera = RtsCamera::new(16, 16, 16.0 / 9.0);
++        camera.focus(8.0, 8.0, 20.0);
++        let atlas = TextAtlas::new();
++        let ground = Some(glam::Vec3::new(8.0, 0.0, 8.0));
++        // Nothing orderable: no marker even over ground.
++        assert!(cursor_marker_quads(
++            &atlas,
++            CursorOrderHint::None,
++            ground,
++            &camera,
++            (1920.0, 1080.0)
++        )
++        .is_empty());
++        // No ground under the cursor (above the horizon): no marker.
++        assert!(cursor_marker_quads(
++            &atlas,
++            CursorOrderHint::Move,
++            None,
++            &camera,
++            (1920.0, 1080.0)
++        )
++        .is_empty());
++    }
+ 
+     #[test]
+     fn ndc_to_pixels_maps_the_corners_and_center() {
+diff --git a/crates/client/src/input.rs b/crates/client/src/input.rs
+index 4642475..a5a94bb 100644
+--- a/crates/client/src/input.rs
++++ b/crates/client/src/input.rs
+@@ -291,6 +291,56 @@ pub fn jump_target(last_event: Option<(f32, f32)>, start_anchor: (f32, f32)) ->
+     last_event.unwrap_or(start_anchor)
+ }
+ 
++/// What the cursor's order-feedback marker shows (PLAN §1.3: "change the
++/// cursor or draw a small marker for Move / Attack / invalid"): the
++/// would-be order for the selection under the cursor, so the player sees
++/// what the next right-click does before pressing.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum CursorOrderHint {
++    /// Open ground under a live selection: Move.
++    Move,
++    /// An enemy under the cursor: Attack.
++    Attack,
++    /// A resource node under the cursor: Gather.
++    Gather,
++    /// A single selected producer over ground: rally point.
++    Rally,
++    /// Attack-move is armed: the next left-click attacks into that ground.
++    AttackMove,
++    /// Nothing orderable (empty selection, placement mode owns the cursor,
++    /// or no ground under the cursor).
++    None,
++}
++
++/// Resolves the cursor hint from the same context-order resolution the
++/// right-click uses. Armed attack-move takes precedence (the armed flow
++/// owns the next left-click); placement mode and an empty selection
++/// suppress the marker (the ghost is the placement marker; nothing
++/// selected means nothing to preview).
++pub fn cursor_order_hint(
++    order: Option<crate::orders::ContextOrder>,
++    rally: bool,
++    armed: bool,
++    placing: bool,
++    selection_empty: bool,
++) -> CursorOrderHint {
++    if selection_empty || placing {
++        return CursorOrderHint::None;
++    }
++    if armed {
++        return CursorOrderHint::AttackMove;
++    }
++    if rally {
++        return CursorOrderHint::Rally;
++    }
++    match order {
++        Some(crate::orders::ContextOrder::Attack { .. }) => CursorOrderHint::Attack,
++        Some(crate::orders::ContextOrder::Gather { .. }) => CursorOrderHint::Gather,
++        Some(crate::orders::ContextOrder::Move { .. }) => CursorOrderHint::Move,
++        None => CursorOrderHint::None,
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -587,6 +637,89 @@ mod tests {
+         assert_eq!(jump_target(Some((33.0, 44.0)), (10.0, 20.0)), (33.0, 44.0));
+     }
+ 
++    // ---- cursor order hint -------------------------------------------------
++
++    use pandemonium_sim_api::Vec2Fx;
++
++    #[test]
++    fn the_cursor_hint_names_the_order_the_next_click_would_issue() {
++        // (order, rally, armed, placing, selection_empty) -> expected hint.
++        let at = Vec2Fx::from_ints(3, 3);
++        let units = vec![EntityId(1)];
++        let cases: [(
++            Option<crate::orders::ContextOrder>,
++            bool,
++            bool,
++            bool,
++            bool,
++            CursorOrderHint,
++        ); 8] = [
++            (
++                Some(crate::orders::ContextOrder::Move { target: at }),
++                false,
++                false,
++                false,
++                false,
++                CursorOrderHint::Move,
++            ),
++            (
++                Some(crate::orders::ContextOrder::Attack {
++                    target: EntityId(9),
++                    at,
++                }),
++                false,
++                false,
++                false,
++                false,
++                CursorOrderHint::Attack,
++            ),
++            (
++                Some(crate::orders::ContextOrder::Gather {
++                    node: EntityId(9),
++                    at,
++                    units,
++                }),
++                false,
++                false,
++                false,
++                false,
++                CursorOrderHint::Gather,
++            ),
++            // A selected producer over ground: rally (the resolver's own
++            // rally path is main's; the hint takes the flag).
++            (None, true, false, false, false, CursorOrderHint::Rally),
++            // Armed attack-move owns the next click, even over a rally.
++            (
++                Some(crate::orders::ContextOrder::Move { target: at }),
++                true,
++                true,
++                false,
++                false,
++                CursorOrderHint::AttackMove,
++            ),
++            // Empty selection: no marker.
++            (None, false, false, false, true, CursorOrderHint::None),
++            // Placement mode owns the cursor (the ghost is its marker).
++            (
++                Some(crate::orders::ContextOrder::Move { target: at }),
++                false,
++                false,
++                true,
++                false,
++                CursorOrderHint::None,
++            ),
++            // No resolution (cursor above the horizon) and no rally.
++            (None, false, false, false, false, CursorOrderHint::None),
++        ];
++        for (order, rally, armed, placing, empty, expected) in cases {
++            assert_eq!(
++                cursor_order_hint(order.clone(), rally, armed, placing, empty),
++                expected,
++                "order={order:?} rally={rally} armed={armed} placing={placing} empty={empty}"
++            );
++        }
++    }
++
+     // ---- direction pinning: middle-drag rotate ---------------------------
+ 
+     #[test]
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 64bf903..acf8c27 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -212,6 +212,9 @@ struct App {
+     /// jump's preferred target, else the start anchor — "jump to the last
+     /// event or base").
+     last_event_ground: Option<(f32, f32)>,
++    /// M10.2 (PLAN §1.3): whether the window cursor is currently the
++    /// crosshair (the armed attack-move state's cursor; set on change only).
++    crosshair_cursor: bool,
+     /// M10.2 (PLAN §1.2): whether edge scrolling is on (the settings toggle
+     /// itself is Phase 3; the flag is wired now so the toggle only flips a
+     /// bool then). The band width and depth scaling live in `input.rs`.
+@@ -376,6 +379,7 @@ impl App {
+             last_left_click: None,
+             last_digit_press: None,
+             last_event_ground: None,
++            crosshair_cursor: false,
+             edge_scroll_enabled: true,
+             focused: true,
+             attack_move_armed: false,
+@@ -450,6 +454,7 @@ impl App {
+         self.last_left_click = None;
+         self.last_digit_press = None;
+         self.last_event_ground = None;
++        self.crosshair_cursor = false;
+         // M10.1: the recording state restarts with the match — the new
+         // segment gets its own tick-0 checkpoint and its own end-of-match
+         // record write.
+@@ -610,6 +615,20 @@ impl App {
+         Self::to_ndc(window, x, y)
+     }
+ 
++    /// Whether the selection is exactly one producing structure (the
++    /// right-click rally case, §11.4) — extracted so the context order and
++    /// the cursor's order hint agree on what a producer selection means.
++    fn selection_is_single_producer(&self) -> bool {
++        self.selection.len() == 1 && {
++            let selected = self.selection[0];
++            self.latest_view.as_ref().is_some_and(|view| {
++                view.production
++                    .iter()
++                    .any(|queue| queue.producer == selected)
++            })
++        }
++    }
++
+     /// The pick under a single left click: the nearest own entity to the
+     /// cursor within the pick radius (`None` on empty ground). M10.2
+     /// (PLAN §1.1): what the *click then does* is the release handler's
+@@ -671,27 +690,20 @@ impl App {
+         // A single selected producer sets its rally with a right-click (the
+         // §11.4 rally point; buildings cannot move, so the ground context
+         // order means "deliver here", not "go there").
+-        if self.selection.len() == 1 {
++        if self.selection_is_single_producer() {
+             let selected = self.selection[0];
+-            let is_producer = self.latest_view.as_ref().is_some_and(|view| {
+-                view.production
+-                    .iter()
+-                    .any(|queue| queue.producer == selected)
+-            });
+-            if is_producer {
+-                let Some(point) = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1)) else {
+-                    return;
+-                };
+-                let target = MatchHost::world_to_logical(point.x, point.z);
+-                self.submit_order(
+-                    CommandKind::SetRally {
+-                        producer: selected,
+-                        target,
+-                    },
+-                    Some(target),
+-                );
++            let Some(point) = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1)) else {
+                 return;
+-            }
++            };
++            let target = MatchHost::world_to_logical(point.x, point.z);
++            self.submit_order(
++                CommandKind::SetRally {
++                    producer: selected,
++                    target,
++                },
++                Some(target),
++            );
++            return;
+         }
+         let snapshot = self.view_snapshot();
+         let Some(order) = orders::resolve_context_order(
+@@ -1621,6 +1633,35 @@ impl App {
+             self.last_seen
+                 .insert(entity.id, (entity.pos, entity.kind, entity.owner));
+         }
++        // M10.2 (PLAN §1.3): the cursor's order-feedback hint, resolved
++        // before the renderer borrow (it reads the whole app: the cursor
++        // position, the selection, the context-order machinery). The marker
++        // quads build below, next to the other feedback cues.
++        let cursor = self.cursor_ndc();
++        let cursor_ground = self
++            .camera
++            .ground_point(glam::Vec2::new(cursor.0, cursor.1));
++        let cursor_rally = self.selection_is_single_producer();
++        let cursor_resolved = if cursor_rally {
++            None
++        } else {
++            orders::resolve_context_order(
++                &self.camera,
++                &snapshot,
++                glam::Vec2::new(cursor.0, cursor.1),
++                HUMAN,
++                self.node_kind,
++                self.worker_kind,
++                &self.selection,
++            )
++        };
++        let cursor_hint = input::cursor_order_hint(
++            cursor_resolved,
++            cursor_rally,
++            self.attack_move_armed,
++            self.placement.is_some(),
++            self.selection.is_empty(),
++        );
+         let Some(renderer) = &mut self.renderer else {
+             return;
+         };
+@@ -1687,6 +1728,33 @@ impl App {
+             self.frames_presented,
+             viewport,
+         ));
++        // M10.2 (PLAN §1.3): cursor feedback — a small ground marker naming
++        // the order the next right-click (or armed left-click) would issue,
++        // resolved above through the same context machinery that issues it.
++        // It sticks to the ground under the cursor, not the pixel. The
++        // command ping on submission stays (the marker previews, the ping
++        // confirms).
++        quads.extend(feedback::cursor_marker_quads(
++            renderer.atlas(),
++            cursor_hint,
++            cursor_ground,
++            &self.camera,
++            viewport,
++        ));
++        // M10.2 (PLAN §1.3): the crosshair cursor while attack-move is
++        // armed (the plan's "change the cursor" half; set only on change —
++        // not every frame).
++        let want_crosshair = self.attack_move_armed;
++        if want_crosshair != self.crosshair_cursor {
++            self.crosshair_cursor = want_crosshair;
++            if let Some(window) = &self.window {
++                window.set_cursor(if want_crosshair {
++                    winit::window::CursorIcon::Crosshair
++                } else {
++                    winit::window::CursorIcon::Default
++                });
++            }
++        }
+         // The HUD and debug overlay quads (plan §11.4 / §11.6) queue before the
+         // frame; the renderer drains them on top of the world.
+         quads.extend(overlay_quads(OverlayInput {
+-- 
+2.47.3
+
+
+From fa103bc923e40732916886e55753378006704ff4 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:23:42 +0000
+Subject: [PATCH 08/13] =?UTF-8?q?docs(controls):=20the=20M10.2=20Phase=201?=
+ =?UTF-8?q?=20control=20card=20=E2=80=94=20README=20+=20the=20PLAYTEST=20c?=
+ =?UTF-8?q?opy?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The Generals ZH card, rewritten per PLAN §1: left selects (never orders,
+empty ground does nothing), right commands (context: attack / gather /
+move / rally) with the 6 px click-vs-drag threshold, right-drag scrolls,
+middle-drag rotates, the 14 px depth-scaled edge band, shift+click /
+shift+box / double-click, groups with double-tap centering, Space's
+jump, the Escape ladder, and the unchanged wheel/Q/E/P/F3/F8/R set.
+
+Both copies update together (PLAYTEST §2 is the README paragraph,
+verbatim, by its own rule) — the re-test plays against this card.
+---
+ README.md        | 34 ++++++++++++++++++++++++++--------
+ docs/PLAYTEST.md | 32 ++++++++++++++++++++++++--------
+ 2 files changed, 50 insertions(+), 16 deletions(-)
+
+diff --git a/README.md b/README.md
+index e8400d0..16c75e4 100644
+--- a/README.md
++++ b/README.md
+@@ -298,14 +298,32 @@ cargo run -p pandemonium-client
+ cargo run -p pandemonium-client -- --frames 900
+ ```
+ 
+-Controls: **WASD / arrows / screen edges / middle-drag** pan the camera,
+-**Q / E** rotate it around its target (Generals-style), the **wheel** zooms
+-toward the cursor, **Ctrl+wheel** tilts the pitch (Generals-style),
+-**left-click / drag** selects, **right-click** orders (attack an enemy,
+-gather a node with workers, or move over open ground), **A** arms
+-attack-move for the next left-click, **S** stops, **1-9** recall control
+-groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
+-overlay, **R** restarts after the match ends.
++Controls (Generals: Zero Hour muscle memory — see `docs/PLAYTEST.md`'s card
++for the tester-facing copy):
++
++**Selecting** — **left-click** selects, **left-drag** box-selects; left never
++issues an order, and a click on empty ground does nothing (Esc clears the
++selection). **Shift+click** adds or removes one unit, **shift+drag** adds the
++box's picks, **double-click** selects every visible unit of the same kind.
++
++**Commanding** — **right-click** is the only way to command: on an enemy it
++attacks, on an ore node it gathers (workers), on open ground it moves, and on
++a single selected producer it sets the rally point. A click under 6 px of
++travel orders; **right-drag** beyond that grabs and scrolls the map (the
++release then orders nothing). **A** arms attack-move for the next left-click,
++**S** stops.
++
++**Camera** — **right-drag** scrolls (the main way to move the map),
++**middle-drag** rotates, **WASD / arrows / screen edges** pan (the edge is a
++14 px band whose speed scales with depth), **Q / E** rotate, the **wheel**
++zooms toward the cursor, **Ctrl+wheel** tilts the pitch.
++
++**Groups & jumps** — **1–9** recall control groups, **Ctrl+1–9** assigns,
++double-tapping a digit recalls and centers the camera on the group. **Space**
++jumps to the last death (or your base). **Esc** climbs one rung per press:
++armed command → placement → selection → quit. **P** pauses, **F3** toggles the
++debug overlay, **F8** writes the bug-report dump, **R** restarts after the
++match ends.
+ 
+ The full verification gate — the same one CI runs:
+ 
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+index 946ba30..d3eb4a1 100644
+--- a/docs/PLAYTEST.md
++++ b/docs/PLAYTEST.md
+@@ -69,14 +69,30 @@ A mid-match dump on demand exists too — F8, section 6.
+ 
+ Copy of the README's controls paragraph, verbatim, plus the F8 bug-report key:
+ 
+-Controls: **WASD / arrows / screen edges / middle-drag** pan the camera,
+-**Q / E** rotate it around its target (Generals-style), the **wheel** zooms
+-toward the cursor, **Ctrl+wheel** tilts the pitch (Generals-style),
+-**left-click / drag** selects, **right-click** orders (attack an enemy,
+-gather a node with workers, or move over open ground), **A** arms
+-attack-move for the next left-click, **S** stops, **1-9** recall control
+-groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
+-overlay, **R** restarts after the match ends.
++Controls (Generals: Zero Hour muscle memory):
++
++**Selecting** — **left-click** selects, **left-drag** box-selects; left never
++issues an order, and a click on empty ground does nothing (Esc clears the
++selection). **Shift+click** adds or removes one unit, **shift+drag** adds the
++box's picks, **double-click** selects every visible unit of the same kind.
++
++**Commanding** — **right-click** is the only way to command: on an enemy it
++attacks, on an ore node it gathers (workers), on open ground it moves, and on
++a single selected producer it sets the rally point. A click under 6 px of
++travel orders; **right-drag** beyond that grabs and scrolls the map (the
++release then orders nothing). **A** arms attack-move for the next left-click,
++**S** stops.
++
++**Camera** — **right-drag** scrolls (the main way to move the map),
++**middle-drag** rotates, **WASD / arrows / screen edges** pan (the edge is a
++14 px band whose speed scales with depth), **Q / E** rotate, the **wheel**
++zooms toward the cursor, **Ctrl+wheel** tilts the pitch.
++
++**Groups & jumps** — **1–9** recall control groups, **Ctrl+1–9** assigns,
++double-tapping a digit recalls and centers the camera on the group. **Space**
++jumps to the last death (or your base). **Esc** climbs one rung per press:
++armed command → placement → selection → quit. **P** pauses, **F3** toggles the
++debug overlay, **R** restarts after the match ends.
+ 
+ **[F8] bug report** — press it at (or right after) the moment anything goes
+ wrong; it writes two files (section 6).
+-- 
+2.47.3
+
+
+From 75743e9671f2288ad8a7587cf89a4c6e5fbf08d6 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:24:11 +0000
+Subject: [PATCH 09/13] =?UTF-8?q?docs(assumptions):=20A-091..A-100=20?=
+ =?UTF-8?q?=E2=80=94=20the=20M10.2=20Phase=201=20interpretation=20log?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Every guess the controls pass made where the plan left room: the
+literal empty-ground no-op (A-091, incl. the ZH-deselect tension), the
+6 px threshold semantics (A-092), middle-drag direction and inert
+vertical (A-093), the 14 px linear band and w-1 depth (A-094), the
+350 ms double-click/double-tap windows and the assign-breaks-chain rule
+(A-095), same-kind = same-owner visible units (A-096), Space tracks
+deaths (A-097), the silent invalid marker (A-098), right-release
+routing incl. the fixed armed-minimap branch (A-099), and the owner's
+delivery answers (Phase 1 scope, rodio for Phase 4, edge scroll on,
+the commit authorship choice — A-100).
+---
+ docs/ASSUMPTIONS.md | 86 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 86 insertions(+)
+
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 418cca9..7d68189 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -791,3 +791,89 @@ confirms or rejects it.
+   exactly as they overlapped the unsharded tier before it. The optional
+   `--json` summary flag was skipped: the tee'd text summary is the
+   evidence, and the flag was explicitly allowed to be dropped.
++
++- **A-091 (PLAN-M10.2 §1.1, M10.2).** The plan's "Click on empty ground with
++  a selection and nothing else = nothing happens" is read literally: a plain
++  left click on empty ground neither orders (left never orders — that part
++  was already true) *nor clears the selection*. Generals ZH players may
++  expect ground-click-to-deselect; the plan's sentence wins, and
++  deselection stays available through Esc (the §1.3 Escape ladder) and an
++  empty box-drag (a drag is "something else"). Logged because a future
++  playtest may report "I can't deselect by clicking the ground" — that is
++  this assumption, not a bug.
++
++- **A-092 (PLAN-M10.2 §1.2, M10.2).** The right button's command/drag
++  threshold is 6.0 px of Euclidean travel (the plan says "about 6"), and
++  exactly 6.0 px counts as a command — the drag must be unambiguous. The
++  threshold applies to the press→release travel; a drag that crossed it and
++  returned to the press point is still a scroll (the release orders
++  nothing), and a press whose ground point is off-screen (above the
++  horizon) re-grabs at the crossing so a sky-started drag still scrolls.
++
++- **A-093 (PLAN-M10.2 §1.2, M10.2).** Middle-drag rotation is
++  horizontal-only, at a fixed 0.005 rad/px, direction pinned to match E
++  ("orbit right"): dragging right increases yaw at every camera angle
++  (pinned at yaw 0 and 90). Vertical middle-drag travel is inert — the
++  plan says "rotates", and pitch already has Ctrl+wheel; vertical drag
++  rotation would fight the wheel's muscle memory.
++
++- **A-094 (PLAN-M10.2 §1.2, M10.2).** The edge-scroll band is 14 px (the
++  plan says "about 12–16"), speed scales *linearly* with the cursor's depth
++  into the band (the old M9.1 zone snapped to full speed at 24 px, which
++  the owner read as broken), and depth is measured to the outermost pixel
++  (`w-1` / `h-1`) so the last pixel row scrolls at full speed. The band is
++  on by default; the *toggle* is PLAN §3/Phase 3's settings screen (the
++  `edge_scroll_enabled` flag is wired now, DEBT-014 holds the UI).
++
++- **A-095 (PLAN-M10.2 §1.3, M10.2).** The double-click and double-tap
++  windows are both 350 ms (the plan names neither; Generals uses a similar
++  few-hundred-millisecond window). A double click requires the second click
++  to *pick* an entity — two quick clicks on empty ground are two
++  nothing-happens clicks (A-091). A control-group *assign* (Ctrl+digit)
++  breaks the double-tap chain: the next double tap must be two recalls.
++
++- **A-096 (PLAN-M10.2 §1.3, M10.2).** "Double-click a unit selects all
++  visible units of the same kind" means same kind AND same owner, drawn
++  from the fog-filtered view snapshot (so "visible" is the fog's truth);
++  enemy units never join a selection (selection itself stays own-only,
++  the M6-era placeholder rule). A double-clicked *building* expands to
++  all visible buildings of that kind too — the plan says "units", but
++  kind-parity is the honest reading of the mechanism and it is harmless.
++
++- **A-097 (PLAN-M10.2 §1.3, M10.2).** Space ("jump to the last event or
++  base", optional) jumps to the most recent **death** — the event class a
++  player most wants to look at — else the player's start anchor, keeping
++  the current zoom distance. Attack hits were rejected as the tracked
++  class: they fire many times per combat tick and the jump target would
++  thrash. The command ping's position was rejected as a fallback: the
++  player already knows where they clicked.
++
++- **A-098 (PLAN-M10.2 §1.3, M10.2).** The cursor-feedback "invalid" state
++  (the plan offers "Move / Attack / invalid") is *silence*: no marker when
++  nothing is orderable (empty selection, placement mode owns the cursor,
++  or no ground under the cursor). A permanent gray marker under an idle
++  cursor would be noise, not feedback; the armed attack-move gets the
++  crosshair *window cursor* as its mode cue, and its ground marker is
++  orange (distinct from the red Attack preview).
++
++- **A-099 (PLAN-M10.2 §1.2, M10.2).** Right-button release routing, per
++  the state machine: a sub-threshold release over the bottom-bar buttons
++  is swallowed (UI is not a world order — the old code only guarded the
++  left button); a sub-threshold release over the minimap orders at the
++  mapped ground point, as Move — or as AttackMove when attack-move was
++  armed at the *press* (fixing the M9.1 dead branch the §1.1 audit found:
++  the old code disarmed before the minimap check read the flag); a
++  right-press that cancels a placement consumes the whole gesture (the
++  release is a no-op, matching the old behavior).
++
++- **A-100 (PLAN-M10.2 delivery, M10.2).** The owner's delivery answers for
++  this pass (recorded where the plan leaves the choices open): the
++  delivery covers **Phase 1 (Controls) only** — Phases 2–4 (visual
++  legibility, menus/settings, audio) wait for the owner's re-test verdict;
++  the Phase 4 audio backend, when that phase runs, is **rodio** (an
++  external-crate allow-list amendment + ADR is required then — the
++  allow-list is untouched by this pass); edge scrolling defaults to on
++  with the 14 px band; and the patch's commits are authored as
++  `elieaazzam-art <elieaazzam-art@users.noreply.github.com>` (the owner's
++  account noreply form, so GitHub attributes them on import; the owner
++  can `git am` and `--reset-author` if they prefer their local identity).
+-- 
+2.47.3
+
+
+From a582895e53f4258088e2d6094e44c3c5d0981ef6 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:24:32 +0000
+Subject: [PATCH 10/13] docs(debt): DEBT-014/015 + the DEBT-008 next human pass
+ is the Phase 1 re-test
+
+DEBT-014: the edge-scroll settings toggle is Phase 3's (the flag is
+wired now; only the UI is missing). DEBT-015: PLAN-M10.2 Phases 2-4
+deferred by the owner's Phase-1-only delivery scope, gated on the
+re-test verdict; rodio pre-chosen for Phase 4 (A-100). DEBT-008's
+trigger updated: the next human pass is the owner's re-test of the
+Generals ZH controls card on this build.
+---
+ docs/DEBT.md | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index 3358d22..c2600f9 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -16,9 +16,11 @@ repay-when trigger | status |`
+ | DEBT-005 | ~~The replay re-simulation driver exists twice (tools `verify.rs` and `tests/determinism.rs`), ~40 lines each~~ repaid (M7): the feed loop now lives once as `pandemonium_sim::run_command_log` (a pure function over a command stream — the debt's own suggested home, keeping `replay` above `sim`). Tools' `run_scripted` and `verify_replay` and the acceptance suites (`tests/determinism.rs`'s A2 re-sim, M7's `tests/ai.rs`) all drive through it; `tests/determinism.rs`'s `run_match` remains as the A1 *full-observability* harness (it collects per-tick events and snapshots, which the checkpoint driver deliberately does not) — a test fixture, not a second re-sim verifier | simplification | trigger fired: M7 added the third consumer (`tests/ai.rs`) | — | — | repaid (M7) |
+ | DEBT-006 | ~~`ContentBundle::world()` maps only Health/Move/Vision~~ narrowed by M5: Gather, Build, Produce, Storage, ProvidesPopulation, Resource, and Footprint all flow into the sim's capability templates now (with kind economy stats, production lists, and the buildability grid); **Attack is the last carried-but-unmapped capability** repaid (M6): the seam now maps Attack into `CapTemplate::Attack` and the runtime `CapabilityData::Attack` block; the content encoder already covered Attack so `content_hash` is unaffected | simplification | repaid as M5's seam work + M6's Attack mapping | — | — | repaid (M6) |
+ | DEBT-007 | ~~The A3 scaffold proves data-only load + spawn + Move~~ M5 half repaid: `add_a_unit_is_data_only` now gathers, builds the barracks from data, and **trains the data-defined kind from the production list**; M6 half repaid: the test now runs the simulation until the data-defined skirmisher (kind 6) fires an `AttackHit` through auto-acquisition — proving the kind fights through the same combat pipeline every other attacker uses, with zero changes under `crates/sim/` (the source scan still finds no "skirmisher" mention) | simplification | repaid as M5's A3 extension + M6's fight-half extension | — | — | repaid (M6) |
+-| DEBT-008 | The windowed client's *machine* verification is green through M9.1 and the M10 visual pass; its *human* half ran at M9.1 and remains the closing act for every visual change since. History: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion; M8 narrowed the scope to the full vs-AI loop (hosted AI, end screen, restart, control groups, hotkeys); M9 machine-ran the full windowed vs-AI loop to natural resolution (`--frames 40000`, "match ended, player 1 wins (tick 5250)") and landed the feel pass (flashes, health bars, pings). **M9 — the human pass**: the project owner played the windowed build on a real display and reported the input layer was mirrored and half-missing ("nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears") — every symptom real, every root cause client-side (the camera's screen-right axis negated since M3; no mouse camera control — §11.3's edge pan and zoom-toward-cursor unimplemented, wheel inverted; no attack-order path — right-click context resolution unimplemented; 'A' firing attack-move on key-down and key repeats while doubling as a pan key; silent rejections; the 58-tile map-center opening zoom; M9's cues never expiring because the feedback clock only advanced in `--frames` mode). **M9.1** fixed all of it (direction-pinned camera tests, context-resolution tests, refusal-cue tests, the smoke's invalid-order pin, and the extended Xvfb+XTEST input verification: 900 frames, 5-entity drag selection, context Move + armed attack-move submitted). **M10** added the command card (train/build/queue-cancel/rally), fog rendering, the minimap, lighting, silhouettes, and death fades — the human pass now also judges those | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary; env: Xvfb with a screen at least as large as the 800x600 default window — e.g. 1280x800 — userland libEGL/libGLESv2 + a glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst, keyboard focus via `xdotool windowfocus`; no window manager — a WM breaks wgpu's GL surface here) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution with the M10 controls (command card: train from the CC/barracks, place structures with the ghost, cancel queue items, set rallies with a right-click; minimap: click-to-move, right-click orders; fog, silhouettes, death fades), confirm the loop is playable end to end and the visuals read, then close | a human pass on the M10 build | open (narrowed to the re-verification by M9.1/M10) |
++| DEBT-008 | The windowed client's *machine* verification is green through M9.1 and the M10 visual pass; its *human* half ran at M9.1 and remains the closing act for every visual change since. History: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion; M8 narrowed the scope to the full vs-AI loop (hosted AI, end screen, restart, control groups, hotkeys); M9 machine-ran the full windowed vs-AI loop to natural resolution (`--frames 40000`, "match ended, player 1 wins (tick 5250)") and landed the feel pass (flashes, health bars, pings). **M9 — the human pass**: the project owner played the windowed build on a real display and reported the input layer was mirrored and half-missing ("nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears") — every symptom real, every root cause client-side (the camera's screen-right axis negated since M3; no mouse camera control — §11.3's edge pan and zoom-toward-cursor unimplemented, wheel inverted; no attack-order path — right-click context resolution unimplemented; 'A' firing attack-move on key-down and key repeats while doubling as a pan key; silent rejections; the 58-tile map-center opening zoom; M9's cues never expiring because the feedback clock only advanced in `--frames` mode). **M9.1** fixed all of it (direction-pinned camera tests, context-resolution tests, refusal-cue tests, the smoke's invalid-order pin, and the extended Xvfb+XTEST input verification: 900 frames, 5-entity drag selection, context Move + armed attack-move submitted). **M10** added the command card (train/build/queue-cancel/rally), fog rendering, the minimap, lighting, silhouettes, and death fades — the human pass now also judges those | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary; env: Xvfb with a screen at least as large as the 800x600 default window — e.g. 1280x800 — userland libEGL/libGLESv2 + a glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst, keyboard focus via `xdotool windowfocus`; no window manager — a WM breaks wgpu's GL surface here) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution with the M10 controls (command card: train from the CC/barracks, place structures with the ghost, cancel queue items, set rallies with a right-click; minimap: click-to-move, right-click orders; fog, silhouettes, death fades), confirm the loop is playable end to end and the visuals read, then close | a human pass on the M10.2 Phase 1 build (the owner re-test of the Generals ZH controls card — the machine half is re-verified by this pass on Xvfb+XTEST) | open (the M10.2 Phase 1 owner re-test is the next human pass) |
+ | DEBT-009 | ~~M3's minimal HUD and debug overlays (plan §11.6) are not implemented~~ repaid: the HUD slice landed — fontdue text atlas (embedded "Pandemonium Sans" subset), screen-space UI pass, resource/population HUD, F3 debug overlay (tick, state hash, entity/selection counts), P pause, `.` single-step | simplification | repaid as the second M3 sub-slice | — | — | repaid (M3) |
+ | DEBT-010 | ~~The A12 `population <= cap` invariant is asserted strictly, with no allowance for the over-cap window classic RTS rules allow when population-providing structures are destroyed while units live~~ decided (M6, A-053): the strict invariant is **relaxed to "spawn-blocking"** — usage may exceed cap when combat destroys population-providing structures, and new spawns are blocked at the spawn gate (already the M5 production behavior — completed items hold at the queue front until headroom returns, A-042); no units die or decay from over-cap. The decision touches A12 only, not §9.4's reading (production/construction semantics are unchanged) | verification | decided as M6's first work item (the brief calls this out as blocking honest combat) | — | M6 combat exit (this row) | retired (M6) |
+ | DEBT-011 | Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence) | simplification | plan §11.5's Alpha scope is the seam ("optionally a few placeholder cues"); a real backend needs a dependency + device decision that buys the Alpha nothing (the machine check is the cue flow, which the smoke run prints) | implement a mixer sink behind the same `AudioSink` trait (the client swaps the sink; nothing above the boundary moves), probably `cpal` + a small PCM cue bank, with an external-crate allow-list amendment | the post-Alpha audio pass (plan §19: renderer, UI skin, audio are rewritten on purpose over time) — or PLAYTEST.md's audio probe ("did the absence of sound hurt your read of the game?", section 5) reporting a yes: that is the debt's declared trigger with its evidence channel | open (M9) |
+ | DEBT-012 | The client's placement-legality preview and train-button requirement check are approximations (A-083/A-084): the preview ignores movers standing in the footprint, and a requirement satisfied by a still-under-construction structure passes the button check | simplification | the command gate is the authority and a wrong guess surfaces through the existing refusal cue; exact client-side checks would duplicate sim state (lifecycle, mover positions) above the boundary | if a human pass reports a confusing refusal, mirror the exact checks into a boundary view (e.g. expose placement verdicts through a PlayerView extension) instead of duplicating sim logic client-side | PLAYTEST.md's placement-guess probe ("did any build-placement preview say legal when the order was refused, or illegal when it should have succeeded?", section 5) reporting a wrong green/red guess — the debt's declared trigger with its evidence channel | open (M10) |
+ | DEBT-013 | The client's two monolith files: `crates/client/src/render.rs` (2473 lines) and `crates/client/src/main.rs` (1782 lines pre-M10.1) concentrate the whole presentation — renderer, input handling, app state, HUD assembly, and now the F8/`--record` wiring — in two compilation units | code organization | pre-declaration freeze: the split serves no acceptance criterion, and plan §0's scope law forbids refactoring no test requires; plan §19 schedules the presentation rewrite anyway, so splitting now would be work the rewrite discards | split render.rs into pipeline/terrain/entities/overlay/minimap and main.rs into input/app/screens at the post-alpha presentation pass; the intended boundaries are recorded in `docs/ARCHITECTURE.md`'s post-alpha refactor map (guidance only — this row owns the work) | the post-Alpha renderer/UI rewrite (plan §19) | open (M10.1) |
++| DEBT-014 | The edge-scroll **toggle** does not exist yet: PLAN-M10.2 §1.2 ships the reworked band (14 px, depth-scaled, all four edges) with the `edge_scroll_enabled` flag wired through the input path, but the settings screen that flips it is Phase 3 (PLAN §3.4) — the flag is hard-`true` at construction | simplification | the plan itself schedules the toggle with the settings screen; shipping a hotkey or a CLI flag now would invent a control Phase 3 then has to re-teach | the Phase 3 settings screen flips the already-wired flag (no input-path change needed then) | PLAN-M10.2 Phase 3 lands | open (M10.2) |
++| DEBT-015 | PLAN-M10.2's Phases 2–4 (visual legibility, menu and settings, audio) are deferred past this delivery: the owner scoped the pass to **Phase 1 only** (A-100), so the milestone's remaining findings stay open and the A14 declaration stays blocked | scope deferral | the owner's explicit delivery answer — Phase 1 needs their re-test verdict before the rest is built on top of it | run Phases 2–4 as their own passes on the same plan (docs/PLAN-M10.2.md is the standing spec); the Phase 4 audio backend choice is pre-made (rodio, A-100) with its allow-list amendment + ADR due then | the owner confirms the Phase 1 controls feel right (the PLAYTEST result #1 re-test) | open (M10.2) |
+-- 
+2.47.3
+
+
+From 0ec3ffa21e84a704227f3f2731886b62a3bbd210 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:30:47 +0000
+Subject: [PATCH 11/13] =?UTF-8?q?docs(handoff):=20the=20M10.2=20Phase=201?=
+ =?UTF-8?q?=20status=20=E2=80=94=20snapshot,=20board=20row,=20gotchas,=20c?=
+ =?UTF-8?q?ounts?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Snapshot: M10.2 Phase 1 (Controls) complete, Phases 2-4 deferred by the
+owner's scope answer (A-100/DEBT-015); the pass's shape summarized;
+440 dev / 435 release green; goldens bit-identical. Status board: the
+M10.2 row with its exit evidence and the owner re-test as next.
+Gotchas: the right-button state machine's three traps for future edits
+(half-consumed gestures, the right_press_armed capture, the
+Escape-is-the-deselect interaction) and the three deliberate seams
+(edge-scroll toggle UI, marker-vs-info-panel, rodio) left for
+Phases 2-4. Workspace map: input.rs named; test counts updated.
+---
+ AI-Handoff.md | 33 ++++++++++++++++++++++++++++-----
+ 1 file changed, 28 insertions(+), 5 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index e54f80f..fff9158 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -31,7 +31,7 @@
+ | Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M10.1 (pre-declaration hardening & A14 enablement) COMPLETE — the Alpha declaration now waits only on the A14 human playtest; `docs/PLAYTEST.md` is the instrument, F8 the evidence channel.** What this pass did: (1) repaid DEBT-001 — `fx::XxHash64` (the reference XXH64, written in-repo like PCG32) is now the canonical hasher behind the same `write_*`/`finish` surface; the pass's single hash-moving commit re-pinned every golden with its written reason (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262` / map id `0xd38136401ab02ff1`); encodings and format versions unchanged (A-087; `Fnv1a64` remains the replay file checksum). (2) The windowed client joined the reproducibility promise: `--seed <u64>`, `--record <path>` (writes at match end / clean exit; `tools replay-verify` accepts the file), and the §11.6 F8 deterministic bug-report dump (`pandemonium-report-<seed>-tick<tick>.pdrp` + the `-info.txt` sidecar; pure-function assembly in `crates/client/src/report.rs`, re-sim-verified at the client seam, works while paused). (3) `docs/PLAYTEST.md` — the A14 instrument, all eight sections. (4) The nightly soak: sharded 10×100 with disjoint seeds proven in comments, `timeout-minutes` everywhere, per-shard evidence artifacts, and an aggregate job that gates on `crashed`. (5) Registers closed out: DEBT-013 (the client monoliths) logged, DEBT-011/012 triggers sharpened to name their PLAYTEST.md probes, A-087..A-090 logged, ARCHITECTURE carries the post-alpha refactor map. 414 dev / 409 release tests green (20 new: 8 fx, 12 client). **Next: run the playtest (≥ 5 testers through PLAYTEST.md), fill the results table, flip A14 in `docs/ALPHA_DECLARATION.md`, declare the Alpha** |
++| Status | **M10.2 (playtest-1 findings) — PHASE 1 (Controls) COMPLETE; Phases 2-4 deferred by the owner's delivery scope (A-100, DEBT-015).** The owner's first human playtest of the windowed client (post-M10.1) found four issues in priority order — controls, visual legibility, menus/settings, audio; `docs/PLAN-M10.2.md` is the milestone spec and `docs/PLAYTEST.md` result #1 is the recorded finding. This pass (branch `m10.2`, delivered as one `git format-patch` series): the Generals ZH controls — (1) the right button is a press/release state machine (`crates/client/src/input.rs`, pure, 26 new client tests): under 6 px of travel it is the command click, beyond it the grab-and-drag map scroll (release orders nothing), with the minimap right-click ordering on release (armed-at-press attack-move fixed — the §1.1 audit found the old armed-minimap branch dead), UI-swallow on the command card, and placement-cancel consuming the whole gesture; (2) middle-drag now rotates (it panned); (3) edge scroll is a 14 px depth-scaled band (the old 24 px snap was the owner's 'only the last pixel works'); (4) selection parity: shift+click toggle, shift+box union, double-click same-kind select-all, control-group double-tap centering, the Escape ladder (armed -> placement -> selection -> quit), Space jumps to the last death or the base, and the empty-ground click does nothing at all (A-091); (5) cursor order feedback: a ground marker naming the would-be order (move/attack/gather/rally/attack-move) plus the crosshair while armed. Registers: A-091..A-100, DEBT-014/015, DEBT-008's next human pass is the Phase 1 re-test. 440 dev / 435 release tests green; all three goldens bit-identical (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`). **Next: the owner re-tests the controls card (PLAYTEST result #1); on their go, Phases 2-4 per PLAN-M10.2 (rodio is the pre-chosen Phase 4 backend, A-100), then the A14 playtest** |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -65,15 +65,15 @@ cargo run -p pandemonium-client -- --seed 42 --record run.pdrp   # named seed +
+ cargo run -p pandemonium-tools -- replay-verify run.pdrp         # the record re-verifies (A2)
+ ```
+ 
+-Expected at this handoff: all commands succeed; 414 tests pass in dev
+-(409 in release — the 5 should-panic invariant-checker tests are
++Expected at this handoff: all commands succeed; 440 tests pass in dev
++(435 in release — the 5 should-panic invariant-checker tests are
+ debug-only by nature — `debug_assert` compiles out in release): 47 fx
+ unit tests (40 + M10.1's seven xxHash64 tests: the reference golden
+ vectors, every-split and chunked incremental equality, LE integer
+ writes, seed sensitivity), 20 fx property tests (19 + M10.1's
+ xxHash64 chunking-invariance property), 16 ai unit tests, 108 sim unit
+ tests, 4 sim_api unit tests, 8 replay codec tests, 53 engine tests,
+-55 client tests (43 + M10.1's twelve: `report.rs`'s five — the
++81 client tests (55 + M10.2's twenty-six: `input.rs`'s twenty-three — the right-button machine, the edge band, the selection parity, the double-tap, the Escape ladder, the cursor hint — and `feedback.rs`'s four cursor-marker tests; the M10.1 twelve among the 55: `report.rs`'s five — the
+ re-sim-verified record, F8-during-pause validity, sidecar
+ determinism, the stem's purity, the controls line — and the seven
+ `--seed`/`--record`/`--frames` parser tests), 17 tools tests, 33
+@@ -150,7 +150,7 @@ crates/ai        DONE    Controller trait (plan §9.6 verbatim) + ScriptedContro
+ crates/replay    DONE    canonical LE byte codec + checksummed replay record/validate (re-sim driver lives in sim since M7)
+ crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh, Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5): AudioSink trait, the pure event -> cue mapping, the null counter sink (*engine core)
+                    (*engine core)
+-crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split)
++crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) + M10.2's input.rs (the right-button state machine, the edge-scroll band, the selection-parity helpers, the Escape/jump/hint logic — the input layer's pure half; the M10.2 Phase 1 controls pass) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split)
+ crates/tools     DONE    headless (the M1 demo + M7's --p1/--p2 ai|idle controller slots over the real content, per-player evidence lines, --record for both), replay-verify (world resolution by content identity), content-validate (clap CLI)
+ tests/           ACTIVE  pandemonium-tests: architecture_law.rs (A13) + determinism.rs (A1/A2 + spine proofs) + content_pipeline.rs (M2/A3) + movement.rs (M4/P1) + economy.rs (M5/P3) + combat.rs (M6/P2) + vision.rs (M6/A10) + ai.rs (M7: A5 + A11 + AI-vs-AI completion/determinism/golden/log-alone replay)
+ content/         DONE    rules/, entities/ (9 kinds), factions/ (Legion), maps/ (Crossroads 64x64, symmetric, heightmap)
+@@ -181,6 +181,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+ | M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (M10 verified them bit-identical at their then-FNV values; M10.1's hasher swap re-pinned them: demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
+ | M10.1 | Pre-declaration hardening & A14 enablement | ✅ **complete** | DEBT-001 repaid: xxHash64 is the canonical hasher (one hash-moving commit; every golden re-pinned with its written reason — demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262; encodings and format versions unchanged, A-087). The client joined the reproducibility promise: `--seed`, `--record` (match end / clean exit, `replay-verify`-accepted), and the §11.6 F8 bug-report dump (replay + deterministic sidecar; pure assembly in `client/src/report.rs`, re-sim-verified at the client seam, pause-safe, windowed-verified under Xvfb+XTEST — same-tick `.pdrp` byte-identical). `docs/PLAYTEST.md` written (all eight sections — the A14 instrument). The nightly soak sharded 10×100 (disjoint seeds proven in comments), timeouts on every job, per-shard evidence artifacts + an aggregate crashed-gate. Registers closed: DEBT-013 logged, DEBT-011/012 triggers sharpened to their PLAYTEST.md probes, A-087..A-090, CHANGELOG carries M10.1. 414 dev / 409 release green (20 new tests). Zero golden movement outside Task 1's single swap commit |
++| M10.2 | Playtest-1 findings — Phase 1: the Generals ZH controls | ✅ **complete (Phase 1)** | PLAN-M10.2 §1 (the owner's four findings, #1 priority): the audit recorded in PLAYTEST result #1 (left never orders — true since M9.1; the dead armed-minimap branch found and fixed), the right-button command/drag state machine (6 px threshold, grab-scroll on drag, order-on-release, minimap/UI/placement routing), middle-drag rotate, the 14 px depth-scaled edge band (toggle flag wired, UI is Phase 3 — DEBT-014), shift+click/box, double-click same-kind, group double-tap centering, Escape ladder, Space jump, empty-ground no-op, the cursor order marker + armed crosshair. Direction-pinned at yaw 0/90 for the drag-scroll and rotate. 26 new client tests (input.rs + feedback.rs). 440 dev / 435 release green, zero golden movement, Xvfb+XTEST re-verified. Phases 2-4 deferred by the owner's scope answer (A-100/DEBT-015) — the exit's owner re-test is next |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+ M4 movement, M5 economy/production/construction, M6 combat & vision, M7
+@@ -940,6 +941,28 @@ existing `ai_host` seam.
+   the summary prints the outcome. `xvfb-run` itself is broken here
+   (no xauth): start `Xvfb :99` directly and set `DISPLAY=:99`.
+ 
++- **The right button is a state machine now (M10.2), not a press handler**:
++  `input.rs`'s `RightButton` decides command-vs-drag by press→release travel
++  (6 px). The PRESS only records (and consumes the whole gesture when it
++  cancels a placement); the RELEASE routes — sub-threshold releases order
++  (minimap first, then the context order), and a release after a drag orders
++  nothing. Three traps for future edits: (1) any new right-press special
++  case must either consume the gesture (leave the machine Idle) or let the
++  release run — a half-consumed gesture orders on release by surprise;
++  (2) the armed-minimap attack-move reads `right_press_armed` (captured at
++  press, before the disarm) — do not "simplify" it back to reading
++  `attack_move_armed` at release, that was the M9.1 dead branch;
++  (3) `escape_action` and the empty-ground no-op interact: empty ground no
++  longer deselects (A-091), so Escape is THE deselect — removing either
++  changes the other's meaning.
++- **M10.2 Phase 1 deliberately left three seams for Phases 2-4**
++  (DEBT-015/A-100): the `edge_scroll_enabled` flag has no settings screen
++  yet (DEBT-014, Phase 3); the cursor marker is the interim answer to
++  order legibility until Phase 2's info panel; the Phase 4 audio backend
++  is pre-chosen as rodio (needs an allow-list amendment + ADR when it
++  lands — the allow-list is untouched). The owner's re-test of the
++  controls card gates all three.
++
+ ## 10. Maintenance protocol — every future agent, every milestone
+ 
+ 1. Read plan.md §0 + §14, this file, `docs/DEBT.md`, `docs/ASSUMPTIONS.md`.
+-- 
+2.47.3
+
+
+From 2dd1a8eb9ce0148bbb846d8a21fe965eee642c08 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:31:03 +0000
+Subject: [PATCH 12/13] =?UTF-8?q?docs(changelog):=20the=20M10.2=20Phase=20?=
+ =?UTF-8?q?1=20entry=20=E2=80=94=20the=20Generals=20ZH=20controls=20pass?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ CHANGELOG.md | 58 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 58 insertions(+)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 5522041..846d0c8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,64 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
+ does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
+ its milestone tag.
+ 
++## [M10.2] — playtest-1 findings, Phase 1: the Generals ZH controls
++
++The project owner's first human playtest of the windowed client (post-M10.1)
++blocked the Alpha declaration (A14) on four findings: controls, visual
++legibility, menus/settings, audio. `docs/PLAN-M10.2.md` is the milestone
++spec; `docs/PLAYTEST.md` result #1 records the finding. This delivery is
++**Phase 1 (Controls) only** — the owner scoped it that way (A-100, DEBT-015);
++Phases 2-4 wait on their re-test verdict. Presentation/input only, zero
++golden movement (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`,
++content `0x9bc18c521107b262` all bit-identical), delivered as one
++`git format-patch` series on the branch `m10.2` (never squashed).
++
++- **client (PLAN §1.1, the audit)**: recorded in PLAYTEST result #1 — a
++  plain left click never issues an order in the M10.1 code (context orders
++  have been right-button-only since M9.1; the owner's "movement on the left
++  button" traces to the armed-A path, the command card, or the placement
++  confirm). The audit also found the armed minimap attack-move branch was
++  dead code (the right-press disarm preceded the check) — fixed in the
++  state-machine rework below.
++- **client (PLAN §1.2, the camera)**: the right button is a press/release
++  state machine (`crates/client/src/input.rs`, pure) — under 6 px of
++  press-to-release travel it is the command click, beyond it the
++  Generals-style grab-and-drag map scroll and the release orders nothing.
++  Ordering moved to the release (sub-threshold): the context order at the
++  release position, the minimap order at the mapped point (attack-move when
++  the gesture began armed — the fixed dead branch), UI buttons swallow,
++  placement-cancel consumes the gesture. Middle-drag now rotates (it panned;
++  0.005 rad/px, direction pinned to match E). Edge scrolling: the old 24 px
++  binary zone became a 14 px band whose speed scales with the cursor's
++  depth into it, on all four edges and corners — the owner's "only the very
++  last pixel works" finding was the snap. A wired `edge_scroll_enabled`
++  flag awaits Phase 3's settings toggle (DEBT-014).
++- **client (PLAN §1.3, selection parity)**: shift+click toggles membership,
++  shift+drag unions the box, double-click selects every visible unit of the
++  clicked one's kind (same owner, fog-filtered view), Ctrl+digit assigns /
++  digit recalls / double-tap centers the camera on the group's live center,
++  S stops, A-then-left-click attack-moves (the armed flow, now with the
++  crosshair cursor), Escape climbs one rung per press (armed command ->
++  placement -> selection -> quit — it used to quit on the first press),
++  Space jumps to the last death or the base, and a click on empty ground
++  does nothing at all (A-091: no order, and no silent deselect either).
++- **client (PLAN §1.3, cursor feedback)**: a small ground marker names the
++  order the next right-click would issue — green Move, red Attack, amber
++  Gather, blue rally, orange armed attack-move — resolved through the same
++  context machinery that issues it; the command ping stays as the
++  confirmation. Silence when nothing is orderable (A-098).
++- **tests**: 26 new client tests (23 in `input.rs`: the state machine's
++  press/move/release paths, the band math at real window sizes, direction
++  pinning for the grab-scroll and the rotate at yaw 0 and 90, the selection
++  parity, the double-tap centroid, the Escape ladder, the hint table; 3 in
++  `feedback.rs`: the marker's colors, quads, silences). 440 dev / 435
++  release green. The windowed input paths re-verified under Xvfb + XTEST.
++- **registers**: A-091..A-100 (the interpretations and the owner's delivery
++  answers); DEBT-014 (the edge-scroll toggle's missing UI), DEBT-015
++  (Phases 2-4 deferred, gated on the owner re-test); DEBT-008's next human
++  pass is the Phase 1 re-test. README + PLAYTEST controls cards rewritten
++  as the Generals ZH card.
++
+ ## [M10.1] — pre-declaration hardening & A14 enablement
+ 
+ The pass between M10 and the Alpha declaration: the one open gate is A14 (the
+-- 
+2.47.3
+
+
+From ab49cdb06c007fcbe1870ac713cf5392fb6c8d3d Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Tue, 6 Oct 2026 20:36:24 +0000
+Subject: [PATCH 13/13] docs(handoff): the Xvfb+XTEST Phase 1 evidence + the
+ recipe's M10.2 environment additions
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The §4 verification paragraph now carries the M10.2 input-verification
+evidence: 1500 frames, EXACTLY ONE command from two right-button
+gestures (the short click ordered; the 130-px drag scrolled and its
+release ordered nothing — the threshold machine's contract), group
+recall + double-tap, rotate, Escape, Space, shift-click all exercised,
+match ongoing at exit.
+
+The Xvfb stack gotcha gains the bare-Debian additions: libxkbcommon-x11
++ libxcb-xkb extracted userland (the client panics in xkbcommon-dl
+without them), XDG_RUNTIME_DIR for the Wayland probe, and XTEST via
+python-xlib's fake_input when libXtst/xdotool are unavailable.
+---
+ AI-Handoff.md | 21 ++++++++++++++++++++-
+ 1 file changed, 20 insertions(+), 1 deletion(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index fff9158..aac9568 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -128,7 +128,17 @@ injection drag-box-selected the 5 start entities, submitted 2 commands
+ (a right-click context Move and an armed-'A' attack-move), and kept
+ the loop healthy through pan keys, wheel zoom, and middle-drag —
+ "windowed smoke: 900 frames presented, 2 commands submitted,
+-selection 5, match ongoing". On a headless
++selection 5, match ongoing". The M10.2 Phase 1 verification (same recipe,
++python-xlib's XTEST instead of libXtst — this environment has neither
++libXtst nor xdotool): a 1500-frame run box-selected the start force,
++double-clicked, assigned/recalled/double-tapped control group 1, submitted
++EXACTLY ONE command from two right-button gestures (the short click ordered
++the context Move; the 130-px drag scrolled and its release ordered nothing —
++the threshold machine's contract), middle-drag-rotated, Escape-cleared,
++Space-jumped, and shift-clicked — "windowed smoke: 1500 frames presented,
++tick 585, 1 commands submitted, selection 1, match ongoing" (selection 1 =
++the double-click had collapsed the selection to the CC before the group
++assign; the recall restored exactly the group). On a headless
+ machine the windowed path is verified on Xvfb + llvmpipe per DEBT-008
+ (selection + Move commands provably work; the M8 additions — end screen,
+ restart, control groups, Stop/AttackMove — are compiled and clippy-clean
+@@ -940,6 +950,15 @@ existing `ai_host` seam.
+   lets the windowed client run a FULL vs-AI match to resolution —
+   the summary prints the outcome. `xvfb-run` itself is broken here
+   (no xauth): start `Xvfb :99` directly and set `DISPLAY=:99`.
++  M10.2 additions (a bare-bones Debian 13 without root access):
++  `libxkbcommon-x11.so` + `libxcb-xkb.so.1` also needed extracting into
++  the userland dir (apt-get download + dpkg-deb -x, then unversioned
++  symlinks — without them the client panics inside xkbcommon-dl);
++  `XDG_RUNTIME_DIR` must point somewhere writable to quiet the Wayland
++  probe; and XTEST injection works through python-xlib
++  (`display.xtest_fake_input`, motion via a MotionNotify request with
++  root-absolute x/y) when libXtst/xdotool cannot be installed — set
++  keyboard focus with `window.set_input_focus` since no WM runs.
+ 
+ - **The right button is a state machine now (M10.2), not a press handler**:
+   `input.rs`'s `RightButton` decides command-vs-drag by press→release travel
+-- 
+2.47.3
+

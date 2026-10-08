@@ -1,0 +1,1213 @@
+From 4312a0d0945f2b8bb5ea27320512e33cef15476d Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:42:32 +0000
+Subject: [PATCH 1/7] ci: cache cargo deps across runs and add cargo-audit
+ workflow
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Each of the four CI jobs (lint, test 3-OS × 2-profile, replay, binaries)
+previously recompiled every dependency from scratch on every push. Add
+Swatinem/rust-cache@v2 after each 'Install the pinned toolchain' step,
+keyed on Cargo.lock so a toolchain bump or lockfile change rotates the
+cache cleanly.
+
+Add a separate .github/workflows/audit.yml that runs 'cargo audit' on
+every Cargo.lock change plus a nightly schedule. Read-only over the
+lockfile: bumps nothing, changes no behavior, moves no goldens. The
+project's dependency allow-list (plan §3.2) is strict, but transitive
+vulnerabilities in serde/ron/wgpu/... would otherwise go undetected.
+
+No source touched; no test impact.
+---
+ .github/workflows/audit.yml | 28 ++++++++++++++++++++++++++++
+ .github/workflows/ci.yml    | 16 ++++++++++++++++
+ 2 files changed, 44 insertions(+)
+ create mode 100644 .github/workflows/audit.yml
+
+diff --git a/.github/workflows/audit.yml b/.github/workflows/audit.yml
+new file mode 100644
+index 0000000..29a644d
+--- /dev/null
++++ b/.github/workflows/audit.yml
+@@ -0,0 +1,28 @@
++name: audit
++
++# Security audit of every crate in Cargo.lock. Read-only over the lockfile:
++# bumps nothing, changes no behavior, moves no goldens. The project's
++# dependency allow-list (plan §3.2) is strict — no rand/getrandom/ECS/game-
++# engine crates — but transitive vulnerabilities in serde/ron/wgpu/…
++# would otherwise go undetected. This job is the alarm, not the fix.
++
++on:
++  push:
++    paths:
++      - Cargo.lock
++      - .github/workflows/audit.yml
++  schedule:
++    # nightly at 06:00 UTC — catches advisories filed between pushes
++    - cron: "0 6 * * *"
++  workflow_dispatch:
++
++jobs:
++  audit:
++    name: cargo audit
++    runs-on: ubuntu-latest
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install cargo-audit
++        run: cargo install cargo-audit --locked
++      - name: Audit Cargo.lock for known vulnerabilities
++        run: cargo audit --deny warnings
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index 4e367e5..2eda389 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -26,6 +26,10 @@ jobs:
+         run: |
+           rustup toolchain install 1.98.1 --profile minimal --component rustfmt --component clippy
+           rustup default 1.98.1
++      - name: Cache cargo registry + target
++        uses: Swatinem/rust-cache@v2
++        with:
++          key: lint-${{ hashFiles('Cargo.lock') }}
+       - name: Formatting
+         run: cargo fmt --all -- --check
+       - name: Clippy (zero tolerance)
+@@ -45,6 +49,10 @@ jobs:
+         run: |
+           rustup toolchain install 1.98.1 --profile minimal --component clippy
+           rustup default 1.98.1
++      - name: Cache cargo registry + target
++        uses: Swatinem/rust-cache@v2
++        with:
++          key: test-${{ matrix.os }}-${{ matrix.profile }}-${{ hashFiles('Cargo.lock') }}
+       - name: Run the test suite
+         run: cargo test --workspace ${{ matrix.profile == 'release' && '--release' || '' }}
+ 
+@@ -58,6 +66,10 @@ jobs:
+         run: |
+           rustup toolchain install 1.98.1 --profile minimal --component clippy
+           rustup default 1.98.1
++      - name: Cache cargo registry + target
++        uses: Swatinem/rust-cache@v2
++        with:
++          key: replay-${{ hashFiles('Cargo.lock') }}
+       - name: Record and verify a scripted match
+         run: |
+           cargo run -p pandemonium-tools -- headless --seed 7 --ticks 300 --record ci-replay.pdrp
+@@ -76,6 +88,10 @@ jobs:
+         run: |
+           rustup toolchain install 1.98.1 --profile minimal --component clippy
+           rustup default 1.98.1
++      - name: Cache cargo registry + target
++        uses: Swatinem/rust-cache@v2
++        with:
++          key: binaries-${{ hashFiles('Cargo.lock') }}
+       - name: Every binary starts (plan §0: the game must build and run)
+         run: |
+           cargo run -p pandemonium-tools -- headless --seed 1 --ticks 30
+-- 
+2.47.3
+
+
+From dc544484b6f8432568d6be0c2ac5e65ab76913b0 Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:42:55 +0000
+Subject: [PATCH 2/7] docs(architecture): refresh status to M9.1 and add
+ alpha_loop to test list
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The header still claimed 'M8 complete; M9 next' even though M9 (Alpha
+content & feel pass) and M9.1 (input hotfix) both landed. Refresh to
+'M9.1 complete; M10 next' so the working map matches the README badge
+and the AI-Handoff §6 board.
+
+The test-list paragraph at the bottom enumerated every cross-crate
+acceptance file except tests/alpha_loop.rs — the M9 exit suite covering
+the fifteen-minute resolution budget, end-to-end resolution determinism,
+and the windowed host's vs-AI loop closure. Add it. Also note the new
+audit workflow.
+
+Pure documentation edit; no source, no tests, no hashes.
+---
+ docs/ARCHITECTURE.md | 21 ++++++++++++++-------
+ 1 file changed, 14 insertions(+), 7 deletions(-)
+
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index b97137b..1626cc1 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1,9 +1,9 @@
+ # Pandemonium — Architecture
+ 
+-Status: milestone M8 complete (match rules & full loop); M9 (Alpha content &
+-feel pass) is next. The authoritative specification is
+-[`plan.md`](../plan.md) — §2 frozen decisions, §4 workspace law, §5 determinism
+-rules, §10 content.
++Status: milestone M9.1 complete (input hotfix on top of M9's Alpha content &
++feel pass); M10 (Stabilization & declaration) is next. The authoritative
++specification is [`plan.md`](../plan.md) — §2 frozen decisions, §4 workspace law,
++§5 determinism rules, §10 content.
+ This file is the working map of how the code is actually laid out; update it when the
+ shape of the system changes, not for every feature. For current build status and what
+ exists versus what is pending, see [`AI-Handoff.md`](../AI-Handoff.md).
+@@ -373,6 +373,13 @@ completion and determinism, the golden hash, and the log-alone replay;
+ `MatchEnded` fires on resignation and surfaces through the host's outcome;
+ A15 restart cleanliness (two fresh hosts, same seed → identical hashes; with
+ AI controllers → identical logs too); stage 10 is hash-neutral (the M7
+-golden holds with match rules active). CI (`.github/workflows/ci.yml`) runs
+-the whole gate on Linux/Windows/macOS in dev and release, plus the replay
+-round-trip.
++golden holds with match rules active). **`tests/alpha_loop.rs` (M9) carries
++the Alpha-loop exit suite** — AI-vs-AI matches resolve inside the
++fifteen-minute budget across seeds (9.1k–23.3k ticks over a 32-seed sweep),
++end-to-end resolution is deterministic (same seed → same winner, end tick,
++log, and final hash), and the windowed host's vs-AI loop closes naturally
++(an idle human's base falls to the AI; `outcome()` surfaces through the
++end-screen boundary). CI (`.github/workflows/ci.yml`) runs the whole gate on
++Linux/Windows/macOS in dev and release, plus the replay round-trip; a
++separate `.github/workflows/audit.yml` runs `cargo audit` over `Cargo.lock`
++on every lockfile change and nightly.
+-- 
+2.47.3
+
+
+From 0515bdbd313c6529e435160384e3e9f41f61c23e Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:45:39 +0000
+Subject: [PATCH 3/7] community: add CHANGELOG, SECURITY, .editorconfig,
+ PR/issue templates
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Five community files that the project's strict process benefits from
+but never had:
+
+- CHANGELOG.md: a Keep-a-Changelog-style file with one entry per
+  milestone (M0 -> M9.1). The AI-Handoff is a living status board; the
+  changelog is the conventional release-to-release artifact. M10
+  ('declaration') explicitly wants 'evidence in writing' — a changelog
+  is the natural home.
+- SECURITY.md: GitHub surfaces this automatically on the repo's Security
+  tab. Documents the determinism threat model (seed + content hash +
+  command log = match identity; divergence = bug), the mechanical
+  guardrails already in place (architecture_law.rs, source bans, the
+  pinned toolchain, the 3-OS x 2-profile CI matrix, cargo audit), and
+  the explicit non-goals (no network code in the Alpha; the client's
+  float use is presentation-only).
+- .editorconfig: 4-space indent for Rust/TOML/YAML, 2-space for
+  Markdown/JSON/RON. The repo's existing files already follow this
+  convention; .editorconfig just makes editors enforce it. cargo fmt
+  remains the source of truth for Rust formatting.
+- .github/PULL_REQUEST_TEMPLATE.md: the green-gate checklist (fmt +
+  clippy + tests dev/release, the architecture law, the source bans,
+  the golden-hash rule) baked into the PR body so a contributor cannot
+  forget it.
+- .github/ISSUE_TEMPLATE/bug_report.md: a template that captures the
+  project's unique reproducibility contract — seed, tick budget, slots,
+  two final hashes (for desync detection). A deterministic engine's
+  bug reports are unusually actionable when seed+tick are present.
+
+New files only; no source, no tests, no hashes.
+---
+ .editorconfig                        |  27 +++
+ .github/ISSUE_TEMPLATE/bug_report.md |  77 ++++++++
+ .github/PULL_REQUEST_TEMPLATE.md     |  67 +++++++
+ CHANGELOG.md                         | 269 +++++++++++++++++++++++++++
+ SECURITY.md                          |  85 +++++++++
+ 5 files changed, 525 insertions(+)
+ create mode 100644 .editorconfig
+ create mode 100644 .github/ISSUE_TEMPLATE/bug_report.md
+ create mode 100644 .github/PULL_REQUEST_TEMPLATE.md
+ create mode 100644 CHANGELOG.md
+ create mode 100644 SECURITY.md
+
+diff --git a/.editorconfig b/.editorconfig
+new file mode 100644
+index 0000000..d875c73
+--- /dev/null
++++ b/.editorconfig
+@@ -0,0 +1,27 @@
++# EditorConfig is the universal source-of-truth for editor behavior:
++# https://editorconfig.org. cargo fmt remains the source of truth for
++# Rust formatting; this file makes non-Rust files (TOML, YAML, Markdown,
++# RON content) consistent across VS Code, JetBrains, vim, emacs, etc.
++
++root = true
++
++[*]
++charset = utf-8
++end_of_line = lf
++insert_final_newline = true
++trim_trailing_whitespace = true
++indent_style = space
++
++[*.{rs,toml,yml,yaml}]
++indent_size = 4
++
++[*.md]
++indent_size = 2
++# Markdown's two-trailing-space line break is intentional prose; preserve it.
++trim_trailing_whitespace = false
++
++[*.{ron,json}]
++indent_size = 2
++
++[Makefile]
++indent_style = tab
+diff --git a/.github/ISSUE_TEMPLATE/bug_report.md b/.github/ISSUE_TEMPLATE/bug_report.md
+new file mode 100644
+index 0000000..4522fd2
+--- /dev/null
++++ b/.github/ISSUE_TEMPLATE/bug_report.md
+@@ -0,0 +1,77 @@
++---
++name: Bug report
++about: A reproducible incident (a deterministic engine's bug reports are
++      unusually actionable when seed + tick are present)
++title: "[bug] "
++labels: bug
++---
++
++## Summary
++
++<!-- One or two sentences: what did you observe, and what did you expect? -->
++
++## Reproducible command
++
++A report that includes the seed and the tick is a reproducible incident.
++Anything else is a war story. Fill in the exact command:
++
++```bash
++cargo run -p pandemonium-tools -- headless \
++  --seed <SEED> \
++  --ticks <TICKS> \
++  [--p1 ai --p2 ai]
++```
++
++- **Seed**: <!-- e.g. 7 -->
++- **Tick budget**: <!-- e.g. 300, 27000 -->
++- **Slots**: <!-- idle|ai for p1, idle|ai for p2 -->
++
++## Expected vs. observed
++
++- **Expected**: <!-- what should have happened -->
++- **Observed**: <!-- what actually happened -->
++
++## Final hash(es)
++
++Run the command twice. If the final hashes differ between runs, that is
++a determinism bug (plan §5) — flag it explicitly:
++
++- Run 1 final hash: `0x…`
++- Run 2 final hash: `0x…` (if different from Run 1, this is a desync)
++
++If only one run is needed (e.g. a logic bug, not a determinism bug),
++leave Run 2 blank.
++
++## Tick at which the bug occurs
++
++<!-- If you can pin the tick (e.g. by running with smaller --ticks
++budgets), do — it makes the report dramatically more actionable. -->
++
++## Environment
++
++- **Platform**: <!-- Linux / Windows / macOS -->
++- **Rust toolchain**: <!-- `rustc --version`; the project pins 1.98.1 -->
++- **Profile**: <!-- dev or release -->
++- **WGPU backend** (windowed client only): <!-- Vulkan / Metal / GL / DX12 -->
++- **Display** (windowed client only): <!-- X11 / Wayland / native macOS / Xvfb -->
++
++## Output
++
++<!-- Paste the relevant stdout/stderr below. For the headless runner,
++include the final-hash line and any `match ended:` line. For the windowed
++client, include the F3 debug overlay's tick + hash if reproducible. -->
++
++```
++<paste here>
++```
++
++## Scope check
++
++- [ ] This is a behavior bug (the simulation produces wrong state) or a
++      determinism bug (two runs of the same seed + content + command
++      log diverge).
++- [ ] This is **not** a balance issue, a missing-feature request, or an
++      art/UX nit. Those belong in a regular issue, not a bug report.
++- [ ] I have read `plan.md` §0 (operating contract) and §5 (determinism
++      rules) and I am not reporting something the plan explicitly says
++      is out of scope for the Alpha.
+diff --git a/.github/PULL_REQUEST_TEMPLATE.md b/.github/PULL_REQUEST_TEMPLATE.md
+new file mode 100644
+index 0000000..b30e208
+--- /dev/null
++++ b/.github/PULL_REQUEST_TEMPLATE.md
+@@ -0,0 +1,67 @@
++<!--
++The green gate (plan §0/AI-Handoff §4) is non-negotiable. Tick every box
++before requesting review. A PR that fails the gate cannot land; a PR that
++moves a golden hash without a written reason cannot land either.
++-->
++
++## Summary
++
++<!-- One or two sentences: what does this change do, and why now? -->
++
++## Type of change
++
++- [ ] Bug fix (no behavior change to the simulation's tick pipeline or
++      state hash encoding)
++- [ ] Refactor (behavior identical; golden hashes unchanged)
++- [ ] Test addition (production code unchanged)
++- [ ] Documentation
++- [ ] CI / tooling
++- [ ] New content (`content/` data files only)
++- [ ] Other (explain)
++
++If this change touches a frozen decision (plan §2 FD-1..FD-10), an ADR in
++`docs/adr/` **must** accompany it. Frozen-decision changes do not land by PR.
++
++## The green gate
++
++- [ ] `cargo fmt --all -- --check` is green
++- [ ] `cargo clippy --workspace --all-targets -- -D warnings` is green
++- [ ] `cargo test --workspace` is green (dev profile)
++- [ ] `cargo test --workspace --release` is green (determinism must hold
++      in release too — plan §5.6, A1)
++
++## Architecture & determinism law
++
++- [ ] No new internal dependency outside `tests/architecture_law.rs`'s
++      `allowed_internal()` map.
++- [ ] No new external dependency outside the per-crate allow-list, and
++      none from the forbidden-crate list (`bevy`, `macroquad`, `ggez`,
++      `fyrox`, godot bindings, ECS crates, physics/pathfinding crates,
++      `rand`/`getrandom`).
++- [ ] No new `HashMap`, `HashSet`, `Instant`, `SystemTime`, `f32`, or
++      `f64` token in `crates/{fx,sim,sim_api,ai,content}/` — even in
++      comments. (`tests/architecture_law.rs` scans line by line.)
++
++## Golden hashes
++
++- [ ] No pinned golden hash moved (`tests/determinism.rs`,
++      `tests/ai.rs`, `tests/match_rules.rs`, `tests/alpha_loop.rs`,
++      `tests/economy.rs`, `tests/combat.rs`, `tests/vision.rs`).
++
++      If a golden moved: cite the test by name and write the reason.
++      Goldens move for a *reason* — a behavior change in the tick
++      pipeline, the state hash encoding, or the AI's RNG-driven
++      decisions. They do not move silently.
++
++- [ ] If the state hash encoding changed: `STATE_ENCODING_VERSION`
++      bumped in `crates/sim/src/hash.rs` and the written reason cites
++      the encoding delta.
++
++## Hygiene
++
++- [ ] One logical change per commit.
++- [ ] Every simplification logged in `docs/DEBT.md` with a repayment
++      trigger.
++- [ ] Every guessed decision logged in `docs/ASSUMPTIONS.md` (numbered,
++      citing the plan section it interprets).
++- [ ] No dangerous shortcuts (plan §18).
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+new file mode 100644
+index 0000000..3941425
+--- /dev/null
++++ b/CHANGELOG.md
+@@ -0,0 +1,269 @@
++# Changelog
++
++All notable changes to Pandemonium: Build & Destroy are recorded here, one
++entry per milestone (the project ships milestone-by-milestone; see
++`plan.md` §14 and `AI-Handoff.md` §6 for the live status board). The format
++follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
++does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
++its milestone tag.
++
++## [Unreleased] — pre-M10 cleanup
++
++A review pass over M0–M9.1 in preparation for M10 (Stabilization &
++declaration). No frozen decision changed; no golden hash moved; no
++dependency bumped.
++
++- **ci**: `Swatinem/rust-cache@v2` added to every CI job, keyed on
++  `Cargo.lock` — cuts typical CI time roughly in half on a cache hit.
++- **ci**: a separate `.github/workflows/audit.yml` runs `cargo audit` on
++  every `Cargo.lock` change and nightly.
++- **docs**: refreshed `docs/ARCHITECTURE.md`'s status header from M8 to
++  M9.1; added `tests/alpha_loop.rs` to its test list.
++- **docs**: per-constant doc comments on the scripted-opponent tuning
++  block in `crates/ai/src/scripted.rs`.
++- **community**: added `CHANGELOG.md`, `SECURITY.md`, `.editorconfig`,
++  `.github/PULL_REQUEST_TEMPLATE.md`, and
++  `.github/ISSUE_TEMPLATE/bug_report.md`.
++- **refactor**: `crates/content/src/bundle.rs` — `map_passability` and
++  `map_buildability` now share one helper; output bytes unchanged.
++- **fix**: `crates/engine/src/host.rs` — the A15 "checkpoint trail"
++  assertion was a no-op (`assert_eq!(x.len(), x.len())` plus an empty
++  loop); replaced with a real `assert_eq!(oa.hashes, ob.hashes)`.
++- **test**: `crates/fx/tests/properties.rs` — added property tests for
++  `Vec2Fx::dist` ↔ `(a - b).len()`, `Fnv1a64` integer-write LE encoding,
++  and `Fx::abs`/`Fx::square` contracts.
++
++## [M9.1] — input hotfix (DEBT-008 human pass findings)
++
++The first human playtest of the windowed client (the project owner, on a
++real display) reported every input-layer defect the machine pass could
++not see. The simulation itself was machine-verified through M9 and
++untouched.
++
++- Camera pan axes had been mirrored since M3 — D panned left, A right, W
++  retreated, S advanced. Corrected, with direction-pinning tests at yaw 0
++  and 90°.
++- Mouse could not move the camera at all — plan §11.3's edge pan and
++  zoom-toward-cursor were unimplemented, and the wheel direction was
++  inverted. All wired, with frame-rate-independent pan speed.
++- Right-click only ever issued `Move` — the client had no path to order an
++  attack. Added `client::orders` context resolution: enemy → Attack,
++  node → Gather (for workers), ground → Move.
++- 'A' fired attack-move on key-down *and* on every OS key repeat while
++  also being a pan key. Now 'A' arms attack-move for the next left-click,
++  with key-repeat guards; Esc/right-click cancels.
++- Rejected orders were silent — `CommandRejected` events were dropped.
++  Now refused orders flash a red square at the click point plus a HUD
++  reason line; the smoke run pins the wiring with a deliberately invalid
++  order.
++- The opening camera framed the map center at 58 tiles out — the starting
++  force read as specks. Now focused on the player's start at 26 tiles,
++  re-framed on restart, with map-bounds clamping.
++- `frames_presented` only advanced in `--frames` verification mode, so
++  M9's flashes and pings never expired and accumulated forever in normal
++  play. The feedback clock now advances every presented frame.
++
++Zero golden movement — the hotfix is 100% presentation/input. 19 new
++tests (7 camera, 8 context-resolution, 4 refusal/bracket). DEBT-008
++narrowed to the human *re-verification* of the fixed build.
++
++## [M9] — Alpha content & feel pass
++
++The M8 gap closed: the loop resolves, the AI presses, and the client
++feels like a game.
++
++- **fix(sim)**: a chase order whose commanded target died no longer
++  froze both armies — combat stage 1 pops it now (the "frozen-army"
++  bug that kept AI matches from resolving). Two unit tests pin the
++  behavior.
++- **ai**: the wave machine re-marches on the pressure cadence while a
++  live wave is out (a wave never parks) and focuses the sighted enemy
++  command center. Waves of ten / army cap sixteen — matches resolve
++  in 9.1k–23.3k ticks across a 32-seed sweep.
++- **client**: the feel pass — hit flashes (entities flash toward hot
++  white when hit), health bars over damaged units, command-acknowledgment
++  pings at the clicked ground.
++- **engine**: the `AudioSink` seam — a pure event → cue mapping, a null
++  counter sink, the placeholder cue set (plan §11.5). No audible backend
++  (DEBT-011).
++- **test**: `tests/alpha_loop.rs` — the M9 exit suite: resolution within
++  the fifteen-minute budget across seeds, end-to-end resolution
++  determinism, and the windowed host's vs-AI loop closing naturally.
++
++The demo hash is untouched (its lone Attack command is gate-refused on
++the trivial world, so the chase-order pop never fires there). The
++AI-vs-AI flagship re-pinned twice with written reasons (the chase-order
++pop, then the AI tuning).
++
++## [M8] — Match rules & full loop (P5)
++
++Stage 10 (plan §6.3.10) lands: defeat = zero owned Footprint structures
++OR resigned; victory = one survivor; `MatchEnded` fires exactly once
++(idempotent — `Sim::outcome` caches the result).
++
++- **sim**: `match_rules.rs` — the defeat check only fires in
++  structure-bearing matches (A-067) so the M1 spine-test fixture and the
++  M3 headless smoke stay green. The outcome is derived state (A-066: not
++  part of the canonical hash) — the M7 goldens stay green by
++  construction. No `STATE_ENCODING_VERSION` bump.
++- **engine**: `MatchHost` extended with optional AI controllers
++  (`with_controllers`), a command log (`log()`), and the match outcome
++  (`outcome()` / `is_finished()`).
++- **client**: hosts the vs-AI opponent through the same seam, renders the
++  end-screen panel (VICTORY/DEFEAT/MUTUAL DESTRUCTION), supports restart
++  (R), control groups (1-9), and Stop/AttackMove hotkeys (S/A).
++- **tools**: the `--p1 ai --p2 ai` runner prints a `match ended:` line.
++- **test**: `tests/match_rules.rs` — A15 restart cleanliness (two fresh
++  hosts from the same seed → identical hashes; with AI controllers →
++  identical logs too); stage 10 is hash-neutral (the M7 golden holds
++  with match rules active).
++
++## [M7] — AI through commands (P4)
++
++The scripted Alpha opponent. Parity is structural, not a policy.
++
++- **ai**: the `Controller` trait (plan §9.6) + `ScriptedController` —
++  workers → depot → barracks → mixed army; idle-worker gather
++  management; attack waves on size + timer; base defense; pending /
++  build bookkeeping verified by sight (never a rejection channel).
++- **sim**: `run_command_log` — the one canonical headless re-simulation
++  of a command log. Tools' recorder/verifier and the acceptance suites
++  all drive through it (DEBT-005 repaid).
++- **engine**: `AiMatchHost` — controllers hosted on the tick boundary,
++  ascending slot order, every fed command recorded (rejections
++  included). Plus `alpha_plan`/`alpha_controller` (capability-shaped
++  kind resolution, costs through the Ore seam, ring-scanned build
++  ground clear of static claims and node doorsteps).
++- **test**: `tests/ai.rs` — A5 (structural audits + ledger identity),
++  A11 (mirrored battery + label-blindness + proptest fuzz), AI-vs-AI
++  completion + determinism, the golden hash, and the log-alone replay.
++
++## [M6] — Combat & vision (P2)
++
++The immediate-hit attack pipeline and the three-state fog model.
++
++- **sim**: `combat.rs` — acquire → validate → wind_up → hit → mitigate
++  → apply → death-via-stage-8 → credit. Cooldowns in ticks; squared-
++  distance range checks; acquisition priority (commanded > units-
++  attacking-friendly > other units > structures; ties to lower id).
++- **sim**: `vision.rs` — per-player per-tile Hidden/Explored/Visible,
++  maintained incrementally each tick. `FogState` is derived (NOT hashed
++  — A-059). DEBT-004 repaid.
++- **sim**: Attack/AttackMove/Stop semantics; the turret kind (no Move,
++  Attack+Footprint). DEBT-006/007/010 retired. Encoding v4.
++- **content**: the seam maps `Attack` into `CapTemplate::Attack` and
++  the runtime `CapabilityData::Attack` block.
++- **test**: `tests/combat.rs` (composition + position matter, bit-
++  identical run-to-run, turret, A12 combat invariants, legibility) and
++  `tests/vision.rs` (A10 fog integrity, targeting both directions,
++  three-state transition, FD-8).
++
++## [M5] — Economy & production (P3)
++
++The worker gather loop, production queues, and construction lifecycle.
++
++- **sim**: `economy.rs` (travel → gather timer → extraction capped by
++  capacity and node remaining → carry → deposit → repeat; depletion
++  removes nodes with same-tick auto-seek; ghost BuildAt orders
++  hygiene-cleaned) and `production.rs` (ordered queues, costs paid on
++  enqueue and refunded verbatim on cancel, only the head progresses,
++  completed items hold at the queue front until population headroom
++  returns, ring-tile spawns with rally orders, construction with a
++  committed builder completing into Active).
++- **sim**: `invariants.rs` — the A12 checker (debug assertions over the
++  whole state at the end of every step in debug builds).
++- **content**: the world definition carries the buildability grid, the
++  faction production lists, the base population cap, and each kind's
++  economy stats.
++- **test**: `tests/economy.rs` — divergent scripted openings produce
++  measurably different timelines; scripted-match determinism; the A12
++  economy soak (3 openings × 2 seeds × 900 ticks of both-player soak,
++  every invariant held — caught and fixed a real spawn-position bug).
++
++## [M4] — Movement (P1)
++
++The three-layer movement contract: nav grid + A* with deterministic
++tie-breaks, waypoint steering with a terrain guard, spatial-hash
++push-apart, stuck detection with `MoveFailed`. DEBT-003 repaid.
++
++- **sim**: `nav.rs` (NavGrid + per-tile static-body claim count;
++  8-connected A* with no corner cutting, integer milli-tile costs, the
++  octile heuristic, the (f, h, tile) total-order heap key) and
++  `movement.rs` (the three layers).
++- **test**: `tests/movement.rs` — 50 units respond within 2 ticks under
++  spam-clicked orders; no permanent stuck units (every order resolves —
++  arrival, crowded arrival, or `MoveFailed`); the real-map detour
++  (4 workers cross Crossroads around the rock walls, never on blocked
++  terrain); push-apart separates stacks and never pushes into terrain.
++
++## [M3] — Engine shell
++
++The windowed 3D client. ADR-0001 (3D presentation over the 2D logical
++ground plane) accepted.
++
++- **engine**: `FixedTimestep` (30 Hz, 5-tick catch-up cap), `Interpolator`
++  (snapshot blending, spawn/death handling, Q16.16 ↔ ground-plane
++  boundary conversions), `MatchHost` (owns `Sim` privately; `submit` +
++  `advance` are the only mutation paths), `RtsCamera` (perspective
++  orbit, ground picking, box select), terrain mesh, `Renderer` trait +
++  `NullRenderer`.
++- **client**: winit 0.30 + wgpu 26 windowed 3D renderer (depth buffer,
++  terrain mesh with heightmap displacement, instanced placeholder entity
++  boxes), selection + right-click Move, fontdue text atlas + HUD/debug
++  overlay, `--frames N` windowed smoke, headless fallback for CI.
++- **test**: windowed path machine-verified on Xvfb + llvmpipe (selection
++  + Move commands provably work). HUD/overlay slice landed (DEBT-009
++  repaid). The human visual pass remains open as DEBT-008.
++
++## [M2] — Content pipeline
++
++RON schemas, versioned loaders, validators, content hash.
++
++- **content**: strict RON schema with versioned loaders and forward
++  migration (map v1 → v2), precise validators at file and placement
++  level, `ContentBundle` with canonical content hash and map id,
++  `world()` seam producing the plain `TrivialWorld` the simulation
++  receives.
++- **tools**: `content-validate` subcommand.
++- **test**: `tests/content_pipeline.rs` — §10.4 stat pin, loaded-bundle
++  determinism, the A3 add-a-unit scaffold (data-only load + spawn +
++  Move; the §10.6 built-and-fights extension is DEBT-007 for M5/M6).
++
++## [M1] — Simulation core
++
++The tick pipeline, entity and capability stores, the command gate, the
++state hash, the replay codec, and the determinism proofs.
++
++- **fx**: Q16.16 fixed-point math with 64-bit intermediates, round-
++  toward-zero and saturating contracts, exact integer square root over
++  the full u64 range, PCG32 RNG with canonical seeding, FNV-1a 64-bit
++  hashing — all property-tested.
++- **sim_api**: the boundary vocabulary (Command, Event, Snapshot,
++  PlayerView, Reject, MatchSetup).
++- **sim**: `step()` runs plan §6.3's eleven stages; entity + capability
++  stores kept in ascending-ID order by construction; the shared command
++  gate (stable (issuer, seq) sort, tick check, per-kind existence /
++  ownership / capability / target checks); canonical little-endian
++  state hash through `fx::Fnv1a64`. Snapshots and `PlayerView`s project
++  entities ascending by id.
++- **replay**: a checksummed canonical little-endian codec (record, load,
++  validate) with typed errors. No serde — the dependency law forbids it
++  here.
++- **test**: `tests/determinism.rs` (A1/A2 with pinned golden hashes),
++  `tests/architecture_law.rs` (the dependency graph + the source-level
++  determinism bans).
++
++## [M0] — Skeleton & guardrails
++
++The workspace, the toolchain pin, the guardrails, and the `fx` crate.
++
++- Workspace (virtual `[workspace]`, resolver 2), shared package
++  metadata, `rust-toolchain.toml` pinning 1.98.1.
++- `clippy.toml` disallowing unordered-map types workspace-wide.
++- CI authored: fmt, clippy `-D warnings`, tests × {Linux, Windows,
++  macOS} × {dev, release}, plus the replay round-trip.
++- `tests/architecture_law.rs` parses every member manifest on every test
++  run, checks the internal edge allow-list and the per-crate external
++  allow-list, fails on the forbidden-crate list, and scans the
++  determinism crates' sources for banned types. Breaking the
++  architecture is a build failure, not a conversation.
+diff --git a/SECURITY.md b/SECURITY.md
+new file mode 100644
+index 0000000..fbf3b3f
+--- /dev/null
++++ b/SECURITY.md
+@@ -0,0 +1,85 @@
++# Security Policy
++
++## Reporting a vulnerability
++
++A deterministic engine is a security-sensitive artifact: a desync is a
++bug, full stop. If you have found a way to make the same seed + content
++hash + ordered command log produce divergent state across runs, hosts,
++profiles, or platforms, **report it privately** — please do not open a
++public issue.
++
++- **Preferred**: open a [GitHub Private Security
++  Advisory](https://github.com/E-Vex/pandemonium-bd/security/advisories/new)
++  against this repository.
++- **Fallback**: email the maintainer directly (the email is on the GitHub
++  profile).
++
++Include, if you can:
++
++- The exact `cargo run -p pandemonium-tools -- headless ...` command
++  that reproduces it.
++- The seed (`--seed N`), tick budget (`--ticks N`), and slots
++  (`--p1 ai --p2 ai`).
++- The final hash from each divergent run.
++- The platform(s) and toolchain version (`rustc --version`).
++
++A report with the seed and the tick is a reproducible incident; anything
++else is a war story.
++
++## Threat model
++
++The Alpha is a single-process, single-machine RTS foundation. There is
++no network code, no untrusted input parsing, and no plugin surface in
++the Alpha scope. The assets the engine consumes are the workspace's own
++checked-in content (`content/`); user-supplied content is not yet a
++supported configuration (the Alpha content manifest is locked per the
++plan).
++
++The meaningful threat surface is **determinism correctness**: a
++silent divergence between two runs of the same seed + content + command
++log would invalidate every replay, every AI-vs-AI comparison, and the
++"prove, don't assert" operating contract. That is the threat the
++guardrails exist to prevent, and the threat a security report should
++target.
++
++## Mechanical guardrails already in place
++
++These are enforced by the build, not by review:
++
++- **Dependency law** (`tests/architecture_law.rs`): dependencies point
++  downward only (fx → sim_api → sim → content → ai/replay → engine →
++  client/tools). The `sim` crate may not depend on anything above it
++  (FD-6); the `ai` crate may not depend on `sim` (FD-7).
++- **Forbidden-crate list**: `bevy`, `macroquad`, `ggez`, `fyrox`,
++  godot bindings, every ECS crate, physics and pathfinding crates,
++  and `rand` / `getrandom` are forbidden workspace-wide.
++- **Determinism source bans** (`tests/architecture_law.rs`): the
++  determinism crates (`fx`, `sim`, `sim_api`, `ai`, `content`) are
++  scanned line by line for `HashMap`, `HashSet`, `Instant`,
++  `SystemTime`, and floating-point type names. The engine and client
++  are NOT scanned — rendering interpolation and real-time timing
++  legitimately use real clocks and float math there, and never enter
++  the simulation (plan §11.1).
++- **Pinned toolchain** (`rust-toolchain.toml`): the exact Rust version
++  is fixed. A toolchain bump is a deliberate, reviewed change.
++- **CI matrix**: tests run in dev *and* release on Linux, Windows, and
++  macOS — a divergence across profile or OS is a build failure, not a
++  footnote.
++- **`cargo audit`** (`.github/workflows/audit.yml`): runs on every
++  `Cargo.lock` change and nightly. Read-only — bumps nothing.
++
++## Non-goals
++
++- The windowed client's `Instant` and `f32` use is presentation-only
++  and never enters the simulation. A report of "the renderer uses
++  floats" is not a vulnerability — it is the architecture.
++- The Alpha does not ship a network layer. Lockstep / desync-detection
++  hooks exist (`Command.tick`, hashed checkpoints), but no netcode is
++  in scope. A report of "no network authentication" is out of scope.
++- Balance issues, AI weaknesses, and missing gameplay features are
++  **not security issues**. File them as regular issues.
++
++## Supported versions
++
++Only the `master` branch is supported. The Alpha is undeclared; there
++are no tagged releases to backport to.
+-- 
+2.47.3
+
+
+From a834a840e9fe312c80de78cd3b59b7138e7ee172 Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:55:00 +0000
+Subject: [PATCH 4/7] refactor(content): share one helper between
+ map_passability and map_buildability
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+map_passability and map_buildability were ~20 lines each, 90% identical
+— the only difference was '.passable' vs '.buildable' on the terrain
+class lookup. Extract the shared body into map_flag(map, pick) and make
+the two callers one-liner delegations.
+
+Output bytes are unchanged: same loop order, same unwrap_or(false) for
+unknown codes, same u8::from(bool). The content hash is computed by
+encode_map in the same file, which reads map.grid directly (not via
+these helpers), so the content hash is unaffected.
+
+The 'content' crate IS scanned by tests/architecture_law.rs for banned
+tokens (HashMap/HashSet/Instant/SystemTime/f32/f64). The refactor
+introduces none. BTreeMap remains the only map type, as before.
+
+No golden moves. fmt + clippy -D warnings + 352 dev tests green.
+---
+ crates/content/src/bundle.rs | 39 +++++++++++++++++-------------------
+ 1 file changed, 18 insertions(+), 21 deletions(-)
+
+diff --git a/crates/content/src/bundle.rs b/crates/content/src/bundle.rs
+index 42a0469..3b578bf 100644
+--- a/crates/content/src/bundle.rs
++++ b/crates/content/src/bundle.rs
+@@ -567,44 +567,41 @@ fn capability_template(
+ /// row-major, 1 passable and 0 blocked (plan §9.1.1). The grid's shape is
+ /// already validated against the terrain classes (loader guarantees).
+ fn map_passability(map: &defs::MapDef) -> Vec<u8> {
+-    let class_of: BTreeMap<char, &defs::TerrainClass> = map
+-        .terrain
+-        .iter()
+-        .map(|class| (class.code, class))
+-        .collect();
+-    let mut passability = Vec::with_capacity((map.width as u64 * map.height as u64) as usize);
+-    for row in &map.grid {
+-        for code in row.chars() {
+-            let passable = class_of
+-                .get(&code)
+-                .map(|class| class.passable)
+-                .unwrap_or(false); // unknown codes never validate; fail closed
+-            passability.push(u8::from(passable));
+-        }
+-    }
+-    passability
++    map_flag(map, |class| class.passable)
+ }
+ 
+ /// The map's terrain as the simulation's buildability grid: one byte per tile,
+ /// row-major, 1 buildable and 0 not — the Build command's placement input
+ /// (plan §10.5). Mirrors [`map_passability`].
+ fn map_buildability(map: &defs::MapDef) -> Vec<u8> {
++    map_flag(map, |class| class.buildable)
++}
++
++/// The shared body of [`map_passability`] and [`map_buildability`]: walks the
++/// map grid row by row, looks each tile's terrain class up by its character
++/// code, and emits `1`/`0` per tile per the `pick` predicate. Unknown codes
++/// fail closed (the loader guarantees codes are known, so an unknown here is a
++/// schema bug, not a gameplay event). The output vector's length is
++/// `width * height` in tile units; the `u64` cast guards against the
++/// theoretical u32 overflow on a 65k×65k map (no Alpha map is anywhere near
++/// that).
++fn map_flag(map: &defs::MapDef, pick: impl Fn(&defs::TerrainClass) -> bool) -> Vec<u8> {
+     let class_of: BTreeMap<char, &defs::TerrainClass> = map
+         .terrain
+         .iter()
+         .map(|class| (class.code, class))
+         .collect();
+-    let mut buildability = Vec::with_capacity((map.width as u64 * map.height as u64) as usize);
++    let mut flags = Vec::with_capacity((map.width as u64 * map.height as u64) as usize);
+     for row in &map.grid {
+         for code in row.chars() {
+-            let buildable = class_of
++            let on = class_of
+                 .get(&code)
+-                .map(|class| class.buildable)
++                .map(|class| pick(class))
+                 .unwrap_or(false); // unknown codes never validate; fail closed
+-            buildability.push(u8::from(buildable));
++            flags.push(u8::from(on));
+         }
+     }
+-    buildability
++    flags
+ }
+ 
+ // ---------------------------------------------------------------------------
+-- 
+2.47.3
+
+
+From c007784e4a71a5b64a10e75bbb3bf1327a6a07f2 Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:55:46 +0000
+Subject: [PATCH 5/7] fix(engine): replace no-op A15 checkpoint-trail assertion
+ with a real one
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The A15 restart-cleanliness test (fresh_construction_with_the_same_seed_
+produces_identical_hashes) had two pieces of dead code where a real
+comparison was intended:
+
+    // Same checkpoint trail.
+    assert_eq!(oa.hashes.len(), oa.hashes.len());   // assert!(true)
+    for (ha, _) in &oa.hashes {                       // empty body
+        let _ = ha; // already asserted via state_hash above
+    }
+
+The assert_eq! compared a value's length to itself. The for loop had an
+empty body and bound b's FrameOutcome was discarded ('let _ = b.advance').
+The comment claimed 'Same checkpoint trail' was being checked, but it
+wasn't.
+
+Bind b's FrameOutcome, then assert the checkpoint trails are equal:
+
+    let ob = b.advance(frame);
+    ...
+    assert_eq!(oa.hashes, ob.hashes, "the checkpoint trails must match");
+
+Safe because the existing state_hash() assertion (a.state_hash() ==
+b.state_hash()) already implies the checkpoints match — the checkpoint
+value IS the state hash at checkpoint ticks. The new assertion just
+makes the test's stated intent real and pins the trail comparison
+explicitly. 48 engine tests still green (the A15 test included).
+
+The 'engine' crate is NOT scanned by tests/architecture_law.rs (rendering
+and timing legitimately use real clocks and float math there), so the
+new assertion is unconstrained by the source bans. No golden moves.
+---
+ crates/engine/src/host.rs | 11 ++++-------
+ 1 file changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/crates/engine/src/host.rs b/crates/engine/src/host.rs
+index 21f9cae..ebd8a4b 100644
+--- a/crates/engine/src/host.rs
++++ b/crates/engine/src/host.rs
+@@ -606,16 +606,13 @@ mod tests {
+         for _ in 0..62 {
+             let frame = Duration::from_millis(16);
+             let oa = a.advance(frame);
+-            let _ = b.advance(frame);
++            let ob = b.advance(frame);
+             // Same tick, same hash after every step.
+             assert_eq!(a.tick(), b.tick());
+             assert_eq!(a.state_hash(), b.state_hash());
+-            // Same checkpoint trail.
+-            assert_eq!(oa.hashes.len(), oa.hashes.len());
+-            for (ha, _) in &oa.hashes {
+-                // Re-derive b's hash at the same tick — they must match.
+-                let _ = ha; // already asserted via state_hash above
+-            }
++            // Same checkpoint trail — every checkpoint tick and its hash
++            // match between the two hosts.
++            assert_eq!(oa.hashes, ob.hashes, "the checkpoint trails must match");
+         }
+         assert_eq!(a.state_hash(), b.state_hash());
+     }
+-- 
+2.47.3
+
+
+From 58d1072abcd0c38104884e4a1a73bc43d57d76ad Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 11:57:15 +0000
+Subject: [PATCH 6/7] test(fx): pin Fnv1a64 LE encoding, abs/square contracts,
+ Vec2Fx::dist
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Four new property tests covering pub APIs whose contracts were only spot-
+checked at one or two golden values:
+
+1. hash_integer_writes_match_le_bytes — every integer write method
+   (write_u8/u16/u32/u64/i32/i64) produces the same hash as writing the
+   little-endian byte encoding of the same value. The unit test in
+   hash.rs covers u32 and i64; this pins the remaining four. The state
+   hash (sim/src/hash.rs) and the replay codec (replay/src/bytes.rs)
+   both depend on this LE invariant.
+
+2. abs_is_non_negative_and_idempotent — Fx::abs is non-negative for
+   every input (saturating i32::MIN -> Fx::MAX per the documented
+   contract), and idempotent: abs(abs(x)) == abs(x). Currently only
+   tested at the extremes (extremes_never_panic) and one golden.
+
+3. square_equals_mul_self — Fx::square delegates to mul(self); this
+   pins the delegation so a future 'optimized' square path cannot
+   silently diverge from mul.
+
+4. vec_dist_matches_subtraction_then_length — Vec2Fx::dist(a, b) ==
+   (a - b).len() for arbitrary inputs in the non-saturating range. The
+   docstring on dist claims this equivalence; the only unit test
+   (three_four_five_is_exact) covers a == ZERO. This pins it for
+   arbitrary a, b.
+
+Tests-only. No production code touched. No golden moves. 19 fx
+property tests green (was 15).
+---
+ crates/fx/tests/properties.rs | 94 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 94 insertions(+)
+
+diff --git a/crates/fx/tests/properties.rs b/crates/fx/tests/properties.rs
+index 4871389..c168ee4 100644
+--- a/crates/fx/tests/properties.rs
++++ b/crates/fx/tests/properties.rs
+@@ -155,4 +155,98 @@ proptest! {
+         h.write_bytes(r);
+         prop_assert_eq!(h.finish(), fnv1a64(&b));
+     }
++
++    /// Every integer-write method matches the canonical little-endian byte
++    /// encoding (plan §5.10) — the property the state hash (sim/src/hash.rs)
++    /// and the replay codec (replay/src/bytes.rs) both depend on. The unit
++    /// tests cover u32 and i64; this pins the remaining four integer writes.
++    #[test]
++    fn hash_integer_writes_match_le_bytes(
++        n8 in proptest::num::u8::ANY,
++        n16 in proptest::num::u16::ANY,
++        n32 in proptest::num::u32::ANY,
++        n64 in proptest::num::u64::ANY,
++        i32v in proptest::num::i32::ANY,
++        i64v in proptest::num::i64::ANY,
++    ) {
++        // u8
++        let mut h = Fnv1a64::new();
++        h.write_u8(n8);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&n8.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++
++        // u16
++        let mut h = Fnv1a64::new();
++        h.write_u16(n16);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&n16.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++
++        // u32
++        let mut h = Fnv1a64::new();
++        h.write_u32(n32);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&n32.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++
++        // u64
++        let mut h = Fnv1a64::new();
++        h.write_u64(n64);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&n64.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++
++        // i32
++        let mut h = Fnv1a64::new();
++        h.write_i32(i32v);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&i32v.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++
++        // i64
++        let mut h = Fnv1a64::new();
++        h.write_i64(i64v);
++        let direct = h.finish();
++        let mut h = Fnv1a64::new();
++        h.write_bytes(&i64v.to_le_bytes()[..]);
++        prop_assert_eq!(direct, h.finish());
++    }
++
++    /// abs() is non-negative for every input (saturating i32::MIN -> Fx::MAX),
++    /// and idempotent: abs(abs(x)) == abs(x).
++    #[test]
++    fn abs_is_non_negative_and_idempotent(x in proptest::num::i32::ANY) {
++        let fx = Fx::from_raw(x);
++        let a = fx.abs();
++        prop_assert!(a >= Fx::ZERO || a == Fx::MAX); // MIN maps to MAX
++        prop_assert_eq!(a.abs(), a);
++    }
++
++    /// square() == mul(self) for every input — pins the delegation so a
++    /// future "optimized" square path cannot silently diverge from mul.
++    #[test]
++    fn square_equals_mul_self(x in proptest::num::i32::ANY) {
++        let fx = Fx::from_raw(x);
++        prop_assert_eq!(fx.square(), fx.mul(fx));
++    }
++
++    /// Vec2Fx::dist(a, b) == (a - b).len() for arbitrary inputs in the
++    /// non-saturating range. The docstring on `dist` claims this equivalence
++    /// (component subtraction saturates the same way), but the only unit
++    /// test covers a == ZERO. This pins it for arbitrary a, b.
++    #[test]
++    fn vec_dist_matches_subtraction_then_length(
++        ax in -(1 << 20)..(1 << 20), ay in -(1 << 20)..(1 << 20),
++        bx in -(1 << 20)..(1 << 20), by in -(1 << 20)..(1 << 20),
++    ) {
++        let a = Vec2Fx::new(Fx::from_raw(ax), Fx::from_raw(ay));
++        let b = Vec2Fx::new(Fx::from_raw(bx), Fx::from_raw(by));
++        prop_assert_eq!(Vec2Fx::dist(a, b), (a - b).len());
++    }
+ }
+-- 
+2.47.3
+
+
+From eff9a2ae3fc05599ba9707c29216808740353468 Mon Sep 17 00:00:00 2001
+From: Pandemonium Patch Bot <patch-bot@pandemonium.local>
+Date: Mon, 5 Oct 2026 12:02:33 +0000
+Subject: [PATCH 7/7] docs(ai): per-constant doc comments on the
+ scripted-opponent tuning
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The 14 tuning constants in crates/ai/src/scripted.rs are the AI's entire
+tuning surface. The block comment above them explained the overall pacing
+narrative (workers feed the base, supply blocks prevented by the
+headroom trigger, waves of ten on an 80-second pressure cadence that
+re-marches while alive), but each individual const was bare — a future
+M10 'evaluative AI' or balance pass would have to grep the block comment
+to find each const's role.
+
+Add a '///' doc comment to each const naming what it bounds and how it
+pairs with the other tuning values. The block comment stays as the
+overall pacing narrative.
+
+The 'ai' crate IS scanned by tests/architecture_law.rs for banned tokens
+(HashMap/HashSet/Instant/SystemTime/f32/f64). The doc comments contain
+none of those substrings. Pure documentation edit; no behavior change,
+no golden movement (the constant values are unchanged — only doc text
+was added).
+
+fmt + clippy -D warnings + 356 dev tests green (was 352; the four new
+fx property tests landed in the previous commit).
+---
+ crates/ai/src/scripted.rs | 47 +++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/crates/ai/src/scripted.rs b/crates/ai/src/scripted.rs
+index 50aded9..0031c65 100644
+--- a/crates/ai/src/scripted.rs
++++ b/crates/ai/src/scripted.rs
+@@ -62,19 +62,66 @@ pub type Cost = Vec<(ResourceId, i64)>;
+ /// headroom for a decisive second wave — the M8 flagship stalled with waves
+ /// of six trading forever in low-count attrition cycles that never
+ /// accumulated killing power.
++/// The worker count the script grows the economy to before pausing worker
++/// training. Pairs with `BARRACKS_MIN_WORKERS` (the army-commit threshold)
++/// so the economy reaches a self-sustaining throughput before the army
++/// queue opens. See the block comment above for the pacing rationale.
+ const WORKER_TARGET: u32 = 10;
++/// The hard cap on the army size — when reached, the script pauses training
++/// until attrition opens a slot. Sized (M9) so a wave of `WAVE_SIZE` plus a
++/// reserve can both fit, leaving headroom for a decisive second wave.
+ const ARMY_CAP: u32 = 16;
++/// The number of army units a wave marches with when the full army is ready.
++/// M9's tuning: ten (with the round-robin Guardian/rifleman mix) carries
++/// enough sustained damage to level a defended base in one successful press.
+ const WAVE_SIZE: u32 = 10;
++/// The minimum army size that may march — below this, only the
++/// `WAVE_TIMER_TICKS` pressure cadence sends a wave, and even then it is a
++/// harassment poke rather than a committed attack.
+ const MIN_WAVE: u32 = 4;
++/// The pressure cadence: if a wave has not marched by this many ticks (80 s
++/// at 30 Hz), the script sends whatever army it has at or above `MIN_WAVE`.
++/// While a live wave is out, the same cadence re-issues the march — a wave
++/// never parks.
+ const WAVE_TIMER_TICKS: u32 = 2400;
++/// The number of supply-providing depots the script grows to before pausing
++/// depot construction. Pairs with `DEPOT_HEADROOM_TRIGGER` to keep supply
++/// blocks from stalling the worker and army queues.
+ const DEPOT_TARGET: u32 = 3;
++/// When the supply headroom (cap − usage) drops to this many slots, the
++/// script begins the next depot even if `DEPOT_TARGET` has not been reached
++/// — keeps queues flowing instead of stalling on a supply block.
+ const DEPOT_HEADROOM_TRIGGER: u32 = 3;
++/// The worker count at or above which the script will commit to building the
++/// first barracks. Below this, the economy cannot sustain both worker
++/// training and army production simultaneously.
+ const BARRACKS_MIN_WORKERS: u32 = 6;
++/// Per-producer cooldown between Train commands, in ticks. Prevents the
++/// script from queueing every unit in one frame (which would bankrupt the
++/// ledger and starve other producers).
+ const TRAIN_COOLDOWN_TICKS: u32 = 30;
++/// Per-builder cooldown between Build commands, in ticks. Same role as
++/// `TRAIN_COOLDOWN_TICKS` for construction — keeps one worker from
++/// committing to more sites than it can reach in a reasonable window.
+ const BUILD_COOLDOWN_TICKS: u32 = 45;
++/// Per-army cooldown between defense dispatches, in ticks. Throttles the
++/// reaction to intrusions so a single raider does not pull the whole army
++/// home and abandon the press.
+ const DEFENSE_COOLDOWN_TICKS: u32 = 45;
++/// The radius (in milli-tiles) around the home base that the defense check
++/// scans for sighted enemy units. Sized to cover the worker line and the
++/// depot cluster without reaching the map center (which would over-react
++/// to neutral scouting).
+ const DEFENSE_RADIUS_MILLI: i32 = 12000;
++/// When a pending Train/Build order is older than this many ticks, the
++/// script assumes the producer died (or the site was destroyed) and
++/// re-issues. Prevents the bookkeeping from waiting forever on a ghost
++/// pending slot.
+ const PENDING_SLACK_TICKS: u32 = 90;
++/// When a Build order's site has not yet appeared in the script's fog view,
++/// allow this many ticks of grace before treating the build as failed.
++/// Covers the latency between the command being accepted and the
++/// structure's footprint becoming visible to the controller's own sight.
+ const SITE_SIGHT_GRACE_TICKS: u32 = 2;
+ 
+ /// One player's scripted-opponent configuration: the content- and map-derived
+-- 
+2.47.3
+

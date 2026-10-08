@@ -1,3 +1,6 @@
+TOKEN.txt
+.env
+*.token
 node_modules/
 .next/
 dist/

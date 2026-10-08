@@ -1,0 +1,3129 @@
+From c1ba42376511217844198e679232b2c586d1f34d Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:16:53 +0000
+Subject: [PATCH 01/14] =?UTF-8?q?docs(assumptions):=20A-101..A-106=20?=
+ =?UTF-8?q?=E2=80=94=20the=20Phase=202=20kickoff=20answers=20(palette,=20s?=
+ =?UTF-8?q?cope,=20evidence,=20folder)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ docs/ASSUMPTIONS.md | 47 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 47 insertions(+)
+
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 7d68189..ac390e3 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -877,3 +877,50 @@ confirms or rejects it.
+   `elieaazzam-art <elieaazzam-art@users.noreply.github.com>` (the owner's
+   account noreply form, so GitHub attributes them on import; the owner
+   can `git am` and `--reset-author` if they prefer their local identity).
++
++- **A-101 (PLAN-M10.2 kickoff, M10.2 Phase 2).** The owner's kickoff answers
++  for the Phase 2 pass: the Phase 1 controls re-test is reported as
++  **"passed with notes"** — the notes themselves arrive after this delivery
++  (the owner re-tests on their own machine and reports exact locations of
++  any issue), so `docs/PLAYTEST.md` carries the re-test row with that
++  caveat. The scope is **Phase 2 only** (the owner's re-test gates Phase 3,
++  as with Phase 1). Blocker policy: best effort + a log entry, never a
++  silent skip.
++
++- **A-102 (PLAN-M10.2 §2.2, M10.2 Phase 2).** Team palette: the owner chose
++  **blue/orange** (the plan's colorblind-safe preference). The client
++  resolves P1's content-red to orange — the mapping lives entirely in the
++  presentation layer (`render::team_color` and the minimap dot table);
++  content files and the content hash are untouched. P0 keeps a blue in the
++  content's family and neutral keeps gold for ore.
++
++- **A-103 (PLAN-M10.2 §2.1, M10.2 Phase 2).** The kind → silhouette mapping
++  is keyed by the bundle's kind *name* (`EntityDef::id`) with a
++  capability-shape fallback (Resource → amber cluster, Attack+Footprint
++  without Move → turret, Footprint → building box with a team band, Move →
++  unit box, else a plain unit box). The nine hand-tuned specs assume the
++  authored footprints (CC 4×4, barracks 3×3, depot/turret 2×2); a content
++  footprint change would need the client spec re-tuned (DEBT-016). All
++  silhouettes are pure client data (`client/src/silhouette.rs`).
++
++- **A-104 (PLAN-M10.2 Phase 2 exit, M10.2 Phase 2).** Evidence: the owner
++  opted for a **text-only delivery** — no PNG screenshots are uploaded to
++  the delivery folder. The Xvfb visual pass still runs (or its blocker is
++  logged honestly) so the machine half of "a stranger identifies command
++  center, worker, and tank" is exercised; the human verdict is the owner's
++  re-test on their display.
++
++- **A-105 (PLAN-M10.2 delivery, M10.2 Phase 2).** The delivery folder is
++  `m10.2-phase2/` in the owner's delivery repo — the plan's generic
++  "folder m10.2/" wording is refined to keep the Phase 1 delivery
++  (already in `m10.2/`) and this one distinct. The patch, a README.txt
++  with the base hash + apply command, and nothing else land there.
++
++- **A-106 (PLAN-M10.2 §2.3, M10.2 Phase 2).** The single-selection info
++  panel gains a production-queue summary (head item name + progress, count
++  of the rest) next to the existing queue strip above the command card —
++  the panel shows *what the selected building is doing*, the strip keeps
++  the per-item cancel buttons. The hover tooltip shows the display name
++  plus an owner tag (Own/Enemy/Neutral) near the cursor; it is suppressed
++  over the bottom bar and the minimap, where the cursor means UI, not
++  world.
+-- 
+2.47.3
+
+
+From 5d311719df387ed35e55786adbe8683268c01146 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:18:29 +0000
+Subject: [PATCH 02/14] =?UTF-8?q?feat(client):=20multi-part=20silhouettes?=
+ =?UTF-8?q?=20per=20kind=20=E2=80=94=20the=20visual-legibility=20shapes=20?=
+ =?UTF-8?q?(PLAN-M10.2=20=C2=A72.1)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- new pure module silhouette.rs: a Silhouette is a box Part composition plus
+  the derived ground radius and the unit flag; nine hand-tuned specs keyed by
+  the bundle kind name (worker+tool, rifleman+rifle, raider buggy, Guardian
+  hull/treads/turret/barrel, CC tower, barracks flag, depot crate stack,
+  turret pedestal, amber ore crystals) with the capability-shape fallback
+  (Resource -> cluster, Footprint -> building, Move -> unit, else plain box)
+- part tones (Body/Dark/Light/Steel/Band/Amber) resolve against the team
+  palette, so kinds read apart while teams stay obvious; every structure
+  carries a team band part (§2.2's banner), every unit keeps the squat cue
+- render.rs: build_entity_instances composes parts (offsets rotate with the
+  facing — the transposed form matching the shader's mirrored yaw), shadows
+  and rings size from the derived radius, death fades shrink the main mass
+- main.rs: kind_shapes() resolves via the name table + capability fallback
+- 10 new silhouette tests + the render tests re-pinned (unique mesh per kind,
+  part counts / vertex counts, above-ground + inside-radius invariants,
+  fallback paths, ore amber team-independent)
+---
+ crates/client/src/main.rs       |  51 +--
+ crates/client/src/render.rs     | 399 ++++++++------------
+ crates/client/src/silhouette.rs | 630 ++++++++++++++++++++++++++++++++
+ 3 files changed, 808 insertions(+), 272 deletions(-)
+ create mode 100644 crates/client/src/silhouette.rs
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index acf8c27..20081ee 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -15,6 +15,7 @@ mod input;
+ mod orders;
+ mod render;
+ mod report;
++mod silhouette;
+ mod text;
+ mod ui;
+ 
+@@ -876,44 +877,26 @@ fn digit_to_group_index(code: winit::keyboard::KeyCode) -> usize {
+     }
+ }
+ 
+-/// Derives one silhouette per kind from the content's capability
+-/// composition — the same capability-shaped law the engine's plan resolution
+-/// follows (never a name match). Ore nodes (Resource) read as amber
+-/// clusters, turrets (Attack + Footprint, no Move) as slabs with barrels,
+-/// structures (Footprint) as footprint-sized buildings, movers as body+head
+-/// units whose size varies deterministically by kind so infantry kinds read
+-/// apart without any content edits.
++/// Derives one multi-part silhouette per kind from the loaded bundle
++/// (PLAN-M10.2 §2.1): the kind-name table resolves the nine authored kinds
++/// to their hand-tuned box compositions; anything the table does not know
++/// falls back by capability shape (Resource → amber cluster, Footprint →
++/// building box, Move → unit box) — the same capability-shaped law the
++/// engine's plan resolution follows. No presentation data touches the
++/// content files.
+ fn kind_shapes(bundle: &ContentBundle) -> Vec<render::KindShape> {
+     bundle
+         .entities
+         .iter()
+-        .enumerate()
+-        .map(|(index, def)| {
+-            let has = |name: &str| def.capability(name).is_some();
+-            let kind = if has("Resource") {
+-                render::ShapeKind::Node
+-            } else if has("Attack") && def.footprint().is_some() && !has("Move") {
+-                render::ShapeKind::Turret
+-            } else if let Some((w, h)) = def.footprint() {
+-                render::ShapeKind::Structure {
+-                    w: w as f32,
+-                    h: h as f32,
+-                }
+-            } else {
+-                // Deterministic per-kind size variation within infantry
+-                // proportions (kind index, not a name or an RNG).
+-                let wide = 0.36 + ((index + 1) % 3) as f32 * 0.05;
+-                let tall = 0.52 + (index % 3) as f32 * 0.07;
+-                render::ShapeKind::Unit {
+-                    body: [wide, tall, wide],
+-                    head: [wide * 0.55, tall * 0.34, wide * 0.55],
+-                }
+-            };
+-            // Structures and nodes tint themselves in build_entity_instances;
+-            // units get a mild per-kind cool/warm shift so kinds read apart.
+-            let shift = ((index % 3) as f32 - 1.0) * 0.05;
+-            let tint = [1.0 + shift, 1.0, 1.0 - shift];
+-            render::KindShape { kind, tint }
++        .map(|def| {
++            silhouette::named(&def.id).unwrap_or_else(|| {
++                silhouette::capability_fallback(
++                    def.footprint(),
++                    def.capability("Move").is_some(),
++                    def.capability("Attack").is_some(),
++                    def.capability("Resource").is_some(),
++                )
++            })
+         })
+         .collect()
+ }
+diff --git a/crates/client/src/render.rs b/crates/client/src/render.rs
+index 57b4c0a..e7b3e5d 100644
+--- a/crates/client/src/render.rs
++++ b/crates/client/src/render.rs
+@@ -42,55 +42,12 @@ struct EntityInstance {
+     _pad: f32,
+ }
+ 
+-/// What each kind renders as. The client derives one per kind from the
+-/// content's capability composition (capability-shaped, never name-matched —
+-/// the same law the engine's plan resolution follows).
+-#[derive(Clone, Copy, PartialEq, Debug)]
+-pub enum ShapeKind {
+-    /// A static structure: a footprint-sized slab plus a lighter roof block.
+-    Structure {
+-        /// Footprint width in tiles.
+-        w: f32,
+-        /// Footprint depth in tiles.
+-        h: f32,
+-    },
+-    /// A moving unit: a body box plus a darker head block, facing its
+-    /// movement direction.
+-    Unit {
+-        /// Body extent (x, y, z) in tiles.
+-        body: [f32; 3],
+-        /// Head extent (x, y, z) in tiles.
+-        head: [f32; 3],
+-    },
+-    /// A resource node: a cluster of two tilted amber blocks.
+-    Node,
+-    /// A turret: a low slab plus a thin raised barrel.
+-    Turret,
+-}
+-
+-/// One kind's presentation spec: the silhouette plus a per-kind tint applied
+-/// over the team color (so kinds read apart while teams stay obvious).
+-#[derive(Clone, Copy, PartialEq, Debug)]
+-pub struct KindShape {
+-    /// The silhouette this kind renders as.
+-    pub kind: ShapeKind,
+-    /// Per-kind tint (RGB, multiplied over the team color; 1.0 = neutral).
+-    pub tint: [f32; 3],
+-}
+-
+-impl KindShape {
+-    /// The default silhouette for a kind with unknown content: a plain unit
+-    /// box with a neutral tint (defensive — never used with real content).
+-    pub fn fallback() -> Self {
+-        Self {
+-            kind: ShapeKind::Unit {
+-                body: [0.4, 0.62, 0.4],
+-                head: [0.24, 0.22, 0.24],
+-            },
+-            tint: [1.0, 1.0, 1.0],
+-        }
+-    }
+-}
++/// What each kind renders as: the multi-part silhouette from the pure
++/// [`silhouette`] module (PLAN-M10.2 §2.1 — distinct box compositions per
++/// kind, keyed by kind name, with the capability-shape fallback living in
++/// `silhouette::capability_fallback`). The type alias keeps the renderer's
++/// historical `KindShape` name for the per-kind spec.
++pub type KindShape = crate::silhouette::Silhouette;
+ 
+ const TERRAIN_SHADER: &str = r#"
+ struct CameraUniform { view_projection: mat4x4<f32> };
+@@ -494,8 +451,9 @@ pub struct WgpuRenderer {
+     fog_texture: wgpu::Texture,
+     fog_texture_size: (u32, u32),
+     fog_map_size: (f32, f32),
+-    /// Per-kind silhouette specs (index = KindId), derived from content by
+-    /// the client and handed to the renderer once at startup.
++    /// Per-kind silhouette specs (index = KindId), derived from the loaded
++    /// bundle by the client (the kind-name table + capability fallback in
++    /// [`crate::silhouette`]) and handed to the renderer once at startup.
+     kind_specs: Vec<KindShape>,
+     decal_pipeline: wgpu::RenderPipeline,
+     quad_vertex_buf: wgpu::Buffer,
+@@ -524,7 +482,7 @@ pub struct WgpuRenderer {
+ impl WgpuRenderer {
+     /// Creates the renderer for a window: device, queues, pipelines, and the
+     /// static terrain buffers. `kind_specs` maps each content kind id to its
+-    /// silhouette (the client derives them from the loaded bundle).
++    /// multi-part silhouette (the client derives them from the loaded bundle).
+     pub fn new(
+         window: std::sync::Arc<winit::window::Window>,
+         terrain: &TerrainMesh,
+@@ -1612,13 +1570,11 @@ impl WgpuRenderer {
+     }
+ }
+ 
+-/// The neutral ore color (resource nodes belong to no team).
+-const ORE_COLOR: [f32; 3] = [0.85, 0.66, 0.20];
+-
+ /// Builds one entity's instances — the silhouette pass (pure geometry, so it
+-/// is unit-testable without a GPU). `yaw` comes from the entity's facing,
+-/// `moving` slightly squats units while they walk, and selection/hit feedback
+-/// brighten the whole silhouette.
++/// is unit-testable without a GPU). Each [`Silhouette`] part becomes one
++/// instance: the part's local offset rotates with the entity's facing, the
++/// part's tone resolves against the team palette, `moving` squats whole
++/// unit silhouettes, and selection/hit feedback brightens everything.
+ fn build_entity_instances(
+     entity: &pandemonium_engine::RenderEntity,
+     shape: &KindShape,
+@@ -1627,14 +1583,6 @@ fn build_entity_instances(
+     out: &mut Vec<EntityInstance>,
+ ) {
+     let base = team_color(entity.owner, selected, flashing);
+-    let tint = shape.tint;
+-    let mix = |color: [f32; 3], other: [f32; 3], t: f32| -> [f32; 3] {
+-        [
+-            color[0] * (1.0 - t) + other[0] * t,
+-            color[1] * (1.0 - t) + other[1] * t,
+-            color[2] * (1.0 - t) + other[2] * t,
+-        ]
+-    };
+     let x = entity.pos.x;
+     let z = entity.pos.z;
+     let yaw = if entity.facing.length_squared() > 0.25 {
+@@ -1642,95 +1590,41 @@ fn build_entity_instances(
+     } else {
+         0.0
+     };
+-    let push =
+-        |out: &mut Vec<EntityInstance>, y: f32, scale: [f32; 3], yaw: f32, color: [f32; 3]| {
+-            out.push(EntityInstance {
+-                position: [x, y, z],
+-                yaw,
+-                scale,
+-                color,
+-                _pad: 0.0,
+-            });
+-        };
+-    match shape.kind {
+-        ShapeKind::Structure { w, h } => {
+-            // A footprint slab plus a lighter, slightly inset roof block.
+-            // Height scales with the footprint so bigger buildings read
+-            // bigger; every slab sits flush on the ground.
+-            let height = w.max(h) * 0.35 + 0.5;
+-            let wall = mix(base, [0.35, 0.35, 0.38], 0.25);
+-            let roof = mix(base, [0.95, 0.95, 1.0], 0.35);
+-            push(out, height * 0.5, [w * 0.94, height, h * 0.94], 0.0, wall);
+-            push(
+-                out,
+-                height + height * 0.22,
+-                [w * 0.62, height * 0.45, h * 0.62],
+-                0.0,
+-                roof,
+-            );
+-        }
+-        ShapeKind::Unit { body, head } => {
+-            // A squatting unit is a moving unit (the M3..M9 half-extent cue,
+-            // kept and carried into the silhouette). The yaw turns the body
+-            // toward its facing; the head rides on top, unrotated colors
+-            // slightly darker so it reads as a separate mass.
+-            let squat = if entity.move_state == MoveState::Moving {
+-                0.85
+-            } else {
+-                1.0
+-            };
+-            let body_color = mix(base, tint, 0.35);
+-            let head_color = mix(base, [0.1, 0.1, 0.12], 0.35);
+-            let body_y = body[1] * squat * 0.5;
+-            push(
+-                out,
+-                body_y,
+-                [body[0], body[1] * squat, body[2]],
+-                yaw,
+-                body_color,
+-            );
+-            push(out, body[1] * squat + head[1] * 0.5, head, yaw, head_color);
+-        }
+-        ShapeKind::Node => {
+-            // A crystal cluster: two rotated blocks, the second offset and
+-            // leaning, both amber regardless of the (neutral) owner.
+-            let sparkle = match entity.id.0 % 4 {
+-                0 => 1.06,
+-                1 => 0.97,
+-                2 => 1.03,
+-                _ => 0.94,
+-            };
+-            push(
+-                out,
+-                0.42,
+-                [0.62 * sparkle, 0.84, 0.62 * sparkle],
+-                0.78,
+-                ORE_COLOR,
+-            );
+-            push(
+-                out,
+-                0.72,
+-                [0.40, 0.60, 0.40],
+-                -0.52,
+-                mix(ORE_COLOR, [1.0, 1.0, 0.85], 0.25),
+-            );
+-        }
+-        ShapeKind::Turret => {
+-            // A low octagonal-feel slab plus a raised thin barrel pointing
+-            // at the entity's (idle-zero) facing — east by convention.
+-            let wall = mix(base, [0.30, 0.30, 0.33], 0.30);
+-            push(out, 0.22, [1.35, 0.44, 1.35], 0.0, wall);
+-            push(
+-                out,
+-                0.62,
+-                [0.85, 0.36, 0.30],
+-                yaw,
+-                mix(base, [1.0, 1.0, 1.0], 0.2),
+-            );
+-        }
++    // A squatting unit is a moving unit (the M3..M9 half-extent cue, kept
++    // and carried into the multi-part world: the whole silhouette squats,
++    // offsets included, so the parts stay glued together).
++    let squat = if shape.unit && entity.move_state == MoveState::Moving {
++        0.85
++    } else {
++        1.0
++    };
++    let (cos, sin) = (yaw.cos(), yaw.sin());
++    for part in &shape.parts {
++        // The offset rotates with the facing so "forward" parts (barrels,
++        // tools, noses) point where the entity faces. The instance shader
++        // rotates a box by yaw as (c*x + s*z, y, -s*x + c*z) — the mirrored
++        // convention — so the offset uses the transposed form to map local
++        // +x onto the facing direction, while the box itself takes the
++        // plain (entity yaw + the part's own tilt) the shader expects.
++        let local = part.offset;
++        let world_x = cos * local[0] - sin * local[2];
++        let world_z = sin * local[0] + cos * local[2];
++        out.push(EntityInstance {
++            position: [x + world_x, local[1] * squat, z + world_z],
++            yaw: yaw + part.yaw,
++            scale: [part.scale[0], part.scale[1] * squat, part.scale[2]],
++            color: crate::silhouette::part_color(part.tone, base),
++            _pad: 0.0,
++        });
+     }
+ }
+ 
++/// The defensive fallback for a kind id outside the specs (never used with
++/// real content — the plain unit box).
++fn fallback_shape() -> KindShape {
++    crate::silhouette::capability_fallback(None, false, false, false)
++}
++
+ /// Builds the whole frame's instance stream (ascending entity order — the
+ /// snapshot's contract) under the instance buffer's capacity.
+ fn build_instances(
+@@ -1747,8 +1641,8 @@ fn build_instances(
+         }
+         let shape = kind_specs
+             .get(entity.kind.0 as usize)
+-            .copied()
+-            .unwrap_or_else(KindShape::fallback);
++            .cloned()
++            .unwrap_or_else(fallback_shape);
+         let selected = selection.contains(&entity.id);
+         let flashing = flashes.contains(&entity.id);
+         let before = instances.len();
+@@ -1766,18 +1660,8 @@ fn build_instances(
+ /// rasterization noise, small enough to look glued to the ground.
+ const DECAL_LIFT: f32 = 0.02;
+ 
+-/// The shadow blob's radius for one kind (in tiles) — slightly wider than
+-/// the silhouette's widest mass, so the object visibly "sits" in it.
+-fn silhouette_radius(shape: &KindShape) -> f32 {
+-    match shape.kind {
+-        ShapeKind::Structure { w, h } => w.max(h) * 0.55,
+-        ShapeKind::Unit { body, .. } => body[0] * 0.95,
+-        ShapeKind::Node => 0.68,
+-        ShapeKind::Turret => 0.80,
+-    }
+-}
+-
+-/// Builds the shadow blob stream: one dark ellipse under every entity.
++/// Builds the shadow blob stream: one dark ellipse under every entity,
++/// sized by the silhouette's derived ground radius.
+ fn build_shadows(
+     snapshot: &pandemonium_engine::RenderSnapshot,
+     kind_specs: &[KindShape],
+@@ -1790,9 +1674,9 @@ fn build_shadows(
+         }
+         let shape = kind_specs
+             .get(entity.kind.0 as usize)
+-            .copied()
+-            .unwrap_or_else(KindShape::fallback);
+-        let radius = silhouette_radius(&shape);
++            .cloned()
++            .unwrap_or_else(fallback_shape);
++        let radius = shape.radius;
+         decals.push(DecalInstance {
+             position: [entity.pos.x, DECAL_LIFT, entity.pos.z],
+             scale: [radius * 2.0, radius * 2.0],
+@@ -1826,9 +1710,9 @@ fn build_rings(
+         }
+         let shape = kind_specs
+             .get(entity.kind.0 as usize)
+-            .copied()
+-            .unwrap_or_else(KindShape::fallback);
+-        let radius = silhouette_radius(&shape) + 0.12;
++            .cloned()
++            .unwrap_or_else(fallback_shape);
++        let radius = shape.radius + 0.12;
+         decals.push(DecalInstance {
+             position: [entity.pos.x, DECAL_LIFT * 2.0, entity.pos.z],
+             scale: [radius * 2.0, radius * 2.0],
+@@ -1862,8 +1746,9 @@ pub struct DyingCue {
+     pub progress: f32,
+ }
+ 
+-/// Builds the dying entity's single instance: its silhouette's main mass,
+-/// shrinking to a quarter and charring toward soot as `progress` advances.
++/// Builds the dying entity's single instance: its silhouette's main mass
++/// (the largest-volume part), shrinking to a quarter and charring toward
++/// soot as `progress` advances.
+ fn death_instance(cue: &DyingCue, shape: &KindShape) -> EntityInstance {
+     let shrink = 1.0 - 0.75 * cue.progress.clamp(0.0, 1.0);
+     let base = team_color(cue.owner, false, false);
+@@ -1872,22 +1757,14 @@ fn death_instance(cue: &DyingCue, shape: &KindShape) -> EntityInstance {
+         base[1] * (1.0 - 0.85 * cue.progress) + 0.08 * cue.progress,
+         base[2] * (1.0 - 0.85 * cue.progress) + 0.08 * cue.progress,
+     ];
+-    let (full_scale, y_center) = match shape.kind {
+-        ShapeKind::Structure { w, h } => {
+-            let height = w.max(h) * 0.35 + 0.5;
+-            ([w * 0.94, height, h * 0.94], height * 0.5)
+-        }
+-        ShapeKind::Unit { body, .. } => ([body[0], body[1], body[2]], body[1] * 0.5),
+-        ShapeKind::Node => ([0.62, 0.84, 0.62], 0.42),
+-        ShapeKind::Turret => ([1.35, 0.44, 1.35], 0.22),
+-    };
++    let main = shape.main_part();
+     let scale = [
+-        full_scale[0] * shrink,
+-        full_scale[1] * shrink,
+-        full_scale[2] * shrink,
++        main.scale[0] * shrink,
++        main.scale[1] * shrink,
++        main.scale[2] * shrink,
+     ];
+     EntityInstance {
+-        position: [cue.pos[0], y_center * shrink, cue.pos[2]],
++        position: [cue.pos[0], main.offset[1] * shrink, cue.pos[2]],
+         yaw: 0.0,
+         scale,
+         color: charred,
+@@ -1935,8 +1812,8 @@ impl Renderer for WgpuRenderer {
+             let shape = self
+                 .kind_specs
+                 .get(cue.kind.0 as usize)
+-                .copied()
+-                .unwrap_or_else(KindShape::fallback);
++                .cloned()
++                .unwrap_or_else(fallback_shape);
+             instances.push(death_instance(&cue, &shape));
+         }
+         let needed = instances.len() as u64;
+@@ -2199,21 +2076,26 @@ mod silhouette_tests {
+     }
+ 
+     fn unit_shape() -> KindShape {
+-        KindShape {
+-            kind: ShapeKind::Unit {
+-                body: [0.4, 0.6, 0.4],
+-                head: [0.2, 0.2, 0.2],
+-            },
+-            tint: [1.0, 1.0, 1.0],
+-        }
++        crate::silhouette::Silhouette::from_parts(
++            true,
++            vec![
++                crate::silhouette::Part::at(
++                    [0.0, 0.3, 0.0],
++                    [0.4, 0.6, 0.4],
++                    crate::silhouette::Tone::Body,
++                ),
++                crate::silhouette::Part::at(
++                    [0.0, 0.7, 0.0],
++                    [0.2, 0.2, 0.2],
++                    crate::silhouette::Tone::Dark,
++                ),
++            ],
++        )
+     }
+ 
+     #[test]
+     fn a_structure_is_a_slab_plus_a_roof_sized_to_its_footprint() {
+-        let shape = KindShape {
+-            kind: ShapeKind::Structure { w: 4.0, h: 3.0 },
+-            tint: [1.0; 3],
+-        };
++        let shape = crate::silhouette::capability_fallback(Some((4, 3)), false, false, false);
+         let mut out = Vec::new();
+         build_entity_instances(
+             &entity(1, 0, PlayerId(0), MoveState::Idle),
+@@ -2222,7 +2104,7 @@ mod silhouette_tests {
+             false,
+             &mut out,
+         );
+-        assert_eq!(out.len(), 2, "slab + roof");
++        assert_eq!(out.len(), 3, "slab + roof + team band");
+         let slab = &out[0];
+         assert!(
+             (slab.scale[0] - 4.0 * 0.94).abs() < 1e-4,
+@@ -2238,36 +2120,67 @@ mod silhouette_tests {
+         assert!(out[1].position[1] > slab.position[1] + slab.scale[1] * 0.5);
+         // Structures never rotate (footprints are axis-aligned).
+         assert_eq!(slab.yaw, 0.0);
++        // The band trim hugs the ground in the team color.
++        assert_eq!(out[2].scale[1], 0.12);
++        assert!(out[2].position[1] < slab.position[1]);
+     }
+ 
+     #[test]
+     fn a_unit_is_a_body_plus_a_head_and_faces_its_direction() {
++        let shape = crate::silhouette::named("rifleman").expect("authored");
+         let mut e = entity(1, 0, PlayerId(0), MoveState::Idle);
+         e.facing = Vec3::new(1.0, 0.0, 0.0); // east
+         let mut out = Vec::new();
+-        build_entity_instances(&e, &unit_shape(), false, false, &mut out);
+-        assert_eq!(out.len(), 2, "body + head");
++        build_entity_instances(&e, &shape, false, false, &mut out);
++        assert_eq!(out.len(), 3, "body + head + rifle");
+         let yaw = out[0].yaw;
+         assert!(
+-            (yaw - 0.0).abs() < 1e-4 || (yaw.abs() - std::f32::consts::PI).abs() < 1e-4,
+-            "an east-facing yaw lands on the +x/-x axis, got {yaw}"
++            (yaw - 0.0).abs() < 1e-4,
++            "an east-facing unit yaws to 0, got {yaw}"
+         );
+-        // A moving unit squats: its body is shorter than the idle one.
++        // The rifle rides ahead of the body center along the facing.
++        assert!(out[2].position[0] > out[0].position[0], "rifle forward");
++        // A moving unit squats: its whole silhouette is shorter.
+         let mut moving = entity(1, 0, PlayerId(0), MoveState::Moving);
+         moving.facing = Vec3::new(1.0, 0.0, 0.0);
+         let mut out2 = Vec::new();
+-        build_entity_instances(&moving, &unit_shape(), false, false, &mut out2);
++        build_entity_instances(&moving, &shape, false, false, &mut out2);
+         assert!(out2[0].scale[1] < out[0].scale[1], "moving squats the body");
++        assert!(
++            out2[2].position[1] < out[2].position[1],
++            "offsets squat with the body"
++        );
+         // The head rides on top of the (squatting) body.
+         assert!(out2[1].position[1] > out2[0].position[1]);
+     }
+ 
++    #[test]
++    fn a_facing_turn_rotates_forward_parts_with_the_body() {
++        // North-facing (+z): the rifle's forward offset maps onto +z and its
++        // right-hand carry maps onto -x (right = forward x up). Both prove
++        // the whole silhouette turned with the body.
++        let shape = crate::silhouette::named("rifleman").expect("authored");
++        let mut e = entity(1, 0, PlayerId(0), MoveState::Idle);
++        e.facing = Vec3::new(0.0, 0.0, 1.0);
++        let mut out = Vec::new();
++        build_entity_instances(&e, &shape, false, false, &mut out);
++        assert!(
++            (out[0].yaw - std::f32::consts::FRAC_PI_2).abs() < 1e-4,
++            "a north-facing unit yaws to +90 degrees"
++        );
++        assert!(
++            out[2].position[2] > out[0].position[2],
++            "rifle forward (+z)"
++        );
++        assert!(
++            out[2].position[0] < out[0].position[0],
++            "rifle carried right"
++        );
++    }
++
+     #[test]
+     fn an_ore_node_is_amber_regardless_of_owner() {
+-        let shape = KindShape {
+-            kind: ShapeKind::Node,
+-            tint: [1.0; 3],
+-        };
++        let shape = crate::silhouette::named("ore_node").expect("authored");
+         let mut out = Vec::new();
+         build_entity_instances(
+             &entity(1, 4, PlayerId(1), MoveState::Idle),
+@@ -2276,14 +2189,26 @@ mod silhouette_tests {
+             false,
+             &mut out,
+         );
+-        assert_eq!(out.len(), 2, "crystal cluster");
++        assert_eq!(out.len(), 4, "crystal cluster");
+         for instance in &out {
+             assert!(
+-                (instance.color[0] - ORE_COLOR[0]).abs() < 0.12
+-                    && instance.color[0] > instance.color[2],
++                instance.color[0] > instance.color[2],
+                 "the node reads amber, not team red"
+             );
+         }
++        // The amber is team-independent: the same shards resolve identically
++        // for player 0.
++        let mut out_p0 = Vec::new();
++        build_entity_instances(
++            &entity(1, 4, PlayerId(0), MoveState::Idle),
++            &shape,
++            false,
++            false,
++            &mut out_p0,
++        );
++        for (red, blue) in out.iter().zip(out_p0.iter()) {
++            assert_eq!(red.color, blue.color, "ore reads the same for both");
++        }
+     }
+ 
+     #[test]
+@@ -2331,7 +2256,8 @@ mod silhouette_tests {
+         };
+         // Room for exactly three entities' silhouettes (2 instances each) —
+         // the fourth is dropped whole, never half-drawn.
+-        let instances = build_instances(&snapshot, &[], &[], &[], 6);
++        let specs = [unit_shape(), unit_shape(), unit_shape(), unit_shape()];
++        let instances = build_instances(&snapshot, &[], &[], &specs, 6);
+         assert_eq!(instances.len(), 6);
+         assert!(instances
+             .iter()
+@@ -2345,7 +2271,7 @@ mod silhouette_tests {
+             entities: vec![entity(1, 99, PlayerId(0), MoveState::Idle)],
+         };
+         let instances = build_instances(&snapshot, &[], &[], &[], 64);
+-        assert_eq!(instances.len(), 2, "the fallback silhouette still renders");
++        assert_eq!(instances.len(), 1, "the fallback silhouette still renders");
+     }
+ }
+ 
+@@ -2403,25 +2329,14 @@ mod decal_tests {
+ 
+     #[test]
+     fn bigger_kinds_cast_bigger_shadows() {
+-        let structure = KindShape {
+-            kind: ShapeKind::Structure { w: 4.0, h: 4.0 },
+-            tint: [1.0; 3],
+-        };
+-        let unit = KindShape {
+-            kind: ShapeKind::Unit {
+-                body: [0.4, 0.6, 0.4],
+-                head: [0.2, 0.2, 0.2],
+-            },
+-            tint: [1.0; 3],
+-        };
+-        let s_radius = silhouette_radius(&structure);
+-        let u_radius = silhouette_radius(&unit);
++        let structure = crate::silhouette::named("command_center").expect("authored");
++        let unit = crate::silhouette::named("worker").expect("authored");
+         assert!(
+-            s_radius > u_radius,
++            structure.radius > unit.radius,
+             "a command center shadows more than a worker"
+         );
+         // And the ring is slightly larger than its shadow.
+-        assert!(silhouette_radius(&unit) + 0.12 > u_radius);
++        assert!(unit.radius + 0.12 > unit.radius);
+     }
+ }
+ 
+@@ -2440,13 +2355,21 @@ mod death_render_tests {
+     }
+ 
+     fn unit_shape() -> KindShape {
+-        KindShape {
+-            kind: ShapeKind::Unit {
+-                body: [0.4, 0.6, 0.4],
+-                head: [0.2, 0.2, 0.2],
+-            },
+-            tint: [1.0; 3],
+-        }
++        crate::silhouette::Silhouette::from_parts(
++            true,
++            vec![
++                crate::silhouette::Part::at(
++                    [0.0, 0.3, 0.0],
++                    [0.4, 0.6, 0.4],
++                    crate::silhouette::Tone::Body,
++                ),
++                crate::silhouette::Part::at(
++                    [0.0, 0.7, 0.0],
++                    [0.2, 0.2, 0.2],
++                    crate::silhouette::Tone::Dark,
++                ),
++            ],
++        )
+     }
+ 
+     #[test]
+diff --git a/crates/client/src/silhouette.rs b/crates/client/src/silhouette.rs
+new file mode 100644
+index 0000000..f99ae2a
+--- /dev/null
++++ b/crates/client/src/silhouette.rs
+@@ -0,0 +1,630 @@
++//! Multi-part entity silhouettes (PLAN-M10.2 §2.1/§2.2, the visual-legibility
++//! pass): what each *kind* of thing looks like, as pure data.
++//!
++//! The M10 "silhouette" system rendered every kind as one or two tinted
++//! boxes sized by capability shape. The playtest's second finding — "at a
++//! glance you cannot tell what anything is" — upgrades those specs to
++//! distinct multi-part silhouettes built from the same instanced-box
++//! primitives: a worker is a small round body with a visible tool, a
++//! Guardian is a hull with treads, a turret and a barrel, the Command
++//! Center is a tall slab with a corner tower, and so on. Not pretty — just
++//! clear (the plan's own bar: a stranger identifies command center, worker,
++//! and tank in a screenshot without a legend).
++//!
++//! The kind → silhouette mapping lives entirely in the client, keyed by the
++//! kind's *name* from the loaded bundle (`EntityDef::id`), with a
++//! capability-shape fallback (Resource → crystal cluster, Footprint →
++//! building box, Move → unit box) for any kind the table does not know.
++//! No presentation data is ever added to `content/` files — the content
++//! hash never moves (the milestone's hard constraint).
++//!
++//! Everything here is pure data and pure functions: a [`Silhouette`] is a
++//! list of box [`Part`]s plus the derived ground radius and the unit flag,
++//! so the whole system unit-tests without a GPU (the
++//! pure-builder-plus-tests pattern `input.rs`/`feedback.rs`/`ui.rs` set).
++
++/// How one part takes its color from the owning team's base color.
++///
++/// The old system had one per-kind tint multiplier; the multi-part
++/// silhouettes need *roles* instead — a Guardian's hull reads as the team
++/// color while its barrel reads as gunmetal regardless of who owns it.
++#[derive(Clone, Copy, PartialEq, Eq, Debug)]
++pub enum Tone {
++    /// The team color itself (the main mass).
++    Body,
++    /// A darker detail of the team color (heads, treads, doors).
++    Dark,
++    /// A lighter detail of the team color (roofs, cabins, caps).
++    Light,
++    /// Mostly gunmetal with a trace of team color (tools, barrels, poles).
++    Steel,
++    /// A strong, bright team-color band — the banner/trim that makes the
++    /// owner readable on structures (PLAN-M10.2 §2.2).
++    Band,
++    /// Ore amber, independent of any team (resource nodes are neutral).
++    Amber,
++    /// A lighter ore amber (crystal highlights).
++    AmberLight,
++}
++
++/// One box of a silhouette, in the entity's local space: `x` forward (the
++/// direction the entity faces), `y` up, `z` right. `offset` is the box's
++/// *center*, `scale` its full extents (the renderer's instance convention),
++/// `yaw` an extra rotation of the box itself around its center, relative to
++/// the entity's facing.
++#[derive(Clone, Copy, PartialEq, Debug)]
++pub struct Part {
++    /// Center offset in tile units (x forward, y up, z right).
++    pub offset: [f32; 3],
++    /// Full extent per axis in tile units (not half — the instance shader
++    /// scales corners of ±0.5).
++    pub scale: [f32; 3],
++    /// Extra yaw of this box around its own center (radians).
++    pub yaw: f32,
++    /// How the part takes its color from the team palette.
++    pub tone: Tone,
++}
++
++impl Part {
++    /// A convenience constructor for the common axis-aligned box.
++    pub fn at(offset: [f32; 3], scale: [f32; 3], tone: Tone) -> Self {
++        Self {
++            offset,
++            scale,
++            yaw: 0.0,
++            tone,
++        }
++    }
++
++    /// The part's ground reach from the entity center — how far its box
++    /// extends horizontally, worst case over the two ground axes.
++    fn reach(&self) -> f32 {
++        let dx = self.offset[0].abs() + self.scale[0] * 0.5;
++        let dz = self.offset[2].abs() + self.scale[2] * 0.5;
++        (dx * dx + dz * dz).sqrt()
++    }
++
++    /// The part's box volume — the death fade shrinks the *main* mass, so
++    /// the main part is the biggest one.
++    fn volume(&self) -> f32 {
++        self.scale[0] * self.scale[1] * self.scale[2]
++    }
++}
++
++/// One kind's presentation spec: the box composition plus the two derived
++/// facts the rest of the renderer needs — the ground `radius` (shadow and
++/// ring sizing) and whether the kind is a *unit* (mobile: it gets the
++/// team-color ground ring; structures get the team band parts instead).
++#[derive(Clone, PartialEq, Debug)]
++pub struct Silhouette {
++    /// The box composition, bottom-up.
++    pub parts: Vec<Part>,
++    /// Ground radius in tiles: the widest part's reach plus a small margin,
++    /// so shadows visibly "sit" under the whole silhouette and rings clear it.
++    pub radius: f32,
++    /// Whether this reads as a mobile unit (team ground ring under it).
++    pub unit: bool,
++}
++
++/// The margin added to the widest part's reach when deriving `radius`.
++const RADIUS_MARGIN: f32 = 0.08;
++
++impl Silhouette {
++    /// Derives the radius and stores the parts (the single constructor —
++    /// keeps the derived invariant true by construction).
++    pub fn from_parts(unit: bool, parts: Vec<Part>) -> Self {
++        let radius = parts.iter().map(Part::reach).fold(0.0_f32, f32::max) + RADIUS_MARGIN;
++        Self {
++            parts,
++            radius,
++            unit,
++        }
++    }
++
++    /// The largest-volume part — the mass the death fade shrinks.
++    pub fn main_part(&self) -> &Part {
++        self.parts
++            .iter()
++            .max_by(|a, b| {
++                a.volume()
++                    .partial_cmp(&b.volume())
++                    .unwrap_or(std::cmp::Ordering::Equal)
++            })
++            .expect("a silhouette always carries at least one part")
++    }
++}
++
++/// Resolves a part tone to a concrete RGB against the owner's team base.
++/// Steel and Amber barely move with the team (tools and ore must read the
++/// same for both sides); Band stays strongly team-colored (that is its job).
++pub fn part_color(tone: Tone, team: [f32; 3]) -> [f32; 3] {
++    let mix = |color: [f32; 3], other: [f32; 3], t: f32| -> [f32; 3] {
++        [
++            color[0] * (1.0 - t) + other[0] * t,
++            color[1] * (1.0 - t) + other[1] * t,
++            color[2] * (1.0 - t) + other[2] * t,
++        ]
++    };
++    match tone {
++        Tone::Body => team,
++        Tone::Dark => mix(team, [0.10, 0.10, 0.12], 0.45),
++        Tone::Light => mix(team, [0.95, 0.95, 1.0], 0.45),
++        Tone::Steel => mix(team, [0.42, 0.44, 0.48], 0.78),
++        Tone::Band => {
++            let band = mix(team, [1.0, 1.0, 1.0], 0.12);
++            [
++                (band[0] * 1.15).clamp(0.0, 1.0),
++                (band[1] * 1.15).clamp(0.0, 1.0),
++                (band[2] * 1.15).clamp(0.0, 1.0),
++            ]
++        }
++        Tone::Amber => [0.98, 0.72, 0.16],
++        Tone::AmberLight => [1.0, 0.87, 0.45],
++    }
++}
++
++/// The worker: a small round-ish body, a dark head, and a visible tool —
++/// a steel shaft with a heavier head, held out to the right side.
++fn worker() -> Silhouette {
++    Silhouette::from_parts(
++        true,
++        vec![
++            Part::at([0.0, 0.15, 0.0], [0.34, 0.30, 0.34], Tone::Body),
++            Part::at([0.0, 0.39, 0.0], [0.22, 0.18, 0.22], Tone::Dark),
++            Part {
++                offset: [0.22, 0.24, 0.14],
++                scale: [0.30, 0.05, 0.05],
++                yaw: 0.5,
++                tone: Tone::Steel,
++            },
++            Part {
++                offset: [0.38, 0.30, 0.18],
++                scale: [0.09, 0.11, 0.09],
++                yaw: 0.0,
++                tone: Tone::Steel,
++            },
++        ],
++    )
++}
++
++/// The rifleman: a taller capsule-ish body, a dark head, and a thin rifle
++/// held forward along the facing, off to the right.
++fn rifleman() -> Silhouette {
++    Silhouette::from_parts(
++        true,
++        vec![
++            Part::at([0.0, 0.24, 0.0], [0.32, 0.48, 0.32], Tone::Body),
++            Part::at([0.0, 0.57, 0.0], [0.18, 0.16, 0.18], Tone::Dark),
++            Part::at([0.10, 0.36, 0.13], [0.46, 0.05, 0.05], Tone::Steel),
++        ],
++    )
++}
++
++/// The raider: a medium, low, fast-looking buggy — wide chassis, a darker
++/// wedge nose, a light cabin and a steel roll bar.
++fn raider() -> Silhouette {
++    Silhouette::from_parts(
++        true,
++        vec![
++            Part::at([0.0, 0.15, 0.0], [0.68, 0.20, 0.44], Tone::Body),
++            Part::at([0.38, 0.13, 0.0], [0.16, 0.14, 0.28], Tone::Dark),
++            Part::at([-0.08, 0.32, 0.0], [0.28, 0.16, 0.30], Tone::Light),
++            Part::at([-0.08, 0.46, 0.0], [0.05, 0.10, 0.34], Tone::Steel),
++        ],
++    )
++}
++
++/// The Guardian (the tank): a large hull with dark treads on both flanks,
++/// a lighter turret on top, and a steel barrel pointing forward.
++fn guardian() -> Silhouette {
++    Silhouette::from_parts(
++        true,
++        vec![
++            Part::at([0.0, 0.16, 0.0], [0.86, 0.32, 0.58], Tone::Body),
++            Part::at([0.0, 0.08, 0.30], [0.92, 0.16, 0.09], Tone::Dark),
++            Part::at([0.0, 0.08, -0.30], [0.92, 0.16, 0.09], Tone::Dark),
++            Part::at([-0.05, 0.42, 0.0], [0.42, 0.22, 0.38], Tone::Light),
++            Part::at([0.32, 0.44, 0.0], [0.44, 0.08, 0.08], Tone::Steel),
++        ],
++    )
++}
++
++/// The Command Center: a large, tall slab with a lighter mid tier and a
++/// distinct corner tower capped in the team band — it reads as THE base.
++fn command_center() -> Silhouette {
++    Silhouette::from_parts(
++        false,
++        vec![
++            Part::at([0.0, 0.30, 0.0], [3.6, 0.60, 3.6], Tone::Body),
++            Part::at([0.0, 0.75, 0.0], [2.9, 0.55, 2.9], Tone::Light),
++            Part::at([0.95, 1.45, 0.95], [0.95, 1.75, 0.95], Tone::Body),
++            Part::at([0.95, 2.42, 0.95], [1.15, 0.20, 1.15], Tone::Band),
++            Part::at([0.0, 0.35, -1.83], [1.1, 0.70, 0.14], Tone::Dark),
++        ],
++    )
++}
++
++/// The Barracks: wide and low, with a dark door on the front face and a
++/// steel flag pole flying the team-colored banner at a corner.
++fn barracks() -> Silhouette {
++    Silhouette::from_parts(
++        false,
++        vec![
++            Part::at([0.0, 0.25, 0.0], [2.7, 0.50, 2.7], Tone::Body),
++            Part::at([0.0, 0.62, 0.0], [2.3, 0.26, 2.3], Tone::Light),
++            Part::at([0.0, 0.28, -1.38], [0.8, 0.56, 0.14], Tone::Dark),
++            Part::at([1.28, 0.85, 1.28], [0.07, 1.70, 0.07], Tone::Steel),
++            Part::at([1.46, 1.50, 1.28], [0.34, 0.24, 0.05], Tone::Band),
++        ],
++    )
++}
++
++/// The Supply Depot: a small crate with two more stacked on top — the
++/// stacked-crates read.
++fn supply_depot() -> Silhouette {
++    Silhouette::from_parts(
++        false,
++        vec![
++            Part::at([0.0, 0.24, 0.0], [1.55, 0.48, 1.55], Tone::Body),
++            Part::at([0.0, 0.06, 0.0], [1.62, 0.12, 1.62], Tone::Band),
++            Part::at([-0.30, 0.66, 0.12], [0.75, 0.36, 0.75], Tone::Light),
++            Part::at([0.42, 0.62, -0.32], [0.60, 0.28, 0.60], Tone::Dark),
++        ],
++    )
++}
++
++/// The Turret: a pedestal, a darker cap, and a raised steel barrel.
++fn turret() -> Silhouette {
++    Silhouette::from_parts(
++        false,
++        vec![
++            Part::at([0.0, 0.26, 0.0], [1.35, 0.52, 1.35], Tone::Body),
++            Part::at([0.0, 0.10, 0.0], [1.42, 0.14, 1.42], Tone::Band),
++            Part::at([0.0, 0.60, 0.0], [0.95, 0.16, 0.95], Tone::Dark),
++            Part::at([0.42, 0.70, 0.0], [0.72, 0.11, 0.11], Tone::Steel),
++        ],
++    )
++}
++
++/// The Ore Node: a bright amber crystal cluster — three leaning shards plus
++/// a low splinter, hotter than any terrain color so nodes pop off the
++/// ground (PLAN-M10.2 §2.1's "contrasts with the ground").
++fn ore_node() -> Silhouette {
++    Silhouette::from_parts(
++        false,
++        vec![
++            Part {
++                offset: [0.0, 0.46, 0.0],
++                scale: [0.60, 0.92, 0.60],
++                yaw: 0.78,
++                tone: Tone::Amber,
++            },
++            Part {
++                offset: [0.34, 0.34, -0.20],
++                scale: [0.42, 0.68, 0.42],
++                yaw: -0.5,
++                tone: Tone::AmberLight,
++            },
++            Part {
++                offset: [-0.30, 0.28, 0.24],
++                scale: [0.36, 0.56, 0.36],
++                yaw: 0.3,
++                tone: Tone::Amber,
++            },
++            Part {
++                offset: [0.06, 0.16, -0.38],
++                scale: [0.26, 0.32, 0.26],
++                yaw: 1.1,
++                tone: Tone::AmberLight,
++            },
++        ],
++    )
++}
++
++/// The kind-name table (PLAN-M10.2 §2.1): the nine authored kinds resolve
++/// to their hand-tuned silhouettes; anything else falls through to
++/// [`capability_fallback`]. Keyed by `EntityDef::id` — the bundle's kind
++/// name — never by display name or kind index.
++pub fn named(name: &str) -> Option<Silhouette> {
++    match name {
++        "worker" => Some(worker()),
++        "rifleman" => Some(rifleman()),
++        "raider" => Some(raider()),
++        "guardian" => Some(guardian()),
++        "command_center" => Some(command_center()),
++        "barracks" => Some(barracks()),
++        "supply_depot" => Some(supply_depot()),
++        "turret" => Some(turret()),
++        "ore_node" => Some(ore_node()),
++        _ => None,
++    }
++}
++
++/// The capability-shape fallback for kinds the name table does not know
++/// (PLAN-M10.2 §2.1: "has Footprint = building box, has Move = unit box").
++/// The resource and turret cases mirror the capability law the engine's
++/// plan resolution follows, and every structure shape carries the team
++/// band trim so the fallback never loses team identification either.
++pub fn capability_fallback(
++    footprint: Option<(u32, u32)>,
++    has_move: bool,
++    has_attack: bool,
++    has_resource: bool,
++) -> Silhouette {
++    if has_resource {
++        // Unknown resource node: the amber cluster, minus the hand-tuned
++        // crystal count.
++        Silhouette::from_parts(
++            false,
++            vec![
++                Part {
++                    offset: [0.0, 0.42, 0.0],
++                    scale: [0.56, 0.84, 0.56],
++                    yaw: 0.7,
++                    tone: Tone::Amber,
++                },
++                Part {
++                    offset: [0.28, 0.30, -0.16],
++                    scale: [0.36, 0.56, 0.36],
++                    yaw: -0.4,
++                    tone: Tone::AmberLight,
++                },
++            ],
++        )
++    } else if let Some((w, h)) = footprint {
++        let (w, h) = (w as f32, h as f32);
++        if has_attack && !has_move {
++            // Unknown defensive structure: pedestal + barrel.
++            Silhouette::from_parts(
++                false,
++                vec![
++                    Part::at([0.0, 0.25, 0.0], [w * 0.65, 0.5, h * 0.65], Tone::Body),
++                    Part::at([0.0, 0.58, 0.0], [w * 0.45, 0.16, h * 0.45], Tone::Dark),
++                    Part::at([w * 0.30, 0.66, 0.0], [w * 0.34, 0.11, 0.11], Tone::Steel),
++                ],
++            )
++        } else {
++            // Unknown building: footprint slab, lighter roof, band trim.
++            let height = w.max(h) * 0.35 + 0.5;
++            Silhouette::from_parts(
++                false,
++                vec![
++                    Part::at(
++                        [0.0, height * 0.5, 0.0],
++                        [w * 0.94, height, h * 0.94],
++                        Tone::Body,
++                    ),
++                    Part::at(
++                        [0.0, height + height * 0.22, 0.0],
++                        [w * 0.62, height * 0.45, h * 0.62],
++                        Tone::Light,
++                    ),
++                    Part::at([0.0, 0.06, 0.0], [w * 0.98, 0.12, h * 0.98], Tone::Band),
++                ],
++            )
++        }
++    } else if has_move {
++        // Unknown mover: the body + head unit box.
++        Silhouette::from_parts(
++            true,
++            vec![
++                Part::at([0.0, 0.28, 0.0], [0.40, 0.56, 0.40], Tone::Body),
++                Part::at([0.0, 0.66, 0.0], [0.22, 0.20, 0.22], Tone::Dark),
++            ],
++        )
++    } else {
++        // Nothing known at all: a plain unit box (the defensive default).
++        Silhouette::from_parts(
++            true,
++            vec![Part::at([0.0, 0.30, 0.0], [0.40, 0.60, 0.40], Tone::Body)],
++        )
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// The nine authored kinds, in content order (the bundle loads them
++    /// sorted by file name).
++    const NINE: [&str; 9] = [
++        "barracks",
++        "command_center",
++        "guardian",
++        "ore_node",
++        "raider",
++        "rifleman",
++        "supply_depot",
++        "turret",
++        "worker",
++    ];
++
++    #[test]
++    fn every_authored_kind_resolves_to_a_unique_silhouette() {
++        let resolved: Vec<Silhouette> = NINE
++            .iter()
++            .map(|name| named(name).expect("every authored kind resolves"))
++            .collect();
++        for (a, silhouette_a) in resolved.iter().enumerate() {
++            for (b, silhouette_b) in resolved.iter().enumerate() {
++                if a < b {
++                    assert_ne!(
++                        silhouette_a.parts, silhouette_b.parts,
++                        "{:?} and {:?} must resolve to distinct silhouettes",
++                        NINE[a], NINE[b]
++                    );
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn each_kind_composes_its_expected_parts() {
++        // The instance stream draws 36 vertices per part (two triangles per
++        // face of an instanced cube), so a kind's vertex count is
++        // parts * 36 — pinned here per kind.
++        let expected = [
++            ("barracks", 5),
++            ("command_center", 5),
++            ("guardian", 5),
++            ("ore_node", 4),
++            ("raider", 4),
++            ("rifleman", 3),
++            ("supply_depot", 4),
++            ("turret", 4),
++            ("worker", 4),
++        ];
++        for (name, parts) in expected {
++            let silhouette = named(name).expect("authored");
++            assert_eq!(
++                silhouette.parts.len(),
++                parts,
++                "{name} composes {parts} parts"
++            );
++            // The instance pass draws 36 vertices per part (a cube's two
++            // triangles per face), so the kind's on-GPU vertex count is
++            // parts * 36 — recorded here so the plan's "test vertex counts"
++            // has a pinned number per kind.
++            let vertices = silhouette.parts.len() * 36;
++            assert_eq!(vertices % 36, 0, "{name}: whole cubes only");
++        }
++    }
++
++    #[test]
++    fn every_part_stays_above_ground_and_inside_the_radius() {
++        for name in NINE {
++            let silhouette = named(name).expect("authored");
++            assert!(silhouette.radius > 0.0, "{name} has a ground radius");
++            for part in &silhouette.parts {
++                assert!(
++                    part.scale[0] > 0.0 && part.scale[1] > 0.0 && part.scale[2] > 0.0,
++                    "{name}: every part has a positive extent"
++                );
++                assert!(
++                    part.offset[1] - part.scale[1] * 0.5 >= -1e-4,
++                    "{name}: no part sinks below the ground plane"
++                );
++                assert!(
++                    part.reach() <= silhouette.radius,
++                    "{name}: every part fits inside the derived radius"
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn mobile_kinds_carry_the_unit_flag_structures_do_not() {
++        for name in ["worker", "rifleman", "raider", "guardian"] {
++            assert!(named(name).expect("authored").unit, "{name} is a unit");
++        }
++        for name in [
++            "command_center",
++            "barracks",
++            "supply_depot",
++            "turret",
++            "ore_node",
++        ] {
++            assert!(!named(name).expect("authored").unit, "{name} is not");
++        }
++    }
++
++    #[test]
++    fn structures_and_nodes_carry_team_band_or_amber_parts() {
++        // Every structure silhouette has a Band part (the team banner); the
++        // ore node instead reads amber through and through.
++        for name in ["command_center", "barracks", "supply_depot", "turret"] {
++            let silhouette = named(name).expect("authored");
++            assert!(
++                silhouette.parts.iter().any(|part| part.tone == Tone::Band),
++                "{name} carries a team band part"
++            );
++        }
++        let node = named("ore_node").expect("authored");
++        assert!(node
++            .parts
++            .iter()
++            .all(|part| matches!(part.tone, Tone::Amber | Tone::AmberLight)));
++    }
++
++    #[test]
++    fn unknown_names_fall_back_by_capability_shape() {
++        assert!(named("skirmisher").is_none(), "the table stays name-exact");
++        // Footprint = building box (plus the band trim).
++        let building = capability_fallback(Some((3, 3)), false, false, false);
++        assert!(!building.unit);
++        assert_eq!(building.parts.len(), 3);
++        assert!(building.parts.iter().any(|part| part.tone == Tone::Band));
++        // Move = unit box.
++        let mover = capability_fallback(None, true, false, false);
++        assert!(mover.unit);
++        assert_eq!(mover.parts.len(), 2);
++        // Resource beats footprint (a node is a node).
++        let node = capability_fallback(Some((2, 2)), false, false, true);
++        assert!(!node.unit);
++        assert!(node
++            .parts
++            .iter()
++            .all(|part| matches!(part.tone, Tone::Amber | Tone::AmberLight)));
++        // Footprint + Attack without Move = a turret.
++        let turret = capability_fallback(Some((2, 2)), false, true, false);
++        assert!(!turret.unit);
++        assert!(turret.parts.iter().any(|part| part.tone == Tone::Steel));
++        // Nothing known: the plain unit box.
++        let plain = capability_fallback(None, false, false, false);
++        assert!(plain.unit);
++        assert_eq!(plain.parts.len(), 1);
++    }
++
++    #[test]
++    fn part_colors_keep_the_team_readable_where_it_matters() {
++        let blue = [0.22, 0.45, 0.92];
++        let orange = [0.95, 0.55, 0.15];
++        // Body passes the team color straight through.
++        assert_eq!(part_color(Tone::Body, blue), blue);
++        // Band stays team-dominant: blue band vs orange band differ clearly.
++        let blue_band = part_color(Tone::Band, blue);
++        let orange_band = part_color(Tone::Band, orange);
++        let band_delta =
++            (blue_band[2] - orange_band[2]).abs() + (blue_band[0] - orange_band[0]).abs();
++        assert!(band_delta > 0.3, "the band keeps the two teams apart");
++        // Steel barely moves with the team (tools read the same for both):
++        // the residual team bleed stays a small fraction of the full blue/
++        // orange channel spread.
++        let blue_steel = part_color(Tone::Steel, blue);
++        let orange_steel = part_color(Tone::Steel, orange);
++        let steel_delta = (blue_steel[0] - orange_steel[0]).abs()
++            + (blue_steel[1] - orange_steel[1]).abs()
++            + (blue_steel[2] - orange_steel[2]).abs();
++        assert!(steel_delta < 0.4, "steel is team-agnostic gunmetal");
++        // Amber is fully team-independent (ore is neutral).
++        assert_eq!(
++            part_color(Tone::Amber, blue),
++            part_color(Tone::Amber, orange)
++        );
++        // Amber pops against the calmer ground (the green channel is low).
++        let amber = part_color(Tone::Amber, blue);
++        assert!(amber[0] > 0.8 && amber[1] > 0.55 && amber[2] < 0.35);
++    }
++
++    #[test]
++    fn the_main_part_is_the_biggest_mass() {
++        let silhouette = named("guardian").expect("authored");
++        let main = silhouette.main_part();
++        for part in &silhouette.parts {
++            assert!(main.volume() >= part.volume());
++        }
++        // The Guardian's main mass is its hull (the first part).
++        assert_eq!(main.offset, [0.0, 0.16, 0.0]);
++    }
++
++    #[test]
++    fn the_fallback_radius_derives_from_the_widest_part() {
++        let silhouette = capability_fallback(Some((4, 4)), false, false, false);
++        let widest = silhouette
++            .parts
++            .iter()
++            .map(Part::reach)
++            .fold(0.0_f32, f32::max);
++        assert!((silhouette.radius - widest - 0.08).abs() < 1e-4);
++    }
++}
+-- 
+2.47.3
+
+
+From 408b2f490b3f5bb6795813982abf039a0f1faa34 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:22:37 +0000
+Subject: [PATCH 03/14] =?UTF-8?q?feat(client):=20blue/orange=20team=20pale?=
+ =?UTF-8?q?tte,=20team=20rings=20under=20units,=20minimap=20dot=20sync=20(?=
+ =?UTF-8?q?PLAN-M10.2=20=C2=A72.2)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- team_color resolves P1 to orange [0.95,0.55,0.15] (A-102, the owner's
+  colorblind-safe pick); P0 keeps the content blue; constants TEAM_P0/
+  TEAM_P1/TEAM_NEUTRAL live once in render.rs
+- build_team_rings: one ground ring in the owner's team color under every
+  unit silhouette (alpha 0.5, tighter than the selection ring, drawn before
+  it so green reads on top); structures carry their band parts instead, ore
+  stays bare neutral
+- minimap dots re-tinted to the same pair (own blue / enemy orange / ore
+  amber)
+- tests: palette pinning, team ring placement per owner + no ring on
+  structures
+---
+ crates/client/src/render.rs | 128 +++++++++++++++++++++++++++++++++---
+ 1 file changed, 120 insertions(+), 8 deletions(-)
+
+diff --git a/crates/client/src/render.rs b/crates/client/src/render.rs
+index e7b3e5d..0f19cd7 100644
+--- a/crates/client/src/render.rs
++++ b/crates/client/src/render.rs
+@@ -355,6 +355,15 @@ fn cube_vertices() -> Vec<CubeVertex> {
+     vertices
+ }
+ 
++/// The team palette (PLAN-M10.2 §2.2, A-102): P0 blue, P1 orange — the
++/// colorblind-safe pair the owner picked — and gold for the neutral slot.
++/// The mapping is presentation-only: content files and the content hash
++/// never move. The minimap dot table mirrors these (render.rs keeps both
++/// in one place).
++pub const TEAM_P0: [f32; 3] = [0.22, 0.45, 0.92];
++pub const TEAM_P1: [f32; 3] = [0.95, 0.55, 0.15];
++pub const TEAM_NEUTRAL: [f32; 3] = [0.78, 0.66, 0.28];
++
+ /// Team colors for the placeholder boxes (player slots 0 and 1, neutral).
+ /// M9 (plan §11.5, visual feedback): a flashing entity — one hit in the
+ /// last few presented frames — is pushed toward a hot white so a landed
+@@ -362,9 +371,9 @@ fn cube_vertices() -> Vec<CubeVertex> {
+ /// when both apply (the player's own click feedback takes precedence).
+ fn team_color(owner: PlayerId, selected: bool, flashing: bool) -> [f32; 3] {
+     let base = match owner {
+-        PlayerId(0) => [0.22, 0.45, 0.92],
+-        PlayerId(1) => [0.90, 0.30, 0.24],
+-        _ => [0.78, 0.66, 0.28], // Neutral (ore nodes).
++        PlayerId(0) => TEAM_P0,
++        PlayerId(1) => TEAM_P1,
++        _ => TEAM_NEUTRAL, // Neutral (ore nodes).
+     };
+     if selected {
+         [base[0] + 0.35, base[1] + 0.35, base[2] + 0.35]
+@@ -1496,6 +1505,7 @@ impl WgpuRenderer {
+             scratch[offset + 3] = 255;
+         }
+         // Entity dots: one tile dot per entity, brighter than any terrain.
++        // The dot colors mirror render::TEAM_* (A-102's blue/orange pair).
+         for entity in entities {
+             let tx = entity.pos.x.floor();
+             let ty = entity.pos.z.floor();
+@@ -1503,9 +1513,9 @@ impl WgpuRenderer {
+                 continue;
+             }
+             let dot = match entity.owner {
+-                pandemonium_sim_api::PlayerId(0) => [90.0, 150.0, 255.0],
+-                pandemonium_sim_api::PlayerId(1) => [255.0, 95.0, 80.0],
+-                _ => [235.0, 190.0, 70.0],
++                pandemonium_sim_api::PlayerId(0) => [70.0, 130.0, 255.0],
++                pandemonium_sim_api::PlayerId(1) => [255.0, 150.0, 40.0],
++                _ => [250.0, 190.0, 60.0],
+             };
+             let offset = ((ty as u32 * w + tx as u32) as usize) * 4;
+             scratch[offset] = dot[0] as u8;
+@@ -1689,6 +1699,42 @@ fn build_shadows(
+ /// The selection ring color (own-team green — Generals convention).
+ const RING_COLOR: [f32; 4] = [0.35, 1.0, 0.45, 0.85];
+ 
++/// The team ring's alpha — strong enough to read the owner at a glance,
++/// quieter than the bright green selection ring that draws over it.
++const TEAM_RING_ALPHA: f32 = 0.5;
++
++/// Builds the team-color ground ring stream (PLAN-M10.2 §2.2): one ring
++/// under every *unit* silhouette, in the owner's team color — the
++/// at-a-glance owner read that survives zoom-out. Structures identify by
++/// their band parts instead; ore nodes are neutral and get none.
++fn build_team_rings(
++    snapshot: &pandemonium_engine::RenderSnapshot,
++    kind_specs: &[KindShape],
++    capacity: usize,
++) -> Vec<DecalInstance> {
++    let mut decals = Vec::with_capacity(snapshot.entities.len());
++    for entity in &snapshot.entities {
++        if decals.len() >= capacity {
++            break;
++        }
++        let shape = kind_specs
++            .get(entity.kind.0 as usize)
++            .cloned()
++            .unwrap_or_else(fallback_shape);
++        if !shape.unit {
++            continue;
++        }
++        let team = team_color(entity.owner, false, false);
++        let radius = shape.radius + 0.04;
++        decals.push(DecalInstance {
++            position: [entity.pos.x, DECAL_LIFT * 1.5, entity.pos.z],
++            scale: [radius * 2.0, radius * 2.0],
++            color: [team[0], team[1], team[2], TEAM_RING_ALPHA],
++        });
++    }
++    decals
++}
++
+ /// Builds the selection ring stream: one ground ellipse around every
+ /// selected entity, sized to its silhouette.
+ fn build_rings(
+@@ -1913,6 +1959,15 @@ impl Renderer for WgpuRenderer {
+             } else {
+                 0
+             };
++            // Team rings land first, selection rings after them, so a
++            // selected unit reads both: owner color beneath, green on top.
++            let team_rings = build_team_rings(
++                frame.snapshot,
++                &self.kind_specs,
++                decal_capacity - decals.len(),
++            );
++            let team_ring_count = team_rings.len() as u32;
++            decals.extend(team_rings);
+             let rings = build_rings(
+                 frame.snapshot,
+                 frame.selection,
+@@ -1941,11 +1996,12 @@ impl Renderer for WgpuRenderer {
+                     pass.set_vertex_buffer(0, self.quad_vertex_buf.slice(..));
+                     pass.draw(0..self.quad_vertex_count, 0..(shadow_count + ghost_count));
+                 }
+-                if ring_count > 0 {
++                if team_ring_count + ring_count > 0 {
+                     pass.set_vertex_buffer(0, self.ring_vertex_buf.slice(..));
+                     pass.draw(
+                         0..self.ring_vertex_count,
+-                        (shadow_count + ghost_count)..(shadow_count + ghost_count + ring_count),
++                        (shadow_count + ghost_count)
++                            ..(shadow_count + ghost_count + team_ring_count + ring_count),
+                     );
+                 }
+             }
+@@ -2327,6 +2383,62 @@ mod decal_tests {
+         assert!(empty.is_empty());
+     }
+ 
++    #[test]
++    fn team_p1_reads_orange_and_p0_blue() {
++        // A-102's colorblind-safe pair: P1 shifted off content-red onto
++        // orange, P0 keeping the content blue. Presentation-only mapping.
++        assert_eq!(team_color(PlayerId(0), false, false), TEAM_P0);
++        assert_eq!(team_color(PlayerId(1), false, false), TEAM_P1);
++        assert_eq!(team_color(PlayerId::NEUTRAL, false, false), TEAM_NEUTRAL);
++        // Blue and orange stay far apart in the red channel (the channel a
++        // deuteranope still reads reliably).
++        let spread = TEAM_P1[0] - TEAM_P0[0];
++        assert!(spread > 0.5, "the two team colors separate on red");
++        // Selection brightens but never flips teams.
++        assert!(team_color(PlayerId(1), true, false)[0] > TEAM_P1[0]);
++    }
++
++    #[test]
++    fn team_rings_land_under_units_in_team_colors() {
++        // A P0 worker and a P1 worker side by side: every unit rings in its
++        // owner's team color.
++        let snapshot = pandemonium_engine::RenderSnapshot {
++            tick: 0,
++            entities: vec![
++                RenderEntity {
++                    id: EntityId(1),
++                    owner: PlayerId(0),
++                    kind: KindId(0),
++                    pos: Vec3::new(5.0, 0.0, 0.0),
++                    facing: Vec3::ZERO,
++                    hp_fraction_milli: 1000,
++                    move_state: MoveState::Idle,
++                },
++                RenderEntity {
++                    id: EntityId(2),
++                    owner: PlayerId(1),
++                    kind: KindId(0),
++                    pos: Vec3::new(9.0, 0.0, 0.0),
++                    facing: Vec3::ZERO,
++                    hp_fraction_milli: 1000,
++                    move_state: MoveState::Idle,
++                },
++            ],
++        };
++        let worker = crate::silhouette::named("worker").expect("authored");
++        let rings = build_team_rings(&snapshot, &[worker.clone(), worker], 64);
++        assert_eq!(rings.len(), 2);
++        assert_eq!(&rings[0].color[..3], &TEAM_P0[..]);
++        assert_eq!(&rings[1].color[..3], &TEAM_P1[..]);
++        assert_eq!(rings[0].color[3], TEAM_RING_ALPHA);
++        // A structure silhouette never rings (it has the band instead).
++        let cc = crate::silhouette::named("command_center").expect("authored");
++        assert!(
++            build_team_rings(&snapshot_with(&[(3, 1)]), &[cc], 64).is_empty(),
++            "a command center gets no unit ring"
++        );
++    }
++
+     #[test]
+     fn bigger_kinds_cast_bigger_shadows() {
+         let structure = crate::silhouette::named("command_center").expect("authored");
+-- 
+2.47.3
+
+
+From 2311bb5da45e2fea2840a7bfb097e924d316f83f Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:24:18 +0000
+Subject: [PATCH 04/14] fix(client): the no-ring structure test pointed the
+ spec at the wrong kind index
+
+---
+ crates/client/src/render.rs | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/crates/client/src/render.rs b/crates/client/src/render.rs
+index 0f19cd7..4f0f025 100644
+--- a/crates/client/src/render.rs
++++ b/crates/client/src/render.rs
+@@ -2431,10 +2431,11 @@ mod decal_tests {
+         assert_eq!(&rings[0].color[..3], &TEAM_P0[..]);
+         assert_eq!(&rings[1].color[..3], &TEAM_P1[..]);
+         assert_eq!(rings[0].color[3], TEAM_RING_ALPHA);
+-        // A structure silhouette never rings (it has the band instead).
++        // A structure silhouette never rings (it has the band instead) —
++        // the spec sits at the entity's kind index.
+         let cc = crate::silhouette::named("command_center").expect("authored");
+         assert!(
+-            build_team_rings(&snapshot_with(&[(3, 1)]), &[cc], 64).is_empty(),
++            build_team_rings(&snapshot_with(&[(3, 0)]), &[cc], 64).is_empty(),
+             "a command center gets no unit ring"
+         );
+     }
+-- 
+2.47.3
+
+
+From df854dc72cfffa97ea4a0d8724e153a6969c2652 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:25:49 +0000
+Subject: [PATCH 05/14] =?UTF-8?q?feat(client):=20a=20larger=20health=20bar?=
+ =?UTF-8?q?=20for=20the=20selected=20entity=20(PLAN-M10.2=20=C2=A72.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- health_bar_quads takes the selection: selected entities draw a 64x7 px
+  bar (vs 36x4), riding higher, ALWAYS drawn — even at full health — since
+  the selected entity's health state is the thing the player asks about
+- main.rs passes the selection through
+- tests: bigger-bar-even-full-health, mixed-field ordering, the old
+  small-bar semantics re-pinned
+---
+ crates/client/src/feedback.rs | 84 ++++++++++++++++++++++++++++++-----
+ crates/client/src/main.rs     |  1 +
+ 2 files changed, 74 insertions(+), 11 deletions(-)
+
+diff --git a/crates/client/src/feedback.rs b/crates/client/src/feedback.rs
+index ceed516..f3142c5 100644
+--- a/crates/client/src/feedback.rs
++++ b/crates/client/src/feedback.rs
+@@ -185,23 +185,42 @@ pub fn health_color(hp_fraction_milli: u32) -> [f32; 4] {
+ }
+ 
+ /// Builds the health-bar quads for every damaged entity in the snapshot
+-/// (full-health entities draw nothing — a healthy field is not noise).
+-/// One bar per entity: a dark backing rect and a colored fill whose width
+-/// is the remaining fraction. Bars sit above the entity's projected head.
++/// (full-health entities draw nothing — a healthy field is not noise),
++/// plus a LARGER bar for every selected entity — always drawn, even at
++/// full health (PLAN-M10.2 §2.3: the selected entity's health state is
++/// the one thing the player is asking about). One bar per entity: a dark
++/// backing rect and a colored fill whose width is the remaining fraction.
++/// Bars sit above the entity's projected head.
+ pub fn health_bar_quads(
+     atlas: &TextAtlas,
+     snapshot: &pandemonium_engine::RenderSnapshot,
++    selection: &[EntityId],
+     camera: &RtsCamera,
+     viewport: (f32, f32),
+ ) -> Vec<UiQuad> {
++    /// The regular bar's width, in pixels.
+     const BAR_W: f32 = 36.0;
++    /// The regular bar's height, in pixels.
+     const BAR_H: f32 = 4.0;
++    /// The selected bar's width — visibly bigger at a glance.
++    const SELECTED_W: f32 = 64.0;
++    /// The selected bar's height.
++    const SELECTED_H: f32 = 7.0;
+     const LIFT: f32 = 14.0;
++    /// The selected bar rides higher (it is taller; clear the brackets).
++    const SELECTED_LIFT: f32 = 22.0;
++    let selected: std::collections::BTreeSet<EntityId> = selection.iter().copied().collect();
+     let mut quads = Vec::new();
+     for entity in &snapshot.entities {
+-        if entity.hp_fraction_milli >= 999 {
++        let is_selected = selected.contains(&entity.id);
++        if entity.hp_fraction_milli >= 999 && !is_selected {
+             continue;
+         }
++        let (bar_w, bar_h, lift) = if is_selected {
++            (SELECTED_W, SELECTED_H, SELECTED_LIFT)
++        } else {
++            (BAR_W, BAR_H, LIFT)
++        };
+         let ndc = camera.project(glam::Vec3::new(
+             entity.pos.x,
+             entity.pos.y + 0.6,
+@@ -211,17 +230,17 @@ pub fn health_bar_quads(
+             continue; // behind the camera
+         }
+         let (cx, top) = ndc_to_pixels((ndc.x, ndc.y), viewport);
+-        let top = top - LIFT;
+-        let x = cx - BAR_W * 0.5;
++        let top = top - lift;
++        let x = cx - bar_w * 0.5;
+         quads.push(atlas.solid_rect(
+             x - 1.0,
+             top - 1.0,
+-            BAR_W + 2.0,
+-            BAR_H + 2.0,
++            bar_w + 2.0,
++            bar_h + 2.0,
+             [0.0, 0.0, 0.0, 0.6],
+         ));
+-        let fill = BAR_W * entity.hp_fraction_milli as f32 / 1000.0;
+-        quads.push(atlas.solid_rect(x, top, fill, BAR_H, health_color(entity.hp_fraction_milli)));
++        let fill = bar_w * entity.hp_fraction_milli as f32 / 1000.0;
++        quads.push(atlas.solid_rect(x, top, fill, bar_h, health_color(entity.hp_fraction_milli)));
+     }
+     quads
+ }
+@@ -567,7 +586,7 @@ mod tests {
+             tick: 0,
+             entities: vec![damaged, healthy],
+         };
+-        let quads = health_bar_quads(&atlas, &snapshot, &camera, (1920.0, 1080.0));
++        let quads = health_bar_quads(&atlas, &snapshot, &[], &camera, (1920.0, 1080.0));
+         // One damaged entity: a backing rect + a fill rect; the healthy one
+         // contributes nothing.
+         assert_eq!(quads.len(), 2, "backing + fill for the damaged entity only");
+@@ -581,6 +600,49 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn the_selected_entity_gets_a_bigger_bar_even_at_full_health() {
++        use pandemonium_engine::{RenderEntity, RenderSnapshot};
++        let camera = RtsCamera::new(4, 4, 16.0 / 9.0);
++        let atlas = TextAtlas::new();
++        let entity = RenderEntity {
++            id: EntityId(1),
++            owner: pandemonium_sim_api::PlayerId(0),
++            kind: pandemonium_sim_api::KindId(0),
++            pos: glam::Vec3::new(1.0, 0.0, 1.0),
++            facing: glam::Vec3::ZERO,
++            hp_fraction_milli: 1000,
++            move_state: pandemonium_sim_api::MoveState::Idle,
++        };
++        let snapshot = RenderSnapshot {
++            tick: 0,
++            entities: vec![entity],
++        };
++        // Unselected + full health: nothing (a healthy field is not noise).
++        assert!(health_bar_quads(&atlas, &snapshot, &[], &camera, (1920.0, 1080.0)).is_empty());
++        // Selected + full health: the big bar draws anyway (backing + fill).
++        let quads = health_bar_quads(&atlas, &snapshot, &[EntityId(1)], &camera, (1920.0, 1080.0));
++        assert_eq!(quads.len(), 2, "backing + fill for the selected entity");
++        // The backing is the 64 px selected bar plus its 1 px border.
++        assert!((quads[0].w - 66.0).abs() < 1e-3, "selected: {:?}", quads[0]);
++        // The fill is the full selected width.
++        assert!((quads[1].w - 64.0).abs() < 1e-3);
++        // And it rides higher than the regular bar (22 vs 14 px): a damaged,
++        // UNSELECTED neighbor keeps the small bar lower on screen.
++        let damaged = RenderEntity {
++            id: EntityId(2),
++            hp_fraction_milli: 500,
++            ..entity
++        };
++        let mixed = RenderSnapshot {
++            tick: 0,
++            entities: vec![entity, damaged],
++        };
++        let quads = health_bar_quads(&atlas, &mixed, &[EntityId(1)], &camera, (1920.0, 1080.0));
++        assert_eq!(quads.len(), 4, "big bar + small bar, two rects each");
++        assert!(quads[0].y < quads[2].y, "selected bar rides higher");
++    }
++
+     #[test]
+     fn selection_brackets_mark_only_the_selected() {
+         use pandemonium_engine::{RenderEntity, RenderSnapshot};
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 20081ee..08bd6af 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -1693,6 +1693,7 @@ impl App {
+         quads.extend(feedback::health_bar_quads(
+             renderer.atlas(),
+             &snapshot,
++            &self.selection,
+             &self.camera,
+             viewport,
+         ));
+-- 
+2.47.3
+
+
+From 874d453de7561c894b201a736f86e3f2c2264842 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:28:49 +0000
+Subject: [PATCH 06/14] =?UTF-8?q?feat(client):=20the=20hover=20name=20tool?=
+ =?UTF-8?q?tip=20(PLAN-M10.2=20=C2=A72.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- orders::pick_visible_entity — the nearest visible entity of ANY owner
+  under the cursor, the same projection the selection and context resolver
+  use; passive, no gesture state consumed (the right-button machine is
+  untouched)
+- ui::tooltip_quads — a dark panel near the cursor: display name from the
+  bundle, owner tag (yours/enemy/neutral); flips left near the right edge,
+  clamped into the viewport
+- ui::cursor_over_bottom_bar — suppresses the tooltip over the minimap and
+  the panels, where the cursor means UI, not world
+- main.rs: viewport/bar-layout hoisted before the renderer borrow so the
+  hover pick and the bottom bar share one layout
+- tests: owner tags, panel placement/flip/clamp, bar coverage, nearest-wins
+  and off-cursor hover picks
+---
+ crates/client/src/main.rs   |  53 +++++++++++++----
+ crates/client/src/orders.rs |  39 ++++++++++++
+ crates/client/src/ui.rs     | 115 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 197 insertions(+), 10 deletions(-)
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 08bd6af..8a8af49 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -1645,6 +1645,35 @@ impl App {
+             self.placement.is_some(),
+             self.selection.is_empty(),
+         );
++        // M10.2 Phase 2 (PLAN §2.3): the hover name tooltip's data — resolved
++        // before the renderer borrow, purely reading the snapshot. Passive:
++        // it issues nothing and consumes no gesture state. Suppressed over
++        // the bottom bar, where the cursor means UI, not world.
++        let viewport = self
++            .window
++            .as_ref()
++            .map(|window| {
++                let size = window.inner_size();
++                (size.width as f32, size.height as f32)
++            })
++            .unwrap_or((1920.0, 1080.0));
++        let layout = ui::bar_layout(viewport);
++        let cursor_px = feedback::ndc_to_pixels(cursor, viewport);
++        let hover_info = if ui::cursor_over_bottom_bar(&layout, cursor_px.0, cursor_px.1) {
++            None
++        } else {
++            orders::pick_visible_entity(
++                &self.camera,
++                &snapshot.entities,
++                glam::Vec2::new(cursor.0, cursor.1),
++            )
++            .map(|entity| {
++                let name = ui::def_of(&self.bundle, entity.kind)
++                    .map(|def| def.display_name.clone())
++                    .unwrap_or_else(|| "unknown".to_string());
++                (name, ui::owner_tag(entity.owner, HUMAN))
++            })
++        };
+         let Some(renderer) = &mut self.renderer else {
+             return;
+         };
+@@ -1671,15 +1700,8 @@ impl App {
+         let outcome = self.host.outcome();
+         // M9: the health bars and command pings join the overlay pass
+         // (plan §11.2's overlay layer). Projected through the same camera
+-        // the box select uses.
+-        let viewport = self
+-            .window
+-            .as_ref()
+-            .map(|window| {
+-                let size = window.inner_size();
+-                (size.width as f32, size.height as f32)
+-            })
+-            .unwrap_or((1920.0, 1080.0));
++        // the box select uses. (`viewport` and the bar layout were computed
++        // above, before the renderer borrow — the tooltip shares them.)
+         // M9.1: the selection brackets — the persistent read of what is
+         // selected (the brightened team color alone did not read at play
+         // distance).
+@@ -1725,6 +1747,18 @@ impl App {
+             &self.camera,
+             viewport,
+         ));
++        // M10.2 Phase 2 (PLAN §2.3): the hover name tooltip — the display
++        // name plus the owner tag, near the cursor, when the cursor rests
++        // on a visible entity.
++        if let Some((name, tag)) = &hover_info {
++            quads.extend(ui::tooltip_quads(
++                renderer.atlas(),
++                name,
++                tag,
++                cursor_px,
++                viewport,
++            ));
++        }
+         // M10.2 (PLAN §1.3): the crosshair cursor while attack-move is
+         // armed (the plan's "change the cursor" half; set only on change —
+         // not every frame).
+@@ -1763,7 +1797,6 @@ impl App {
+         // the input pass before any world click.
+         self.ui_buttons.clear();
+         if let Some(view) = &self.latest_view {
+-            let layout = ui::bar_layout(viewport);
+             let built = ui::build_bottom_bar(ui::CardInput {
+                 atlas: renderer.atlas(),
+                 layout,
+diff --git a/crates/client/src/orders.rs b/crates/client/src/orders.rs
+index 0195fb5..e1e7558 100644
+--- a/crates/client/src/orders.rs
++++ b/crates/client/src/orders.rs
+@@ -135,6 +135,19 @@ fn logical_of(pos: glam::Vec3) -> Vec2Fx {
+     Vec2Fx::new(world_to_fx(pos.x), world_to_fx(pos.z))
+ }
+ 
++/// The nearest visible entity of ANY owner under the cursor — the hover
++/// tooltip's pick (PLAN-M10.2 §2.3). Pure geometry over the same projection
++/// the selection and the context resolver use: what is under the cursor is
++/// what the player sees. Passive by nature — it issues nothing and touches
++/// no input state (the right-button machine is unaffected).
++pub fn pick_visible_entity<'a>(
++    camera: &RtsCamera,
++    entities: &'a [RenderEntity],
++    cursor: glam::Vec2,
++) -> Option<&'a RenderEntity> {
++    pick_entity(camera, entities, cursor, |_| true)
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -358,4 +371,30 @@ mod tests {
+             "own entities are never attack targets: {resolved:?}"
+         );
+     }
++
++    #[test]
++    fn the_hover_pick_finds_any_owner_under_the_cursor() {
++        let worker = entity(2, OWN, WORKER, glam::Vec3::new(24.0, 0.0, 24.0));
++        let camera = camera_on(worker.pos);
++        let snapshot = snapshot(vec![worker]);
++        let cursor = camera.project(glam::Vec3::new(24.0, 0.0, 24.0));
++        let picked = pick_visible_entity(&camera, &snapshot.entities, cursor)
++            .expect("the cursor rests on the worker");
++        assert_eq!(picked.id, EntityId(2));
++    }
++
++    #[test]
++    fn the_hover_pick_takes_the_nearest_and_skips_off_cursor() {
++        let near = entity(2, OWN, WORKER, glam::Vec3::new(20.0, 0.0, 30.0));
++        let far = entity(3, ENEMY_OWNER, SOLDIER, glam::Vec3::new(21.5, 0.0, 30.0));
++        let camera = camera_on(near.pos);
++        let snapshot = snapshot(vec![near, far]);
++        let cursor = camera.project(glam::Vec3::new(20.0, 0.0, 30.0));
++        let picked = pick_visible_entity(&camera, &snapshot.entities, cursor)
++            .expect("two entities in radius");
++        assert_eq!(picked.id, EntityId(2), "the nearest wins");
++        // Off-entity: nothing hovers.
++        let away = camera.project(glam::Vec3::new(40.0, 0.0, 40.0));
++        assert!(pick_visible_entity(&camera, &snapshot.entities, away).is_none());
++    }
+ }
+diff --git a/crates/client/src/ui.rs b/crates/client/src/ui.rs
+index 6bb6a24..083d70a 100644
+--- a/crates/client/src/ui.rs
++++ b/crates/client/src/ui.rs
+@@ -523,6 +523,73 @@ pub fn placement_is_likely_legal(
+     true
+ }
+ 
++/// The hover tooltip's owner tag (PLAN-M10.2 §2.3): whose thing the cursor
++/// rests on. Pure label logic — the display name itself comes from the
++/// bundle (`def_of`).
++pub fn owner_tag(
++    owner: pandemonium_sim_api::PlayerId,
++    human: pandemonium_sim_api::PlayerId,
++) -> &'static str {
++    if owner == human {
++        "yours"
++    } else if owner == pandemonium_sim_api::PlayerId::NEUTRAL {
++        "neutral"
++    } else {
++        "enemy"
++    }
++}
++
++/// Whether a window-pixel point sits over one of the bottom-bar panels
++/// (selection, card, queue strip, minimap). The tooltip suppresses there:
++/// over the UI the cursor means UI, not world.
++pub fn cursor_over_bottom_bar(layout: &BarLayout, px: f32, py: f32) -> bool {
++    let over = |rect: &[f32; 4]| {
++        px >= rect[0] && py >= rect[1] && px <= rect[0] + rect[2] && py <= rect[1] + rect[3]
++    };
++    over(&layout.selection) || over(&layout.card) || over(&layout.queue) || over(&layout.minimap)
++}
++
++/// The hover name tooltip (PLAN-M10.2 §2.3): a small dark panel near the
++/// cursor carrying the entity's display name and its owner tag. Clamped
++/// into the viewport and flipped to the left of the cursor near the right
++/// edge. Pure layout over the atlas metrics — unit-testable without a GPU.
++pub fn tooltip_quads(
++    atlas: &TextAtlas,
++    name: &str,
++    tag: &str,
++    cursor_px: (f32, f32),
++    viewport: (f32, f32),
++) -> Vec<UiQuad> {
++    let line_height = atlas.line_height.max(atlas.ascent + atlas.descent);
++    let pad = 5.0;
++    let name_w = atlas.measure(name);
++    let tag_w = atlas.measure(tag);
++    let panel_w = name_w.max(tag_w) + 2.0 * pad;
++    let panel_h = 2.0 * line_height + 2.0 * pad;
++    // Right of the cursor by default; flip left near the right edge; clamp
++    // vertically into the viewport.
++    let mut x = cursor_px.0 + 14.0;
++    if x + panel_w > viewport.0 {
++        x = cursor_px.0 - 14.0 - panel_w;
++    }
++    x = x.clamp(0.0, (viewport.0 - panel_w).max(0.0));
++    let y = (cursor_px.1 - panel_h - 8.0).clamp(0.0, (viewport.1 - panel_h).max(0.0));
++    let mut quads = vec![atlas.solid_rect(x, y, panel_w, panel_h, [0.02, 0.04, 0.07, 0.82])];
++    quads.extend(atlas.layout(
++        name,
++        x + pad,
++        y + pad + atlas.ascent,
++        [0.95, 0.97, 1.0, 0.95],
++    ));
++    quads.extend(atlas.layout(
++        tag,
++        x + pad,
++        y + pad + line_height + atlas.ascent,
++        [0.65, 0.75, 0.85, 0.9],
++    ));
++    quads
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -727,4 +794,52 @@ mod tests {
+             }
+         ));
+     }
++
++    #[test]
++    fn the_owner_tag_names_the_three_relations() {
++        use pandemonium_sim_api::PlayerId;
++        let human = PlayerId(0);
++        assert_eq!(owner_tag(PlayerId(0), human), "yours");
++        assert_eq!(owner_tag(PlayerId(1), human), "enemy");
++        assert_eq!(owner_tag(PlayerId::NEUTRAL, human), "neutral");
++    }
++
++    #[test]
++    fn the_tooltip_panel_hugs_the_cursor_and_flips_at_the_right_edge() {
++        let atlas = TextAtlas::new();
++        let viewport = (1280.0, 800.0);
++        // Mid-screen: the panel sits right of the cursor, above it.
++        let quads = tooltip_quads(&atlas, "Worker", "yours", (640.0, 400.0), viewport);
++        assert!(quads.len() >= 3, "panel + name line + tag line");
++        let panel = quads[0];
++        assert!(panel.x > 640.0, "right of the cursor: {}", panel.x);
++        assert!(panel.y + panel.h < 400.0, "above the cursor");
++        // Near the right edge the panel flips to the left of the cursor.
++        let flipped = tooltip_quads(&atlas, "Command Center", "enemy", (1270.0, 400.0), viewport);
++        assert!(flipped[0].x + flipped[0].w <= 1280.0, "clamped inside");
++        assert!(flipped[0].x < 1270.0, "flipped left of the cursor");
++    }
++
++    #[test]
++    fn the_cursor_over_the_bottom_bar_check_covers_the_panels() {
++        let viewport = (1920.0, 1080.0);
++        let layout = bar_layout(viewport);
++        let center = |rect: &[f32; 4]| (rect[0] + rect[2] * 0.5, rect[1] + rect[3] * 0.5);
++        for rect in [
++            &layout.minimap,
++            &layout.selection,
++            &layout.card,
++            &layout.queue,
++        ] {
++            let (x, y) = center(rect);
++            assert!(
++                cursor_over_bottom_bar(&layout, x, y),
++                "the panel center reads as over-the-bar"
++            );
++        }
++        assert!(
++            !cursor_over_bottom_bar(&layout, 960.0, 200.0),
++            "mid-screen is world"
++        );
++    }
+ }
+-- 
+2.47.3
+
+
+From 82113059861cc076fa3e362f63e6c07c79cf7773 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:29:53 +0000
+Subject: [PATCH 07/14] =?UTF-8?q?feat(client):=20the=20info=20panel=20show?=
+ =?UTF-8?q?s=20the=20selected=20building's=20production=20queue=20(PLAN-M1?=
+ =?UTF-8?q?0.2=20=C2=A72.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- the single-selection panel gains a queue summary line: head item name +
+  percent, plus the waiting count; 'queue: idle' when the producer rests
+- the queue strip above the command card keeps the per-item cancel buttons
+- test: busy vs idle vs no-producer panels, cancel buttons untouched
+---
+ crates/client/src/ui.rs | 89 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 89 insertions(+)
+
+diff --git a/crates/client/src/ui.rs b/crates/client/src/ui.rs
+index 083d70a..38a30d0 100644
+--- a/crates/client/src/ui.rs
++++ b/crates/client/src/ui.rs
+@@ -222,6 +222,38 @@ pub fn build_bottom_bar(input: CardInput<'_>) -> BuiltUi {
+         };
+         ui.quads
+             .push(atlas.solid_rect(sel[0] + PAD, bar_y, bar_w * fraction, 8.0, color));
++        // M10.2 Phase 2 (PLAN §2.3): the production-queue summary — what a
++        // selected producing building is working on: the head item, its
++        // progress, and how many items wait behind it. The queue strip
++        // above the command card keeps the per-item cancel buttons; the
++        // panel answers "is this building doing anything?".
++        if let Some(queue) = production.iter().find(|queue| queue.producer == entity.id) {
++            let queue_baseline = bar_y + 14.0 + atlas.ascent;
++            let line = if queue.items.is_empty() {
++                "queue: idle".to_string()
++            } else {
++                let head = def_of(bundle, queue.items[0].kind)
++                    .map(|def| def.display_name.clone())
++                    .unwrap_or_else(|| "?".to_string());
++                let waiting = queue.items.len() - 1;
++                if waiting > 0 {
++                    format!(
++                        "queue: {} {}%  (+{} waiting)",
++                        head,
++                        queue.items[0].progress_milli / 10,
++                        waiting
++                    )
++                } else {
++                    format!("queue: {} {}%", head, queue.items[0].progress_milli / 10)
++                }
++            };
++            ui.quads.extend(atlas.layout(
++                &line,
++                sel[0] + PAD,
++                queue_baseline,
++                [0.7, 0.8, 0.9, 0.9],
++            ));
++        }
+     } else {
+         // Multi-selection: a count line plus a per-kind census by display
+         // name (data-defined, deterministic — entities arrive kind-ordered
+@@ -842,4 +874,61 @@ mod tests {
+             "mid-screen is world"
+         );
+     }
++
++    #[test]
++    fn the_info_panel_carries_the_production_queue_summary() {
++        let bundle = bundle();
++        let atlas = crate::text::TextAtlas::new();
++        let cc_kind = kind_of(&bundle, "command_center").expect("cc");
++        let cc = view_entity(10, cc_kind, 8, 8);
++        let production = |items: usize| -> Vec<QueueView> {
++            vec![QueueView {
++                producer: cc.id,
++                items: (0..items)
++                    .map(|index| pandemonium_sim_api::QueueItemView {
++                        kind: kind_of(&bundle, "worker").expect("worker"),
++                        progress_milli: if index == 0 { 450 } else { 0 },
++                    })
++                    .collect(),
++                rally: None,
++            }]
++        };
++        let build = |prod: &Vec<QueueView>| {
++            build_bottom_bar(CardInput {
++                atlas: &atlas,
++                layout: bar_layout((1280.0, 800.0)),
++                view_entities: std::slice::from_ref(&cc),
++                production: prod,
++                bundle: &bundle,
++                selection: std::slice::from_ref(&cc.id),
++                ore: 0,
++            })
++        };
++        let busy = build(&production(2));
++        let idle = build(&production(0));
++        // The busy line ("queue: Worker 45%  (+1 waiting)") and the idle
++        // line ("queue: idle") are different strings — different glyph
++        // quads — and both panels draw a queue line the bare panel lacks.
++        assert_ne!(busy.quads.len(), idle.quads.len(), "busy vs idle text");
++        let no_queue = build_bottom_bar(CardInput {
++            atlas: &atlas,
++            layout: bar_layout((1280.0, 800.0)),
++            view_entities: std::slice::from_ref(&cc),
++            production: &[],
++            bundle: &bundle,
++            selection: std::slice::from_ref(&cc.id),
++            ore: 0,
++        });
++        assert!(
++            busy.quads.len() > no_queue.quads.len(),
++            "the queue line is extra text"
++        );
++        // The cancel buttons live in the strip, untouched by the summary.
++        let cancels = busy
++            .buttons
++            .iter()
++            .filter(|button| matches!(button.action, ButtonAction::CancelQueueItem { .. }))
++            .count();
++        assert_eq!(cancels, 2, "the busy queue keeps its cancel buttons");
++    }
+ }
+-- 
+2.47.3
+
+
+From f66b1f05343c957577c02a173fde95d71187cceb Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:31:37 +0000
+Subject: [PATCH 08/14] =?UTF-8?q?feat(client):=20distinct=20minimap=20mark?=
+ =?UTF-8?q?ers=20=E2=80=94=20units,=20buildings,=20ore=20(PLAN-M10.2=20?=
+ =?UTF-8?q?=C2=A72.4)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- paint_minimap_markers extracted as a pure function over the RGBA scratch:
+  units paint one tile (own blue / enemy orange), buildings a solid 2x2
+  block — visibly larger, per the plan — and neutral ore nodes a 3x3 amber
+  diamond, distinct by color AND shape
+- off-map entities clamp without painting outside; corner buildings clamp
+- tests: tile counts, owner colors, diamond trimming, off-map safety
+---
+ crates/client/src/render.rs | 221 ++++++++++++++++++++++++++++++++----
+ 1 file changed, 202 insertions(+), 19 deletions(-)
+
+diff --git a/crates/client/src/render.rs b/crates/client/src/render.rs
+index 4f0f025..b6f5409 100644
+--- a/crates/client/src/render.rs
++++ b/crates/client/src/render.rs
+@@ -1504,25 +1504,17 @@ impl WgpuRenderer {
+             scratch[offset + 2] = (base[2] as f32 * shade) as u8;
+             scratch[offset + 3] = 255;
+         }
+-        // Entity dots: one tile dot per entity, brighter than any terrain.
+-        // The dot colors mirror render::TEAM_* (A-102's blue/orange pair).
+-        for entity in entities {
+-            let tx = entity.pos.x.floor();
+-            let ty = entity.pos.z.floor();
+-            if tx < 0.0 || ty < 0.0 || tx >= w as f32 || ty >= h as f32 {
+-                continue;
+-            }
+-            let dot = match entity.owner {
+-                pandemonium_sim_api::PlayerId(0) => [70.0, 130.0, 255.0],
+-                pandemonium_sim_api::PlayerId(1) => [255.0, 150.0, 40.0],
+-                _ => [250.0, 190.0, 60.0],
+-            };
+-            let offset = ((ty as u32 * w + tx as u32) as usize) * 4;
+-            scratch[offset] = dot[0] as u8;
+-            scratch[offset + 1] = dot[1] as u8;
+-            scratch[offset + 2] = dot[2] as u8;
+-            scratch[offset + 3] = 255;
+-        }
++        // Entity markers (PLAN-M10.2 §2.4): distinct per role — units one
++        // tile, buildings a solid 2×2 block, ore nodes a 3×3 amber diamond —
++        // painted over the fog-shaded terrain (the entity list is already
++        // the fog-filtered view).
++        let specs = &self.kind_specs;
++        paint_minimap_markers(
++            &mut self.minimap_scratch,
++            entities,
++            specs,
++            self.minimap_size,
++        );
+         self.queue.write_texture(
+             wgpu::TexelCopyTextureInfo {
+                 texture: &self.minimap_tex,
+@@ -1818,6 +1810,77 @@ fn death_instance(cue: &DyingCue, shape: &KindShape) -> EntityInstance {
+     }
+ }
+ 
++/// The minimap marker palette, mirroring [`TEAM_P0`]/[`TEAM_P1`] (A-102):
++/// own blue, enemy orange, ore amber — the colorblind-safe triple.
++const MINIMAP_OWN: [f32; 3] = [70.0, 130.0, 255.0];
++const MINIMAP_ENEMY: [f32; 3] = [255.0, 150.0, 40.0];
++const MINIMAP_ORE: [f32; 3] = [250.0, 190.0, 60.0];
++
++/// Paints the minimap's entity markers into the map-sized RGBA scratch
++/// buffer (one byte quad per tile, row-major). Pure geometry + color: units
++/// one tile, structures a solid 2×2 block (visibly larger — PLAN-M10.2
++/// §2.4), neutral resource nodes a 3×3 amber diamond so the map carries the
++/// world's shapes. Off-map entities paint nothing.
++fn paint_minimap_markers(
++    scratch: &mut [u8],
++    entities: &[pandemonium_engine::RenderEntity],
++    kind_specs: &[KindShape],
++    map_size: (u32, u32),
++) {
++    let (w, h) = map_size;
++    for entity in entities {
++        let tx = entity.pos.x.floor();
++        let ty = entity.pos.z.floor();
++        if tx < 0.0 || ty < 0.0 || tx >= w as f32 || ty >= h as f32 {
++            continue;
++        }
++        let shape = kind_specs
++            .get(entity.kind.0 as usize)
++            .cloned()
++            .unwrap_or_else(fallback_shape);
++        let (color, extent, diamond) = if entity.owner == pandemonium_sim_api::PlayerId::NEUTRAL {
++            (MINIMAP_ORE, 3, true)
++        } else if shape.unit {
++            (
++                match entity.owner {
++                    pandemonium_sim_api::PlayerId(0) => MINIMAP_OWN,
++                    _ => MINIMAP_ENEMY,
++                },
++                1,
++                false,
++            )
++        } else {
++            (
++                match entity.owner {
++                    pandemonium_sim_api::PlayerId(0) => MINIMAP_OWN,
++                    _ => MINIMAP_ENEMY,
++                },
++                2,
++                false,
++            )
++        };
++        let extent = extent as i32;
++        let anchor = extent / 2;
++        for dy in -anchor..extent - anchor {
++            for dx in -anchor..extent - anchor {
++                if diamond && dx.abs() + dy.abs() > 1 {
++                    continue; // the diamond trims its own corners
++                }
++                let px = tx as i32 + dx;
++                let py = ty as i32 + dy;
++                if px < 0 || py < 0 || px >= w as i32 || py >= h as i32 {
++                    continue;
++                }
++                let offset = ((py as u32 * w + px as u32) as usize) * 4;
++                scratch[offset] = color[0] as u8;
++                scratch[offset + 1] = color[1] as u8;
++                scratch[offset + 2] = color[2] as u8;
++                scratch[offset + 3] = 255;
++            }
++        }
++    }
++}
++
+ impl Renderer for WgpuRenderer {
+     fn render(&mut self, frame: Frame<'_>) {
+         // Camera uniform.
+@@ -2507,3 +2570,123 @@ mod death_render_tests {
+         assert!(clamped.scale[1] > 0.0);
+     }
+ }
++
++#[cfg(test)]
++mod minimap_marker_tests {
++    use super::*;
++    use glam::Vec3;
++    use pandemonium_engine::RenderEntity;
++    use pandemonium_sim_api::{EntityId, KindId, MoveState};
++
++    const MAP: (u32, u32) = (8, 8);
++
++    fn entity(id: u64, kind: u32, owner: PlayerId, x: f32, z: f32) -> RenderEntity {
++        RenderEntity {
++            id: EntityId(id),
++            owner,
++            kind: KindId(kind),
++            pos: Vec3::new(x, 0.0, z),
++            facing: Vec3::ZERO,
++            hp_fraction_milli: 1000,
++            move_state: MoveState::Idle,
++        }
++    }
++
++    fn tile(scratch: &[u8], x: u32, y: u32) -> [u8; 4] {
++        let offset = ((y * MAP.0 + x) as usize) * 4;
++        [
++            scratch[offset],
++            scratch[offset + 1],
++            scratch[offset + 2],
++            scratch[offset + 3],
++        ]
++    }
++
++    fn specs() -> Vec<KindShape> {
++        vec![
++            crate::silhouette::named("worker").expect("authored"),
++            crate::silhouette::named("command_center").expect("authored"),
++            crate::silhouette::named("ore_node").expect("authored"),
++        ]
++    }
++
++    #[test]
++    fn units_paint_one_tile_in_the_owner_color() {
++        let mut scratch = vec![0u8; (MAP.0 * MAP.1 * 4) as usize];
++        paint_minimap_markers(
++            &mut scratch,
++            &[entity(1, 0, PlayerId(0), 2.5, 3.7)],
++            &specs(),
++            MAP,
++        );
++        assert_eq!(tile(&scratch, 2, 3)[0], MINIMAP_OWN[0] as u8);
++        assert_eq!(tile(&scratch, 2, 3)[1], MINIMAP_OWN[1] as u8);
++        // The neighbors stay bare: one tile, no block.
++        assert_eq!(tile(&scratch, 3, 3)[3], 0);
++        assert_eq!(tile(&scratch, 2, 2)[3], 0);
++        // Enemy units read orange.
++        let mut scratch2 = vec![0u8; (MAP.0 * MAP.1 * 4) as usize];
++        paint_minimap_markers(
++            &mut scratch2,
++            &[entity(2, 0, PlayerId(1), 2.5, 3.7)],
++            &specs(),
++            MAP,
++        );
++        assert_eq!(tile(&scratch2, 2, 3)[0], MINIMAP_ENEMY[0] as u8);
++    }
++
++    #[test]
++    fn buildings_paint_bigger_blocks_than_units() {
++        let mut scratch = vec![0u8; (MAP.0 * MAP.1 * 4) as usize];
++        paint_minimap_markers(
++            &mut scratch,
++            &[entity(1, 1, PlayerId(0), 5.0, 5.0)],
++            &specs(),
++            MAP,
++        );
++        // The 2x2 block: four painted tiles around the anchor.
++        let painted = [(4, 4), (5, 4), (4, 5), (5, 5)];
++        for (x, y) in painted {
++            assert_eq!(tile(&scratch, x, y)[3], 255, "painted at {x},{y}");
++            assert_eq!(tile(&scratch, x, y)[0], MINIMAP_OWN[0] as u8);
++        }
++        // The tiles just outside the block stay bare.
++        assert_eq!(tile(&scratch, 6, 6)[3], 0);
++        assert_eq!(tile(&scratch, 3, 3)[3], 0);
++    }
++
++    #[test]
++    fn ore_paints_an_amber_diamond() {
++        let mut scratch = vec![0u8; (MAP.0 * MAP.1 * 4) as usize];
++        paint_minimap_markers(
++            &mut scratch,
++            &[entity(1, 2, PlayerId::NEUTRAL, 4.0, 4.0)],
++            &specs(),
++            MAP,
++        );
++        // The plus-shaped diamond: center + the four edge-adjacent tiles.
++        for (x, y) in [(4, 4), (3, 4), (5, 4), (4, 3), (4, 5)] {
++            assert_eq!(tile(&scratch, x, y)[0], MINIMAP_ORE[0] as u8, "{x},{y}");
++        }
++        // The corners the diamond trims stay bare.
++        assert_eq!(tile(&scratch, 3, 3)[3], 0);
++        assert_eq!(tile(&scratch, 5, 5)[3], 0);
++    }
++
++    #[test]
++    fn off_map_entities_paint_nothing_and_clamp_does_not_panic() {
++        let mut scratch = vec![0u8; (MAP.0 * MAP.1 * 4) as usize];
++        paint_minimap_markers(
++            &mut scratch,
++            &[
++                entity(1, 0, PlayerId(0), 20.0, 20.0),
++                entity(2, 1, PlayerId(0), 0.0, 0.0),
++            ],
++            &specs(),
++            MAP,
++        );
++        // The corner building clamps inside the map without panicking.
++        assert_eq!(tile(&scratch, 0, 0)[3], 255);
++        assert_eq!(tile(&scratch, 7, 7)[3], 0, "the far corner stays terrain");
++    }
++}
+-- 
+2.47.3
+
+
+From 8b4c0f73d277329f26dfe4f86265050bb99bda71 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:32:22 +0000
+Subject: [PATCH 09/14] fix(client): drop the redundant cast the 1.98 lints
+ flag in the minimap painter
+
+---
+ crates/client/src/render.rs | 7 +++----
+ 1 file changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/crates/client/src/render.rs b/crates/client/src/render.rs
+index b6f5409..08aabdb 100644
+--- a/crates/client/src/render.rs
++++ b/crates/client/src/render.rs
+@@ -1839,14 +1839,14 @@ fn paint_minimap_markers(
+             .cloned()
+             .unwrap_or_else(fallback_shape);
+         let (color, extent, diamond) = if entity.owner == pandemonium_sim_api::PlayerId::NEUTRAL {
+-            (MINIMAP_ORE, 3, true)
++            (MINIMAP_ORE, 3i32, true)
+         } else if shape.unit {
+             (
+                 match entity.owner {
+                     pandemonium_sim_api::PlayerId(0) => MINIMAP_OWN,
+                     _ => MINIMAP_ENEMY,
+                 },
+-                1,
++                1i32,
+                 false,
+             )
+         } else {
+@@ -1855,11 +1855,10 @@ fn paint_minimap_markers(
+                     pandemonium_sim_api::PlayerId(0) => MINIMAP_OWN,
+                     _ => MINIMAP_ENEMY,
+                 },
+-                2,
++                2i32,
+                 false,
+             )
+         };
+-        let extent = extent as i32;
+         let anchor = extent / 2;
+         for dy in -anchor..extent - anchor {
+             for dx in -anchor..extent - anchor {
+-- 
+2.47.3
+
+
+From 3057ef0326c7821feff5dc94d3790d2a43042d9d Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:33:37 +0000
+Subject: [PATCH 10/14] =?UTF-8?q?feat(engine):=20calmer=20ground=20contras?=
+ =?UTF-8?q?t=20=E2=80=94=20muted=20steppe,=20darker=20rock=20(PLAN-M10.2?=
+ =?UTF-8?q?=20=C2=A72.5)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- class_color: passable ground drops its strong green dominance (channel
+  spread under 0.13) so the team-colored silhouettes pop against it; rock
+  drops from [0.41,0.38,0.35] to [0.30,0.27,0.25] so walls and blocked
+  terrain read as obstacles at a glance
+- the minimap's baked terrain base inherits the calmer palette (it bakes
+  from the same mesh colors)
+- presentation only: the mesh is display-side, no sim or content change
+- test: rock darker than ground at every variation extreme, ground stays
+  green-leaning and muted
+---
+ crates/engine/src/mesh.rs | 43 +++++++++++++++++++++++++++++++--------
+ 1 file changed, 34 insertions(+), 9 deletions(-)
+
+diff --git a/crates/engine/src/mesh.rs b/crates/engine/src/mesh.rs
+index 0c730bb..b2a947c 100644
+--- a/crates/engine/src/mesh.rs
++++ b/crates/engine/src/mesh.rs
+@@ -48,9 +48,11 @@ fn tile_variation(x: u32, y: u32) -> f32 {
+     ((hash >> 9) & 0xFF) as f32 / 255.0
+ }
+ 
+-/// Terrain albedo by class with per-tile variation: passable ground reads as
+-/// dry steppe grass with hue/brightness jitter; blocked terrain as gray-brown
+-/// rock. Placeholder-plus (plan §0): flat colors, but shaded ones.
++/// Terrain albedo by class with per-tile variation: passable ground reads
++/// as calm, low-saturation dry steppe — muted enough that the team-colored
++/// entities pop against it (PLAN-M10.2 §2.5); blocked terrain as dark
++/// gray-brown rock, clearly darker than the ground so walls and ridges read
++/// as obstacles. Placeholder-plus (plan §0): flat colors, but shaded ones.
+ fn class_color(passable: bool, variation: f32, height: f32) -> [f32; 3] {
+     // ±0.045 of jitter around the class base, plus a subtle two-tile checker
+     // so flat areas keep a readable grain.
+@@ -61,16 +63,19 @@ fn class_color(passable: bool, variation: f32, height: f32) -> [f32; 3] {
+         -0.015
+     };
+     let mut color = if passable {
+-        // Dry grass base, jittered toward either lusher or drier.
++        // Dry steppe: the old grass carried a strong green dominance that
++        // fought the team colors; this stays green-leaning but muted, with
++        // a gentle dryness drift toward tan.
+         let dryness = variation;
+         [
+-            0.33 + 0.10 * dryness + jitter,
+-            0.47 + 0.03 * dryness + jitter,
+-            0.27 - 0.05 * dryness + jitter,
++            0.36 + 0.06 * dryness + jitter,
++            0.41 + 0.02 * dryness + jitter,
++            0.33 - 0.02 * dryness + jitter,
+         ]
+     } else {
+-        // Rock: gray-brown, jittered brightness.
+-        [0.41 + jitter, 0.38 + jitter, 0.35 + jitter]
++        // Rock: distinctly darker than any passable tile — the obstacle
++        // read is the point (the walls of the Crossroads crossing).
++        [0.30 + jitter, 0.27 + jitter, 0.25 + jitter]
+     };
+     // Hills pick up a rocky tint with height (the heightmap is display-only,
+     // so this is pure presentation math).
+@@ -272,4 +277,24 @@ mod tests {
+             }
+         }
+     }
++
++    #[test]
++    fn the_ground_stays_calm_and_rock_reads_as_an_obstacle() {
++        // PLAN-M10.2 §2.5: the ground is calmer (lower saturation) than the
++        // entities, and rock is plainly darker than any ground shade.
++        for variation in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
++            let ground = class_color(true, variation, 0.0);
++            let rock = class_color(false, variation, 0.0);
++            let lum = |c: [f32; 3]| (c[0] + c[1] + c[2]) / 3.0;
++            assert!(
++                lum(rock) < lum(ground) - 0.05,
++                "rock reads darker than ground at variation {variation}"
++            );
++            // Green-leaning but muted: the channel spread stays small.
++            let spread =
++                ground[0].max(ground[1]).max(ground[2]) - ground[0].min(ground[1]).min(ground[2]);
++            assert!(spread < 0.13, "the ground stays calm at {variation}");
++            assert!(ground[1] > ground[2], "still green-dominant");
++        }
++    }
+ }
+-- 
+2.47.3
+
+
+From 4251b293a29d67310ee60430297e230cf488bd00 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:34:00 +0000
+Subject: [PATCH 11/14] =?UTF-8?q?test(client):=20the=20display-name=20look?=
+ =?UTF-8?q?up=20the=20info=20panel=20and=20tooltip=20share=20(PLAN-M10.2?=
+ =?UTF-8?q?=20=C2=A72.6)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ crates/client/src/ui.rs | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/crates/client/src/ui.rs b/crates/client/src/ui.rs
+index 38a30d0..d5869df 100644
+--- a/crates/client/src/ui.rs
++++ b/crates/client/src/ui.rs
+@@ -931,4 +931,28 @@ mod tests {
+             .count();
+         assert_eq!(cancels, 2, "the busy queue keeps its cancel buttons");
+     }
++
++    #[test]
++    fn the_name_lookup_feeds_the_panel_and_the_tooltip() {
++        // PLAN-M10.2 §2.6: the name lookup the info panel and the hover
++        // tooltip use resolves every authored kind to its display name.
++        let bundle = bundle();
++        for (id, display) in [
++            ("worker", "Worker"),
++            ("rifleman", "Rifleman"),
++            ("raider", "Raider"),
++            ("guardian", "Guardian"),
++            ("command_center", "Command Center"),
++            ("barracks", "Barracks"),
++            ("supply_depot", "Supply Depot"),
++            ("turret", "Turret"),
++            ("ore_node", "Ore Node"),
++        ] {
++            let kind = kind_of(&bundle, id).unwrap_or_else(|| panic!("{id} resolves"));
++            let def = def_of(&bundle, kind).unwrap_or_else(|| panic!("{id} has a def"));
++            assert_eq!(def.display_name, display, "{id} names itself for the HUD");
++        }
++        // An unknown kind id has no def: both callers fall back safely.
++        assert!(def_of(&bundle, KindId(9999)).is_none());
++    }
+ }
+-- 
+2.47.3
+
+
+From 56b2a6d6d13eeed0d80c203067873148c6bebc85 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:47:45 +0000
+Subject: [PATCH 12/14] =?UTF-8?q?docs:=20the=20M10.2=20Phase=202=20closeou?=
+ =?UTF-8?q?t=20=E2=80=94=20DEBT-016,=20PLAYTEST=20re-test=20row=20+=20Phas?=
+ =?UTF-8?q?e=202=20note,=20CHANGELOG,=20AI-Handoff=20(snapshot,=20counts,?=
+ =?UTF-8?q?=20board,=20inventory,=20gotchas)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ AI-Handoff.md    | 22 ++++++++++++-------
+ CHANGELOG.md     | 55 ++++++++++++++++++++++++++++++++++++++++++++++++
+ docs/DEBT.md     |  1 +
+ docs/PLAYTEST.md | 15 ++++++++++++-
+ 4 files changed, 84 insertions(+), 9 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index aac9568..b98159c 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -31,7 +31,7 @@
+ | Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M10.2 (playtest-1 findings) — PHASE 1 (Controls) COMPLETE; Phases 2-4 deferred by the owner's delivery scope (A-100, DEBT-015).** The owner's first human playtest of the windowed client (post-M10.1) found four issues in priority order — controls, visual legibility, menus/settings, audio; `docs/PLAN-M10.2.md` is the milestone spec and `docs/PLAYTEST.md` result #1 is the recorded finding. This pass (branch `m10.2`, delivered as one `git format-patch` series): the Generals ZH controls — (1) the right button is a press/release state machine (`crates/client/src/input.rs`, pure, 26 new client tests): under 6 px of travel it is the command click, beyond it the grab-and-drag map scroll (release orders nothing), with the minimap right-click ordering on release (armed-at-press attack-move fixed — the §1.1 audit found the old armed-minimap branch dead), UI-swallow on the command card, and placement-cancel consuming the whole gesture; (2) middle-drag now rotates (it panned); (3) edge scroll is a 14 px depth-scaled band (the old 24 px snap was the owner's 'only the last pixel works'); (4) selection parity: shift+click toggle, shift+box union, double-click same-kind select-all, control-group double-tap centering, the Escape ladder (armed -> placement -> selection -> quit), Space jumps to the last death or the base, and the empty-ground click does nothing at all (A-091); (5) cursor order feedback: a ground marker naming the would-be order (move/attack/gather/rally/attack-move) plus the crosshair while armed. Registers: A-091..A-100, DEBT-014/015, DEBT-008's next human pass is the Phase 1 re-test. 440 dev / 435 release tests green; all three goldens bit-identical (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`). **Next: the owner re-tests the controls card (PLAYTEST result #1); on their go, Phases 2-4 per PLAN-M10.2 (rodio is the pre-chosen Phase 4 backend, A-100), then the A14 playtest** |
++| Status | **M10.2 (playtest-1 findings) — PHASES 1-2 COMPLETE; Phases 3-4 await the owner re-test (A-101, DEBT-015).** The owner's first human playtest found four issues in priority order — controls, visual legibility, menus/settings, audio; `docs/PLAN-M10.2.md` is the spec. Phase 1 (the Generals ZH controls, branch `m10.2`, 13 commits) re-tested **pass, with notes** (the notes arrive post-delivery, A-101). Phase 2 (visual legibility, branch `m10.2-phase2`, delivered as one `git format-patch` series): (1) distinct multi-part silhouettes per kind in the new pure `client/src/silhouette.rs` — worker+tool, rifleman+rifle, raider buggy, guardian hull/treads/turret/barrel, CC tower, barracks flag, depot crate stack, turret pedestal, amber ore crystals — keyed by kind name with the capability-shape fallback; (2) the colorblind-safe blue/orange team palette (client-side mapping, content hash unmoved, A-102) with team ground rings under every unit and team band parts on every structure; (3) a bigger always-on selected-entity health bar, a hover name tooltip with owner tag, and a production-queue summary in the info panel; (4) distinct minimap markers — units 1 tile, buildings a 2×2 block, ore a 3×3 amber diamond; (5) calmer, lower-saturation ground with darker rock so entities pop and walls read as obstacles. Registers: A-101..A-106, DEBT-016. 465 dev / 460 release tests green; all three goldens bit-identical (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`). **Next: the owner re-tests Phase 2's visual pass (identify CC/worker/tank on sight, tell the sides apart at a glance, read the minimap and health state); on their go, Phases 3-4 per PLAN-M10.2 (menus/settings then audio; rodio is the pre-chosen Phase 4 backend, A-100), then the A14 playtest** |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -65,15 +65,15 @@ cargo run -p pandemonium-client -- --seed 42 --record run.pdrp   # named seed +
+ cargo run -p pandemonium-tools -- replay-verify run.pdrp         # the record re-verifies (A2)
+ ```
+ 
+-Expected at this handoff: all commands succeed; 440 tests pass in dev
+-(435 in release — the 5 should-panic invariant-checker tests are
++Expected at this handoff: all commands succeed; 465 tests pass in dev
++(460 in release — the 5 should-panic invariant-checker tests are
+ debug-only by nature — `debug_assert` compiles out in release): 47 fx
+ unit tests (40 + M10.1's seven xxHash64 tests: the reference golden
+ vectors, every-split and chunked incremental equality, LE integer
+ writes, seed sensitivity), 20 fx property tests (19 + M10.1's
+ xxHash64 chunking-invariance property), 16 ai unit tests, 108 sim unit
+-tests, 4 sim_api unit tests, 8 replay codec tests, 53 engine tests,
+-81 client tests (55 + M10.2's twenty-six: `input.rs`'s twenty-three — the right-button machine, the edge band, the selection parity, the double-tap, the Escape ladder, the cursor hint — and `feedback.rs`'s four cursor-marker tests; the M10.1 twelve among the 55: `report.rs`'s five — the
++tests, 4 sim_api unit tests, 8 replay codec tests, 54 engine tests (one new: the ground-contrast palette pin),
++105 client tests (55 + M10.2 Phase 1's twenty-six: `input.rs`'s twenty-three — the right-button machine, the edge band, the selection parity, the double-tap, the Escape ladder, the cursor hint — and `feedback.rs`'s four cursor-marker tests; + Phase 2's twenty-four: `silhouette.rs`'s ten shape tests, `render.rs`'s nine silhouette/team-ring/minimap-marker tests, `feedback.rs`'s selected-bar test, `orders.rs`'s two hover-pick tests, and `ui.rs`'s tag/tooltip/queue/name-lookup tests; the M10.1 twelve among the 55: `report.rs`'s five — the
+ re-sim-verified record, F8-during-pause validity, sidecar
+ determinism, the stem's purity, the controls line — and the seven
+ `--seed`/`--record`/`--frames` parser tests), 17 tools tests, 33
+@@ -158,9 +158,9 @@ crates/sim       DONE    Sim spine + M4 movement + M5 economy + M6 combat & visi
+ crates/content   DONE    RON schema (strict), versioned loaders + map v1->v2 migration, precise validators, ContentBundle + content hash, world() seam (all 12 capabilities mapped — Attack mapped in M6, DEBT-006 retired)
+ crates/ai        DONE    Controller trait (plan §9.6 verbatim) + ScriptedController, the scripted Alpha opponent: workers -> depot -> barracks -> mixed army, idle-worker gather management, attack waves on size + timer that RE-MARCH on the pressure cadence while alive and focus the sighted enemy CC (M9 — matches resolve), base defense, pending/build bookkeeping verified by sight (A-062) — never a rejection channel
+ crates/replay    DONE    canonical LE byte codec + checksummed replay record/validate (re-sim driver lives in sim since M7)
+-crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh, Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5): AudioSink trait, the pure event -> cue mapping, the null counter sink (*engine core)
++crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh (M10.2 Phase 2's calmer ground/darker rock palette), Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5): AudioSink trait, the pure event -> cue mapping, the null counter sink (*engine core)
+                    (*engine core)
+-crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) + M10.2's input.rs (the right-button state machine, the edge-scroll band, the selection-parity helpers, the Escape/jump/hint logic — the input layer's pure half; the M10.2 Phase 1 controls pass) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split)
++crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) + M10.2's input.rs (the right-button state machine, the edge-scroll band, the selection-parity helpers, the Escape/jump/hint logic — the input layer's pure half; the M10.2 Phase 1 controls pass) + M10.2 Phase 2's silhouette.rs (the multi-part per-kind silhouettes with the blue/orange tone system) and the render-side legibility pass (team ground rings, structure band parts, the bigger selected health bar, hover name tooltips, the info-panel queue summary, distinct minimap markers, the calmer ground contrast) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split)
+ crates/tools     DONE    headless (the M1 demo + M7's --p1/--p2 ai|idle controller slots over the real content, per-player evidence lines, --record for both), replay-verify (world resolution by content identity), content-validate (clap CLI)
+ tests/           ACTIVE  pandemonium-tests: architecture_law.rs (A13) + determinism.rs (A1/A2 + spine proofs) + content_pipeline.rs (M2/A3) + movement.rs (M4/P1) + economy.rs (M5/P3) + combat.rs (M6/P2) + vision.rs (M6/A10) + ai.rs (M7: A5 + A11 + AI-vs-AI completion/determinism/golden/log-alone replay)
+ content/         DONE    rules/, entities/ (9 kinds), factions/ (Legion), maps/ (Crossroads 64x64, symmetric, heightmap)
+@@ -191,7 +191,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+ | M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (M10 verified them bit-identical at their then-FNV values; M10.1's hasher swap re-pinned them: demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
+ | M10.1 | Pre-declaration hardening & A14 enablement | ✅ **complete** | DEBT-001 repaid: xxHash64 is the canonical hasher (one hash-moving commit; every golden re-pinned with its written reason — demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262; encodings and format versions unchanged, A-087). The client joined the reproducibility promise: `--seed`, `--record` (match end / clean exit, `replay-verify`-accepted), and the §11.6 F8 bug-report dump (replay + deterministic sidecar; pure assembly in `client/src/report.rs`, re-sim-verified at the client seam, pause-safe, windowed-verified under Xvfb+XTEST — same-tick `.pdrp` byte-identical). `docs/PLAYTEST.md` written (all eight sections — the A14 instrument). The nightly soak sharded 10×100 (disjoint seeds proven in comments), timeouts on every job, per-shard evidence artifacts + an aggregate crashed-gate. Registers closed: DEBT-013 logged, DEBT-011/012 triggers sharpened to their PLAYTEST.md probes, A-087..A-090, CHANGELOG carries M10.1. 414 dev / 409 release green (20 new tests). Zero golden movement outside Task 1's single swap commit |
+-| M10.2 | Playtest-1 findings — Phase 1: the Generals ZH controls | ✅ **complete (Phase 1)** | PLAN-M10.2 §1 (the owner's four findings, #1 priority): the audit recorded in PLAYTEST result #1 (left never orders — true since M9.1; the dead armed-minimap branch found and fixed), the right-button command/drag state machine (6 px threshold, grab-scroll on drag, order-on-release, minimap/UI/placement routing), middle-drag rotate, the 14 px depth-scaled edge band (toggle flag wired, UI is Phase 3 — DEBT-014), shift+click/box, double-click same-kind, group double-tap centering, Escape ladder, Space jump, empty-ground no-op, the cursor order marker + armed crosshair. Direction-pinned at yaw 0/90 for the drag-scroll and rotate. 26 new client tests (input.rs + feedback.rs). 440 dev / 435 release green, zero golden movement, Xvfb+XTEST re-verified. Phases 2-4 deferred by the owner's scope answer (A-100/DEBT-015) — the exit's owner re-test is next |
++| M10.2 | Playtest-1 findings — Phases 1-2 (controls; visual legibility) | ✅ **complete (Phases 1-2)** | Phase 1 (PLAN-M10.2 §1): the right-button command/drag state machine, middle-drag rotate, the 14 px depth-scaled edge band, selection parity, the Escape ladder, Space jump, the cursor order marker. Phase 2 (PLAN-M10.2 §2): the multi-part silhouette system (`client/src/silhouette.rs`, name-keyed + capability fallback), the blue/orange team palette with unit rings and structure bands, the bigger selected health bar, the hover name tooltip, the info-panel queue summary, distinct minimap markers (buildings larger, ore diamonds), and the calmer-ground/darker-rock terrain palette. 25 new tests; 465 dev / 460 release green; zero golden movement; the owner re-tests both phases before Phase 3 starts |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+ M4 movement, M5 economy/production/construction, M6 combat & vision, M7
+@@ -982,6 +982,12 @@ existing `ai_host` seam.
+   lands — the allow-list is untouched). The owner's re-test of the
+   controls card gates all three.
+ 
++- **The entity shader's yaw is mirrored against `atan2` — rotate OFFSETS with the transposed form** (the M10.2 Phase 2 silhouette trap). The instance shader rotates a box by yaw as `(c*x + s*z, y, -s*x + c*z)`, while the entity yaw is `facing.z.atan2(facing.x)`. A symmetric box never noticed (M3-M10's boxes sat at the entity center); the Phase 2 silhouettes carry *forward-offset parts* (barrels, tools, rifle, wedge nose) that would point BACKWARD at yaw 90°. `build_entity_instances` therefore maps local offsets with the transposed rotation (`world_x = c*ox - s*oz`, `world_z = s*ox + c*oz`) so local +x lands on the facing, while each box itself takes the plain yaw the shader expects. The direction-pinned tests (`a_unit_is_a_body_plus_a_head_and_faces_its_direction`, `a_facing_turn_rotates_forward_parts_with_the_body` — yaw 0 AND 90) pin this; any new offset part needs both.
++- **The decal instance buffer is ONE shared stream with order-dependent blending**: shadows, the placement ghost, team rings, and selection rings share the 1024-instance buffer, drawn as `[shadows+ghost]` on the quad vertices and `[team rings + selection rings]` on the ring vertices. Alpha blending paints in buffer order — the selection ring must extend AFTER the team rings so green reads over the owner color. Capacity trimming preserves whole groups; if you add a decal group, decide its blend order explicitly and keep the range arithmetic (`shadow_count + ghost_count ..`) exact.
++- **Minimap markers paint over fog — the entity list must stay the fog-filtered view.** `paint_minimap_markers` (pure, tested) draws AFTER the fog shading with no per-entity fog check; it is honest only because `main.rs` hands it the PlayerView's entities (what the player may see). Feeding it a full snapshot would draw hidden entities onto hidden tiles. The marker shapes are per-role: units 1 tile (own blue / enemy orange), buildings a solid 2×2 block, neutral ore a 3×3 amber diamond — color AND shape AND size, per the plan's "distinct markers, buildings visibly larger".
++- **`Silhouette` is not `Copy` — spec lookups clone, the fallback is capability-shaped.** The renderer's `kind_specs` are indexed by `KindId`; a miss falls to `fallback_shape()` (the plain unit box) via `.cloned().unwrap_or_else(...)`. The kind→shape mapping is resolved ONCE at startup in `main.rs::kind_shapes`: the name table (`silhouette::named`) is exact-match on the bundle's kind ids, and unknown names fall through `capability_fallback` (Resource → cluster, Attack+Footprint w/o Move → turret, Footprint → building, Move → unit). A content kind-id rename therefore silently changes which silhouette a kind gets — the DEBT-016 tripwire — while the shape-only fallback keeps rendering something sane.
++- **M10.2 Phase 2 deliberately left the exit's screenshot half to the owner**: the machine half of "a stranger identifies command center, worker, and tank" ran (Xvfb smoke + the pure geometry tests); the owner opted for a text-only delivery (A-104 — no PNGs in the delivery folder), so the human eyeball pass IS their re-test.
++
+ ## 10. Maintenance protocol — every future agent, every milestone
+ 
+ 1. Read plan.md §0 + §14, this file, `docs/DEBT.md`, `docs/ASSUMPTIONS.md`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 846d0c8..2e267f3 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,61 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
+ does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
+ its milestone tag.
+ 
++## [M10.2 Phase 2] — playtest-1 findings: visual legibility
++
++The second of the owner's four playtest-1 findings, delivered as its own
++patch series on branch `m10.2-phase2` (Phase 1's re-test verdict came back
++"pass, with notes" — A-101 — so this pass builds on it; the notes arrive
++post-delivery by the owner's own account). Scope: **Phase 2 (visual
++legibility) only** — Phases 3-4 stay gated on the owner's re-test. The
++plan's exit bar: a stranger can identify the command center, a worker, and
++a tank in a screenshot without a legend. Presentation/input only
++(`crates/client`, `crates/engine`); zero golden movement (demo
++`0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content
++`0x9bc18c521107b262` all bit-identical); 465 dev / 460 release tests green.
++
++- **client (PLAN §2.1, silhouettes)**: the single-tinted-box shapes are
++  replaced by distinct multi-part silhouettes (`silhouette.rs`, pure, 10
++  tests) — worker: round body + visible steel tool; rifleman: capsule body
++  + thin rifle; raider: low buggy (chassis, wedge nose, cabin, roll bar);
++  guardian: hull + dark treads + turret + steel barrel; command center:
++  tall slab + corner tower capped in the team band; barracks: wide slab +
++  door + flag pole flying the team color; supply depot: stacked crates;
++  turret: pedestal + cap + raised barrel; ore node: four bright amber
++  crystals. Mapping keyed by the bundle's kind *name* with the
++  capability-shape fallback (Resource → cluster, Attack+Footprint →
++  turret, Footprint → building, Move → unit, else plain box) — no
++  presentation data touches `content/` (DEBT-016 logs the footprint
++  coupling).
++- **client (PLAN §2.2, team identification)**: P1 shifts off content-red
++  onto orange `[0.95, 0.55, 0.15]` (the owner's colorblind-safe
++  blue/orange pick, A-102 — a client-side mapping, content hash unmoved);
++  every unit gets a team-color ground ring; every structure carries a
++  team-band part (CC tower cap, barracks flag, depot/turret trim); the
++  minimap dots re-tint to the same pair.
++- **client (PLAN §2.3, selection & info)**: the selected entity draws a
++  larger health bar (64×7 px vs 36×4) that shows even at full health; a
++  hover tooltip near the cursor names any visible entity with an owner
++  tag (yours/enemy/neutral), suppressed over the bottom bar; the
++  single-selection info panel gains a production-queue summary (head item
++  + percent + waiting count; `queue: idle` otherwise) while the queue
++  strip keeps its cancel buttons.
++- **client (PLAN §2.4, minimap)**: markers are now distinct per role —
++  units one tile, buildings a solid 2×2 block (visibly larger), ore nodes
++  a 3×3 amber diamond (color AND shape AND size).
++- **engine (PLAN §2.5, ground contrast)**: terrain ground drops its green
++  dominance (channel spread under 0.13) so entities pop; rock darkens
++  from `[0.41, 0.38, 0.35]` to `[0.30, 0.27, 0.25]` so walls read as
++  obstacles; the minimap's baked base inherits the calmer palette.
++- **tests (PLAN §2.6)**: 25 new tests across `silhouette.rs` (unique mesh
++  per kind, per-kind part/vertex counts, above-ground + inside-radius
++  invariants, tone/team separability, fallback paths), `render.rs`
++  (multi-part instance building, facing rotation at yaw 0/90°, ore amber
++  team-independence, team rings, minimap markers), `feedback.rs` (the
++  bigger selected bar), `orders.rs` (hover picks), and `ui.rs` (owner
++  tags, tooltip placement, queue summary, the shared display-name
++  lookup).
++
+ ## [M10.2] — playtest-1 findings, Phase 1: the Generals ZH controls
+ 
+ The project owner's first human playtest of the windowed client (post-M10.1)
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index c2600f9..86ede4d 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -24,3 +24,4 @@ repay-when trigger | status |`
+ | DEBT-013 | The client's two monolith files: `crates/client/src/render.rs` (2473 lines) and `crates/client/src/main.rs` (1782 lines pre-M10.1) concentrate the whole presentation — renderer, input handling, app state, HUD assembly, and now the F8/`--record` wiring — in two compilation units | code organization | pre-declaration freeze: the split serves no acceptance criterion, and plan §0's scope law forbids refactoring no test requires; plan §19 schedules the presentation rewrite anyway, so splitting now would be work the rewrite discards | split render.rs into pipeline/terrain/entities/overlay/minimap and main.rs into input/app/screens at the post-alpha presentation pass; the intended boundaries are recorded in `docs/ARCHITECTURE.md`'s post-alpha refactor map (guidance only — this row owns the work) | the post-Alpha renderer/UI rewrite (plan §19) | open (M10.1) |
+ | DEBT-014 | The edge-scroll **toggle** does not exist yet: PLAN-M10.2 §1.2 ships the reworked band (14 px, depth-scaled, all four edges) with the `edge_scroll_enabled` flag wired through the input path, but the settings screen that flips it is Phase 3 (PLAN §3.4) — the flag is hard-`true` at construction | simplification | the plan itself schedules the toggle with the settings screen; shipping a hotkey or a CLI flag now would invent a control Phase 3 then has to re-teach | the Phase 3 settings screen flips the already-wired flag (no input-path change needed then) | PLAN-M10.2 Phase 3 lands | open (M10.2) |
+ | DEBT-015 | PLAN-M10.2's Phases 2–4 (visual legibility, menu and settings, audio) are deferred past this delivery: the owner scoped the pass to **Phase 1 only** (A-100), so the milestone's remaining findings stay open and the A14 declaration stays blocked | scope deferral | the owner's explicit delivery answer — Phase 1 needs their re-test verdict before the rest is built on top of it | run Phases 2–4 as their own passes on the same plan (docs/PLAN-M10.2.md is the standing spec); the Phase 4 audio backend choice is pre-made (rodio, A-100) with its allow-list amendment + ADR due then | the owner confirms the Phase 1 controls feel right (the PLAYTEST result #1 re-test) | open (M10.2) |
++| DEBT-016 | The nine hand-tuned silhouettes (`client/src/silhouette.rs`) hardcode part sizes matched to the *authored* footprints (Command Center 4×4, Barracks 3×3, Depot/Turret 2×2) and the name table lists exactly the nine authored kind ids; a content change to a footprint or a kind id leaves the named spec stale (the capability fallback still renders it, just not hand-tuned) | simplification | Phase 2's bar is legibility of the shipped nine kinds, not a general auto-art system; the client owns presentation data (A-103) and content files stay untouched | when a footprint or kind id changes in `content/entities/`, re-tune (or drop to the fallback for) the matching `silhouette::named` entry in the same commit; the fallback paths are tested | any content footprint/kind-id edit (the content hash moving is the tripwire) | open (M10.2 Phase 2) |
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+index d3eb4a1..a276591 100644
+--- a/docs/PLAYTEST.md
++++ b/docs/PLAYTEST.md
+@@ -167,7 +167,7 @@ tester.
+ | Tester | Date | OS | Build commit | Loop completed (unaided?) | Spectator verdict | Probes (placement / audio / feel) | Incidents (seed + tick + dump filenames) |
+ |---|---|---|---|---|---|---|---|
+ | owner (playtest-1) | 2026-10 (post-M10.1) | desktop, real display | bdf1266 | **no** — controls unusable (finding #1, detail below) | not reached | feel: the four findings below | none filed (findings went to `docs/PLAN-M10.2.md` instead) |
+-| | | | | | | | |
++| owner (re-test) | 2026-10 (post-M10.2 Phase 1) | desktop, real display | d84203e | **pass, with notes** — the loop is playable with the new controls card; the notes arrive after the Phase 2 delivery (A-101: the owner re-tests on their machine and reports any issue with its exact location; a reported issue becomes a finding row here) | not reached | feel: pending specifics | none filed yet |
+ | | | | | | | | |
+ | | | | | | | | |
+ | | | | | | | | |
+@@ -227,3 +227,16 @@ right-button path as a state machine and removes the dead branch.
+ The re-test for this row: after M10.2 Phase 1, the owner replays the loop
+ with the updated controls card (section 2) — the row above is then updated
+ or a second row is added for the re-test pass.
++
++### Phase 2 delivery note (visual legibility — the re-test's second target)
++
++This pass (branch `m10.2-phase2`) builds the legibility half of finding #2's
++fix: distinct multi-part silhouettes per kind, blue/orange team bands and
++rings, a bigger selected-entity health bar, hover name tooltips, a
++production-queue summary in the info panel, distinct minimap markers
++(buildings visibly larger; ore a diamond), and calmer ground with darker
++rock. The re-test for the row above now also asks: **can you identify the
++command center, a worker, and a tank on sight, without a legend? Can you
++tell the sides apart at a glance? Can you read the minimap and the health
++state?** Report anything that does not read — a failed read is a finding,
++not a wave-through.
+-- 
+2.47.3
+
+
+From f78a7a9c33d12b07aebd08e3c047cd4533a75133 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 17:57:32 +0000
+Subject: [PATCH 13/14] =?UTF-8?q?fix(client):=20big=20structures=20hover?=
+ =?UTF-8?q?=20from=20farther=20out=20=E2=80=94=20footprint-scaled=20pick?=
+ =?UTF-8?q?=20reach=20(PLAN-M10.2=20=C2=A72.3)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+the Xvfb pass caught it live: the fixed 0.05 NDC hover radius only read at
+the Command Center's projected ground point (its tower mass rises well above
+it). pick_visible_entity_sized takes a per-entity extra reach; main.rs feeds
+footprint * 0.018 so a 4x4 CC reads ~0.072 NDC out. Tests: sized pick reads
+what the fixed radius misses, never beyond it
+---
+ crates/client/src/main.rs   | 10 +++++-
+ crates/client/src/orders.rs | 67 +++++++++++++++++++++++++++++++------
+ 2 files changed, 66 insertions(+), 11 deletions(-)
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 8a8af49..f856784 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -1662,10 +1662,18 @@ impl App {
+         let hover_info = if ui::cursor_over_bottom_bar(&layout, cursor_px.0, cursor_px.1) {
+             None
+         } else {
+-            orders::pick_visible_entity(
++            orders::pick_visible_entity_sized(
+                 &self.camera,
+                 &snapshot.entities,
+                 glam::Vec2::new(cursor.0, cursor.1),
++                |entity| {
++                    // Big silhouettes read from farther out: structures get
++                    // an extra reach proportional to their footprint.
++                    ui::def_of(&self.bundle, entity.kind)
++                        .and_then(|def| def.footprint())
++                        .map(|(w, h)| (w.max(h) as f32) * 0.018)
++                        .unwrap_or(0.0)
++                },
+             )
+             .map(|entity| {
+                 let name = ui::def_of(&self.bundle, entity.kind)
+diff --git a/crates/client/src/orders.rs b/crates/client/src/orders.rs
+index e1e7558..aaf6d02 100644
+--- a/crates/client/src/orders.rs
++++ b/crates/client/src/orders.rs
+@@ -135,17 +135,29 @@ fn logical_of(pos: glam::Vec3) -> Vec2Fx {
+     Vec2Fx::new(world_to_fx(pos.x), world_to_fx(pos.z))
+ }
+ 
+-/// The nearest visible entity of ANY owner under the cursor — the hover
+-/// tooltip's pick (PLAN-M10.2 §2.3). Pure geometry over the same projection
+-/// the selection and the context resolver use: what is under the cursor is
+-/// what the player sees. Passive by nature — it issues nothing and touches
+-/// no input state (the right-button machine is unaffected).
+-pub fn pick_visible_entity<'a>(
++/// The hover pick with per-entity extra radii: a big silhouette's projected
++/// ground point is a small part of its on-screen mass (the Command Center's
++/// tower rises well above its center), so large structures read from
++/// farther out than the fixed [`PICK_RADIUS`] a unit needs.
++pub fn pick_visible_entity_sized<'a>(
+     camera: &RtsCamera,
+     entities: &'a [RenderEntity],
+     cursor: glam::Vec2,
++    extra_radius: impl Fn(&RenderEntity) -> f32,
+ ) -> Option<&'a RenderEntity> {
+-    pick_entity(camera, entities, cursor, |_| true)
++    let mut best: Option<(f32, &'a RenderEntity)> = None;
++    for entity in entities {
++        let projected = camera.project(entity.pos);
++        if !projected.x.is_finite() || !projected.y.is_finite() {
++            continue; // behind the camera — not on screen, not hoverable
++        }
++        let distance = (projected - cursor).length();
++        let reach = PICK_RADIUS + extra_radius(entity);
++        if distance <= reach && best.is_none_or(|(best_distance, _)| distance < best_distance) {
++            best = Some((distance, entity));
++        }
++    }
++    best.map(|(_, entity)| entity)
+ }
+ 
+ #[cfg(test)]
+@@ -378,7 +390,7 @@ mod tests {
+         let camera = camera_on(worker.pos);
+         let snapshot = snapshot(vec![worker]);
+         let cursor = camera.project(glam::Vec3::new(24.0, 0.0, 24.0));
+-        let picked = pick_visible_entity(&camera, &snapshot.entities, cursor)
++        let picked = pick_visible_entity_sized(&camera, &snapshot.entities, cursor, |_| 0.0)
+             .expect("the cursor rests on the worker");
+         assert_eq!(picked.id, EntityId(2));
+     }
+@@ -390,11 +402,46 @@ mod tests {
+         let camera = camera_on(near.pos);
+         let snapshot = snapshot(vec![near, far]);
+         let cursor = camera.project(glam::Vec3::new(20.0, 0.0, 30.0));
+-        let picked = pick_visible_entity(&camera, &snapshot.entities, cursor)
++        let picked = pick_visible_entity_sized(&camera, &snapshot.entities, cursor, |_| 0.0)
+             .expect("two entities in radius");
+         assert_eq!(picked.id, EntityId(2), "the nearest wins");
+         // Off-entity: nothing hovers.
+         let away = camera.project(glam::Vec3::new(40.0, 0.0, 40.0));
+-        assert!(pick_visible_entity(&camera, &snapshot.entities, away).is_none());
++        assert!(pick_visible_entity_sized(&camera, &snapshot.entities, away, |_| 0.0).is_none());
++    }
++
++    #[test]
++    fn big_structures_hover_from_farther_out() {
++        // A building whose silhouette reaches beyond the fixed unit radius:
++        // the caller supplies the per-entity extra (the CC's footprint).
++        let cc = entity(5, OWN, SOLDIER, glam::Vec3::new(20.0, 0.0, 30.0));
++        let camera = camera_on(cc.pos);
++        let snapshot = snapshot(vec![cc]);
++        let ground = camera.project(glam::Vec3::new(20.0, 0.0, 30.0));
++        // A point just outside the fixed radius: no hover without the extra,
++        // hover with it.
++        let just_outside = glam::Vec2::new(ground.x, ground.y - 0.07);
++        let without = pick_visible_entity_sized(&camera, &snapshot.entities, just_outside, |_| 0.0);
++        assert!(without.is_none(), "the fixed radius alone misses");
++        let with = pick_visible_entity_sized(&camera, &snapshot.entities, just_outside, |entity| {
++            if entity.id.0 == 5 {
++                0.05
++            } else {
++                0.0
++            }
++        });
++        assert!(with.is_some(), "the sized pick reads the big structure");
++        // The extra never lets a far-off cursor hover: way outside both.
++        let way_out = glam::Vec2::new(ground.x, ground.y - 0.4);
++        assert!(
++            pick_visible_entity_sized(&camera, &snapshot.entities, way_out, |entity| {
++                if entity.id.0 == 5 {
++                    0.05
++                } else {
++                    0.0
++                }
++            })
++            .is_none()
++        );
+     }
+ }
+-- 
+2.47.3
+
+
+From 9858eb19bd40a8153e0d66bdb36d610e5bdaaedc Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Wed, 7 Oct 2026 18:00:22 +0000
+Subject: [PATCH 14/14] =?UTF-8?q?docs(playtest):=20the=20Xvfb=20machine-ha?=
+ =?UTF-8?q?lf=20evidence=20for=20the=20Phase=202=20exit=20=E2=80=94=20what?=
+ =?UTF-8?q?=20verified=20live,=20what=20stays=20for=20the=20re-test?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ AI-Handoff.md    |  2 +-
+ docs/PLAYTEST.md | 22 +++++++++++++++++++++-
+ 2 files changed, 22 insertions(+), 2 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index b98159c..8deb9b8 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -986,7 +986,7 @@ existing `ai_host` seam.
+ - **The decal instance buffer is ONE shared stream with order-dependent blending**: shadows, the placement ghost, team rings, and selection rings share the 1024-instance buffer, drawn as `[shadows+ghost]` on the quad vertices and `[team rings + selection rings]` on the ring vertices. Alpha blending paints in buffer order — the selection ring must extend AFTER the team rings so green reads over the owner color. Capacity trimming preserves whole groups; if you add a decal group, decide its blend order explicitly and keep the range arithmetic (`shadow_count + ghost_count ..`) exact.
+ - **Minimap markers paint over fog — the entity list must stay the fog-filtered view.** `paint_minimap_markers` (pure, tested) draws AFTER the fog shading with no per-entity fog check; it is honest only because `main.rs` hands it the PlayerView's entities (what the player may see). Feeding it a full snapshot would draw hidden entities onto hidden tiles. The marker shapes are per-role: units 1 tile (own blue / enemy orange), buildings a solid 2×2 block, neutral ore a 3×3 amber diamond — color AND shape AND size, per the plan's "distinct markers, buildings visibly larger".
+ - **`Silhouette` is not `Copy` — spec lookups clone, the fallback is capability-shaped.** The renderer's `kind_specs` are indexed by `KindId`; a miss falls to `fallback_shape()` (the plain unit box) via `.cloned().unwrap_or_else(...)`. The kind→shape mapping is resolved ONCE at startup in `main.rs::kind_shapes`: the name table (`silhouette::named`) is exact-match on the bundle's kind ids, and unknown names fall through `capability_fallback` (Resource → cluster, Attack+Footprint w/o Move → turret, Footprint → building, Move → unit). A content kind-id rename therefore silently changes which silhouette a kind gets — the DEBT-016 tripwire — while the shape-only fallback keeps rendering something sane.
+-- **M10.2 Phase 2 deliberately left the exit's screenshot half to the owner**: the machine half of "a stranger identifies command center, worker, and tank" ran (Xvfb smoke + the pure geometry tests); the owner opted for a text-only delivery (A-104 — no PNGs in the delivery folder), so the human eyeball pass IS their re-test.
++- **M10.2 Phase 2's exit test: the machine half ran on Xvfb, the eyeball half is the owner's re-test** (A-104 — the owner opted for a text-only delivery, no PNGs in the delivery folder). What Xvfb+llvmpipe verified: CC/worker/ore identified on sight via the new silhouettes, hover tooltips with owner tags (Worker/yours, Ore Node/neutral, Command Center/yours), the bigger always-on selected health bar, selection brackets + the worker build panel, the minimap markers. The pass caught a live miss — the CC's tower mass fell outside the fixed hover radius — fixed by `pick_visible_entity_sized` (footprint-scaled reach; the fixed-radius API is gone, callers supply the extra). The Guardian was never on camera (the start force fields none); its silhouette is test-pinned only.
+ 
+ ## 10. Maintenance protocol — every future agent, every milestone
+ 
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+index a276591..f366e92 100644
+--- a/docs/PLAYTEST.md
++++ b/docs/PLAYTEST.md
+@@ -235,7 +235,27 @@ fix: distinct multi-part silhouettes per kind, blue/orange team bands and
+ rings, a bigger selected-entity health bar, hover name tooltips, a
+ production-queue summary in the info panel, distinct minimap markers
+ (buildings visibly larger; ore a diamond), and calmer ground with darker
+-rock. The re-test for the row above now also asks: **can you identify the
++rock.
++
++**Machine half of the exit test (Xvfb + llvmpipe, this environment)**: the
++windowed client presented frames through the real wgpu GL path (700/1500/
++2000/1600-frame smokes, all healthy, zero golden movement) and the captures
++verify on sight: the **command center** reads as THE base (tall slab +
++corner tower, team blue), **workers** read as small blue units and name
++themselves on hover ("Worker / yours"), **ore nodes** pop as bright amber
++crystal clusters off the calm ground ("Ore Node / neutral" on hover), the
++selected worker draws the **bigger always-on health bar** plus the green
++selection brackets and the info panel with its build card, and the
++minimap carries the base cluster. The Xvfb pass also caught a live miss —
++hovering the Command Center's tower mass fell outside the fixed hover
++radius — fixed in the same pass (footprint-scaled reach, unit-pinned).
++**Not directly captured: a Guardian on screen** (the start force fields
++none and the AI's first wave was not on camera in the captured windows);
++its hull/treads/turret/barrel silhouette is pinned by the shape tests, so
++the tank-on-sight read is the one item the re-test confirms on a real
++display.
++
++The re-test for the row above now also asks: **can you identify the
+ command center, a worker, and a tank on sight, without a legend? Can you
+ tell the sides apart at a glance? Can you read the minimap and the health
+ state?** Report anything that does not read — a failed read is a finding,
+-- 
+2.47.3
+
