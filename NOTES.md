@@ -686,3 +686,56 @@ saturates - the test's guard only excludes b=0; fx is untouched by this
 patch: `git diff 08748d9..HEAD --stat -- crates/fx` is empty). A test-guard
 fix is a candidate for the owner's next pass; the library itself honors
 its documented contract.
+
+## M10.2 Phase 5 patch note (the closeout)
+
+`patches/017-m10.2-phase5-closeout.patch` closes M10.2 — the
+verification-and-handoff phase. Six commits on `652f6cf` (master's Phase 4
+closeout), docs-only: no commit touches a `.rs` file, so the tree is
+code-identical to Phase 4's.
+
+What the phase verified (the full gate ran twice — once on the working
+branch, once on a fresh clone after `git am`):
+
+- fmt + clippy `-D warnings` clean; **546 dev / 541 release tests green**;
+- the three goldens bit-identical: demo `0xb6fff6659cfb7709`, flagship
+  `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`;
+- the replay round-trip (A2) PASS and the headless client smoke PASS with
+  their audio evidence lines;
+- an Xvfb + XTEST machine pass over the M10.2 paths — five sessions, 29
+  checks, all green: a seed-7 vs-AI match driven end to end (a box-select
+  of the five start entities, one right-click ground order, a right-drag
+  scroll that issued **no** order — the 6 px threshold — and the Esc
+  ladder through pause/resume), a menu-only session whose New Match row
+  was mouse-activated, the settings persistence pair (volume to 0.95,
+  mute on, Done saves, the relaunch loads the file and the audio line
+  reports `[muted]`), and the Esc-discard run (no file written). The
+  harness was built locally per the standing recipe (AI-Handoff §9), and
+  its one new lesson — the bright 30 px band is the focused row's plate,
+  not the panel border — is now a gotcha in the handoff itself.
+
+The owner's Phase 4 real-hardware audio re-test verdict is recorded as
+**pass, clean** (A-126, 2026-10-09): the nine cues are distinct, volume
+is live, mute silences, both persist, and a big fight is a heartbeat.
+DEBT-011 is fully repaid; M10.2 is complete. The A14 playtest is
+scheduled — five first-time tester slots T1–T5 in `docs/PLAYTEST.md` §7,
+three waves to 2026-10-31 — and it is the last gate before the Alpha
+declaration.
+
+Apply on a fresh clone:
+
+```
+git clone https://github.com/E-Vex/pandemonium-bd.git
+cd pandemonium-bd
+git checkout 652f6cf80fc1f817e06349935ff5e1b741ac9dc4
+git am /path/to/017-m10.2-phase5-closeout.patch
+```
+
+Verified end to end: `git am` applies all six commits cleanly, the
+am'ed tree hash is identical to the branch tree, and the full gate
+re-ran green on the am'ed clone (fmt, clippy, 546 dev / 541 release,
+the three goldens, the headless smoke).
+
+The fx proptest `checked_div_agrees_in_range` flake (~1-in-250,
+pre-existing, noted with 016-v2) did not fire in either gate run this
+phase; the standing advice stays "re-run, don't fix".

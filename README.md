@@ -55,6 +55,16 @@ How a milestone travels from the source repo into this archive:
                                               └──────────────────────────────┘
 ```
 
+## The Patch Chain (latest delivery)
+
+| No. | Milestone | Patch | Commits | Base |
+| :-: | :--- | :--- | :-: | :--- |
+| 017 | M10.2 · Phase 5 — Verification & handoff | [`017-m10.2-phase5-closeout.patch`](patches/017-m10.2-phase5-closeout.patch) | 6 | master `652f6cf` |
+
+Patches are numbered in delivery order (`001` oldest → `017` newest); the full
+chain history and every per-patch note live in [`NOTES.md`](NOTES.md).
+**Total: 117 commits archived** (111 through patch 016-v2, 6 in 017).
+
 
 
 [status-shield]: https://img.shields.io/badge/status-active%20archive-FF3EA5?style=for-the-badge&logo=box&logoColor=white
