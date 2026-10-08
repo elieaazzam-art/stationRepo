@@ -1,8 +1,8 @@
-TOKEN.txt
-.env
-*.token
 node_modules/
 .next/
 dist/
 build/
 *.log
+TOKEN.txt
+.env
+*.token
