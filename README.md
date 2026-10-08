@@ -1,9 +1,9 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 014, lighting each one as git am applies it in order" width="100%">
+  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 015, lighting each one as git am applies it in order" width="100%">
 </p>
 
 <p align="center">
-  <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 14 patches, 95 commits, one history; replay it all with git am; build, destroy, repeat" width="100%">
+  <img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 15 patches, 111 commits, one history; replay it all with git am; build, destroy, repeat" width="100%">
 </p>
 
 # Pandemonium patch archive
@@ -35,7 +35,7 @@ commit the patch was generated against, as recorded when it was
 delivered (`—` where no base was recorded).
 
 <p align="center">
-  <img src="assets/commits.svg" alt="Animated bar chart: one bar per patch showing its commit count, from 12 commits in patch 001 up to 14 in patch 014, with a running total that ends at 95 commits" width="100%">
+  <img src="assets/commits.svg" alt="Animated bar chart: one bar per patch showing its commit count, from 12 commits in patch 001 up to 16 in patch 015, with a running total that ends at 111 commits" width="100%">
 </p>
 
 | #   | Milestone                         | Patch                                         | Commits | Base                                       |
