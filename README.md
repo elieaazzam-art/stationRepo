@@ -1,9 +1,3 @@
-<div align="center">
-
-<img src="assets/banner.svg" alt="Animated inferno banner: a glowing ember travels along the chain of Pandemonium patches 001 to 016, igniting each one in order" width="100%">
-
-<img src="assets/tagline.svg" alt="Typewriter tagline cycling through: a classic RTS, built in Rust; 15 patches · 111 commits · one history; every milestone, kept as a patch; build. destroy. repeat." width="100%">
-
 # PANDEMONIUM · PATCH ARCHIVE
 
 <div align="center">
