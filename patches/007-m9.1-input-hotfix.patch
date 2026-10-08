@@ -1,0 +1,2138 @@
+From c057ee68ca964d67ace7ef51336084d6d2e6a7fd Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Sun, 4 Oct 2026 14:14:56 +0000
+Subject: [PATCH 1/4] fix(engine): unmirror the camera's pan axes and clamp the
+ target to the map (M9.1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The DEBT-008 human pass — the first time anyone actually played the
+windowed client — found D pans left and A pans right (and W retreats
+while S advances): the screen-right axis in pan() has been negated
+since M3 (right was computed as (forward.z, 0, -forward.x) instead of
+forward x up = (-forward.z, 0, forward.x)), and the client fed W a
+negative dz. No sim-side test could catch it — presentation direction
+is invisible to the state hash. Direction tests now pin the convention
+at yaw 0 and yaw 90 degrees.
+
+The same pass needs three camera primitives the plan's input slice
+(§11.3) calls for: pan_world (the middle-drag grab-the-ground pan),
+zoom_toward (wheel zoom that keeps the cursor's ground anchor under
+the cursor), and focus (the opening framing on the player's start).
+Panning now clamps the orbit target to the map rectangle so the view
+can never wander off the battlefield.
+---
+ crates/engine/src/camera.rs |  64 ++++++++++++++++--
+ crates/engine/src/lib.rs    | 125 ++++++++++++++++++++++++++++++++++++
+ 2 files changed, 185 insertions(+), 4 deletions(-)
+
+diff --git a/crates/engine/src/camera.rs b/crates/engine/src/camera.rs
+index 89329b7..17a07c7 100644
+--- a/crates/engine/src/camera.rs
++++ b/crates/engine/src/camera.rs
+@@ -35,11 +35,16 @@ pub struct RtsCamera {
+     distance: f32,
+     fov_y: f32,
+     aspect: f32,
++    /// The map's extent in tiles — panning clamps the target inside it so
++    /// the view can never wander off the battlefield (M9.1: the DEBT-008
++    /// human pass found "get lost in the void" was a real failure mode).
++    bounds: Vec2,
+ }
+ 
+ impl RtsCamera {
+     /// A camera looking at the center of a `width` x `height` tile map, from a
+-    /// comfortable default angle and distance.
++    /// comfortable default angle and distance. See [`RtsCamera::focus`] for
++    /// the player-start framing the windowed client opens with (M9.1).
+     pub fn new(map_width: u32, map_height: u32, aspect: f32) -> Self {
+         Self {
+             target: Vec3::new(map_width as f32 / 2.0, 0.0, map_height as f32 / 2.0),
+@@ -48,6 +53,7 @@ impl RtsCamera {
+             distance: (map_width.max(map_height) as f32) * 0.9,
+             fov_y: DEFAULT_FOV_Y,
+             aspect,
++            bounds: Vec2::new(map_width as f32, map_height as f32),
+         }
+     }
+ 
+@@ -85,12 +91,30 @@ impl RtsCamera {
+ 
+     /// Pans the target along the camera-relative ground axes: `dx` is
+     /// rightward on screen, `dz` forward (toward the top of the screen) —
+-    /// both in world units, already scaled by the caller (e.g. by zoom).
++    /// both in world units, already scaled by the caller (e.g. by the
++    /// frame delta).
++    ///
++    /// The screen-right axis is `forward x up` — the same right-handed
++    /// basis `Mat4::look_at_rh` builds, so a world-space pan to the right
++    /// lands right on screen. (M9.1: the M3 implementation negated this
++    /// axis, which mirrored D/A; the DEBT-008 human pass caught it — no
++    /// sim-side test can, presentation direction is invisible to the
++    /// hash. Direction tests now pin the convention.)
+     pub fn pan(&mut self, dx: f32, dz: f32) {
+         let forward = Vec3::new(-self.yaw.sin(), 0.0, -self.yaw.cos()).normalize();
+-        let right = Vec3::new(forward.z, 0.0, -forward.x);
++        let right = Vec3::new(-forward.z, 0.0, forward.x);
+         self.target += right * dx + forward * dz;
+-        self.target.y = 0.0;
++        self.clamp_target();
++    }
++
++    /// Translates the orbit target by a world-space ground-plane offset —
++    /// the middle-drag "grab the ground" pan: the grabbed point stays
++    /// under the cursor while the offset tracks the cursor's ground delta
++    /// (M9.1, plan §11.3's mouse panning).
++    pub fn pan_world(&mut self, delta: Vec3) {
++        self.target.x += delta.x;
++        self.target.z += delta.z;
++        self.clamp_target();
+     }
+ 
+     /// Zooms by a multiplicative factor (values < 1 zoom in), clamped to
+@@ -99,6 +123,38 @@ impl RtsCamera {
+         self.distance = (self.distance * factor).clamp(DISTANCE_RANGE.0, DISTANCE_RANGE.1);
+     }
+ 
++    /// Zooms by `factor` while keeping the ground point currently under
++    /// the cursor's NDC position under that same position — plan §11.3's
++    /// "zoom toward the cursor" (M9.1: zooming the orbit distance alone
++    /// reads as the view sliding away from where the player is looking).
++    pub fn zoom_toward(&mut self, factor: f32, cursor_ndc: Vec2) {
++        let anchor = self.ground_point(cursor_ndc);
++        self.zoom(factor);
++        if let (Some(before), Some(after)) = (anchor, self.ground_point(cursor_ndc)) {
++            let delta = before - after;
++            self.target.x += delta.x;
++            self.target.z += delta.z;
++        }
++    }
++
++    /// Re-centers the orbit target on a ground-plane point at a given
++    /// distance (clamped) — the windowed client's opening framing on the
++    /// player's start and its restart re-focus (M9.1: the map-center
++    /// default opened on the empty crossroads at 58 tiles out, where the
++    /// starting force reads as specks — "nothing appears on the screen").
++    pub fn focus(&mut self, x: f32, z: f32, distance: f32) {
++        self.target = Vec3::new(x, 0.0, z);
++        self.clamp_target();
++        self.distance = distance.clamp(DISTANCE_RANGE.0, DISTANCE_RANGE.1);
++    }
++
++    /// Keeps the orbit target on the map's ground rectangle (height zero).
++    fn clamp_target(&mut self) {
++        self.target.x = self.target.x.clamp(0.0, self.bounds.x);
++        self.target.z = self.target.z.clamp(0.0, self.bounds.y);
++        self.target.y = 0.0;
++    }
++
+     /// Rotates the camera around the target by `delta_yaw` radians.
+     pub fn rotate(&mut self, delta_yaw: f32) {
+         self.yaw += delta_yaw;
+diff --git a/crates/engine/src/lib.rs b/crates/engine/src/lib.rs
+index 2450d1d..3f7b545 100644
+--- a/crates/engine/src/lib.rs
++++ b/crates/engine/src/lib.rs
+@@ -186,6 +186,131 @@ mod camera_tests {
+         );
+     }
+ 
++    #[test]
++    fn pan_follows_the_screen_axes_at_yaw_zero() {
++        // The default camera sits at +Z looking -Z: screen-right is +X and
++        // up-screen (away from the camera) is -Z. D must pan the view right
++        // and W must pan it up-screen (M9.1: both were mirrored since M3 —
++        // the DEBT-008 human pass caught it; these pins keep them honest).
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        let before = camera.target();
++        camera.pan(2.0, 0.0);
++        assert!(
++            (camera.target().x - before.x - 2.0).abs() < 1e-4,
++            "dx is screen-right (+X at yaw 0): {:?}",
++            camera.target()
++        );
++        assert!((camera.target().z - before.z).abs() < 1e-4);
++        camera.pan(0.0, 3.0);
++        assert!(
++            (camera.target().z - before.z + 3.0).abs() < 1e-4,
++            "dz is up-screen (-Z at yaw 0): {:?}",
++            camera.target()
++        );
++        assert!((camera.target().x - before.x - 2.0).abs() < 1e-4);
++    }
++
++    #[test]
++    fn pan_stays_screen_relative_when_rotated() {
++        // A quarter turn orbits the camera to +X looking -X: screen-right
++        // becomes -Z and up-screen becomes -X.
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.rotate(std::f32::consts::FRAC_PI_2);
++        let before = camera.target();
++        camera.pan(1.5, 0.0);
++        assert!(
++            (camera.target().z - before.z + 1.5).abs() < 1e-3,
++            "dx is screen-right (-Z at yaw 90°): {:?}",
++            camera.target()
++        );
++        assert!((camera.target().x - before.x).abs() < 1e-3);
++        camera.pan(0.0, 1.5);
++        assert!(
++            (camera.target().x - before.x + 1.5).abs() < 1e-3,
++            "dz is up-screen (-X at yaw 90°): {:?}",
++            camera.target()
++        );
++    }
++
++    #[test]
++    fn pan_clamps_the_target_to_the_map_rectangle() {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.pan(-1000.0, 1000.0);
++        // West edge, and the up-screen (north) edge — positive dz pans
++        // toward the top of the screen, which is -Z.
++        assert!((camera.target().x - 0.0).abs() < 1e-4, "west edge");
++        assert!((camera.target().z - 0.0).abs() < 1e-4, "north edge");
++        camera.pan(2000.0, -2000.0);
++        assert!((camera.target().x - 64.0).abs() < 1e-4, "east edge");
++        assert!((camera.target().z - 64.0).abs() < 1e-4, "south edge");
++    }
++
++    #[test]
++    fn pan_world_translates_the_target_without_screen_axes() {
++        // The middle-drag pan: the target moves by the world-space delta the
++        // cursor's ground anchor moved, independent of yaw.
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(32.0, 32.0, 30.0);
++        camera.pan_world(glam::Vec3::new(4.0, 5.0, -6.0)); // height ignored
++        let target = camera.target();
++        assert!((target.x - 36.0).abs() < 1e-4);
++        assert!((target.z - 26.0).abs() < 1e-4);
++        assert_eq!(target.y, 0.0);
++    }
++
++    #[test]
++    fn zoom_toward_keeps_the_cursor_anchor_under_the_cursor() {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(32.0, 32.0, 40.0);
++        let cursor = Vec2::new(0.4, -0.2);
++        let anchor = camera.ground_point(cursor).expect("cursor on the map");
++        camera.zoom_toward(0.5, cursor);
++        let projected = camera.project(anchor);
++        assert!(
++            (projected - cursor).length() < 0.02,
++            "the anchor stays under the cursor: {projected:?} vs {cursor:?}"
++        );
++        assert!(
++            ((camera.eye() - camera.target()).length() - 20.0).abs() < 1e-3,
++            "the distance halved"
++        );
++    }
++
++    #[test]
++    fn zoom_toward_on_the_center_keeps_the_target_put() {
++        // Zooming on the screen center (the orbit target itself) must not
++        // drift the target beyond f32 picking noise (the ground-point
++        // round-trip is accurate to ~1e-3 tiles, not exactly zero).
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(20.0, 30.0, 40.0);
++        let target = camera.target();
++        camera.zoom_toward(0.75, Vec2::ZERO);
++        assert!(
++            (camera.target() - target).length() < 0.01,
++            "no drift beyond picking noise: {:?}",
++            camera.target()
++        );
++    }
++
++    #[test]
++    fn focus_recenters_clamps_and_sets_distance() {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(-20.0, 100.0, 999.0);
++        assert!(
++            (camera.target().x - 0.0).abs() < 1e-4,
++            "x clamped into the map"
++        );
++        assert!(
++            (camera.target().z - 64.0).abs() < 1e-4,
++            "z clamped into the map"
++        );
++        assert_eq!(camera.target().y, 0.0);
++        assert!(
++            (camera.eye() - camera.target()).length() < 161.0,
++            "distance clamped to the range"
++        );
++    }
++
+     #[test]
+     fn picked_ground_points_convert_back_to_logical_positions() {
+         let camera = RtsCamera::new(64, 64, 16.0 / 9.0);
+-- 
+2.47.3
+
+
+From 79aeafff4ef2398d0f9b0d49ca32530d490b7d74 Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Sun, 4 Oct 2026 14:15:02 +0000
+Subject: [PATCH 2/4] feat(client): selection brackets, refusal cues, and
+ rejection text (M9.1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two presentation gaps the human pass surfaced:
+
+- Selection was invisible: the brightened team color alone does not
+  read as "selected" at play distance. selection_quads() draws four
+  corner brackets around each selected entity's projected position —
+  the persistent read the player can trust.
+
+- Rejected orders were silent: the plan's command gate refuses bad
+  orders by design (fog-hidden targets, wrong capability, unaffordable
+  costs), and the client dropped those events on the floor — which
+  reads on screen as "the controls don't work". FeedbackState::refuse()
+  now records the refusal at the order's click point (a fading red
+  square, refusal_quads) plus a HUD notice line with the reason
+  (rejection_text maps every RejectReason to player-facing text; the
+  match is total, so a new variant cannot ship silently).
+
+Both are pure geometry over the snapshot + camera, unit-tested like
+the rest of the module; refusals_seen joins the smoke summary's
+evidence counters.
+---
+ crates/client/src/feedback.rs | 232 +++++++++++++++++++++++++++++++++-
+ 1 file changed, 229 insertions(+), 3 deletions(-)
+
+diff --git a/crates/client/src/feedback.rs b/crates/client/src/feedback.rs
+index ba2b15e..a62edd5 100644
+--- a/crates/client/src/feedback.rs
++++ b/crates/client/src/feedback.rs
+@@ -12,8 +12,8 @@
+ //! pixel-level "does it read well" judgement is the human half of DEBT-008.
+ 
+ use crate::text::{TextAtlas, UiQuad};
+-use pandemonium_engine::{logical_to_world, RtsCamera};
+-use pandemonium_sim_api::{EntityId, Event, Vec2Fx};
++use pandemonium_engine::{logical_to_world, RenderSnapshot, RtsCamera};
++use pandemonium_sim_api::{EntityId, Event, RejectReason, Vec2Fx};
+ 
+ /// How many presented frames a hit flash lasts (a third of a second at the
+ /// client's frame rate).
+@@ -23,6 +23,10 @@ pub const FLASH_FRAMES: u64 = 18;
+ /// second — enough to confirm the click, not enough to clutter).
+ pub const PING_FRAMES: u64 = 45;
+ 
++/// How many presented frames a refusal cue lasts (a second — long enough
++/// to read the HUD line, short enough to not nag).
++pub const REFUSAL_FRAMES: u64 = 60;
++
+ /// The event-driven feedback state: which entities were hit recently, where
+ /// commands were acknowledged recently, and how much feedback has flowed
+ /// (the smoke summary's evidence that the wiring ran).
+@@ -33,10 +37,19 @@ pub struct FeedbackState {
+     flashes: Vec<(EntityId, u64)>,
+     /// Ground positions a command was issued at, with the expiry frame.
+     pings: Vec<(Vec2Fx, u64)>,
++    /// Where refused orders were clicked (the red refusal square), with
++    /// the expiry frame (M9.1).
++    refusals: Vec<(Vec2Fx, u64)>,
++    /// The latest refusal's HUD line (its text and expiry frame) —
++    /// `"order refused: <reason>"` (M9.1).
++    pub refusal_notice: Option<(String, u64)>,
+     /// Total `AttackHit` events seen (the smoke summary's evidence).
+     pub hits_seen: u32,
+     /// Total command pings issued.
+     pub pings_issued: u32,
++    /// Total refused orders seen (the smoke summary's evidence — a silent
++    /// refusal reads as "I can't command my army", so they now count).
++    pub refusals_seen: u32,
+ }
+ 
+ impl FeedbackState {
+@@ -61,10 +74,32 @@ impl FeedbackState {
+         self.pings_issued += 1;
+     }
+ 
+-    /// Drops expired flashes and pings. Called once per presented frame.
++    /// Records a refused order at its click point: a red square where it
++    /// was clicked and the HUD line with the reason (M9.1 — the DEBT-008
++    /// human pass: rejected commands were silent, which read as "the
++    /// controls don't work").
++    pub fn refuse(&mut self, ground: Vec2Fx, reason: RejectReason, frame: u64) {
++        self.refusals.push((ground, frame + REFUSAL_FRAMES));
++        self.refusal_notice = Some((
++            format!("order refused: {}", rejection_text(reason)),
++            frame + REFUSAL_FRAMES,
++        ));
++        self.refusals_seen += 1;
++    }
++
++    /// Drops expired flashes, pings, and refusals. Called once per
++    /// presented frame.
+     pub fn expire(&mut self, frame: u64) {
+         self.flashes.retain(|(_, expires_at)| *expires_at > frame);
+         self.pings.retain(|(_, expires_at)| *expires_at > frame);
++        self.refusals.retain(|(_, expires_at)| *expires_at > frame);
++        if self
++            .refusal_notice
++            .as_ref()
++            .is_some_and(|(_, expires_at)| *expires_at <= frame)
++        {
++            self.refusal_notice = None;
++        }
+     }
+ 
+     /// Whether an entity is flashing this frame (the renderer tints it).
+@@ -76,6 +111,11 @@ impl FeedbackState {
+     pub fn active_pings(&self) -> &[(Vec2Fx, u64)] {
+         &self.pings
+     }
++
++    /// The active refusal squares, oldest first.
++    pub fn active_refusals(&self) -> &[(Vec2Fx, u64)] {
++        &self.refusals
++    }
+ }
+ 
+ /// Converts NDC (y up, -1..1) to screen pixels (y down from the top-left).
+@@ -170,6 +210,106 @@ pub fn ping_quads(
+     quads
+ }
+ 
++/// Builds the selection-quads: corner brackets around each selected
++/// entity's projected position (M9.1 — the DEBT-008 human pass found the
++/// brightened team color alone did not read as "selected"; the brackets
++/// are the persistent selection state the player can trust).
++pub fn selection_quads(
++    atlas: &TextAtlas,
++    selection: &[EntityId],
++    snapshot: &RenderSnapshot,
++    camera: &RtsCamera,
++    viewport: (f32, f32),
++) -> Vec<UiQuad> {
++    /// Half the bracket box's side, in pixels.
++    const HALF: f32 = 11.0;
++    /// How far each bracket's arm reaches, in pixels.
++    const ARM: f32 = 4.0;
++    /// Bracket stroke thickness, in pixels.
++    const THICK: f32 = 1.5;
++    let selected: std::collections::BTreeSet<EntityId> = selection.iter().copied().collect();
++    let mut quads = Vec::new();
++    for entity in &snapshot.entities {
++        if !selected.contains(&entity.id) {
++            continue;
++        }
++        let ndc = camera.project(entity.pos);
++        if !ndc.x.is_finite() || !ndc.y.is_finite() {
++            continue; // behind the camera
++        }
++        let (cx, cy) = ndc_to_pixels((ndc.x, ndc.y), viewport);
++        let color = [0.55, 1.0, 0.75, 0.95];
++        let (left, right) = (cx - HALF, cx + HALF);
++        let (top, bottom) = (cy - HALF, cy + HALF);
++        // Four corner brackets, two rects each: an L at every corner.
++        quads.push(atlas.solid_rect(left, top, ARM, THICK, color));
++        quads.push(atlas.solid_rect(left, top, THICK, ARM, color));
++        quads.push(atlas.solid_rect(right - ARM, top, ARM, THICK, color));
++        quads.push(atlas.solid_rect(right - THICK, top, THICK, ARM, color));
++        quads.push(atlas.solid_rect(left, bottom - THICK, ARM, THICK, color));
++        quads.push(atlas.solid_rect(left, bottom - ARM, THICK, ARM, color));
++        quads.push(atlas.solid_rect(right - ARM, bottom - THICK, ARM, THICK, color));
++        quads.push(atlas.solid_rect(right - THICK, bottom - ARM, THICK, ARM, color));
++    }
++    quads
++}
++
++/// Builds the refusal quads: a fading red square outline at each refused
++/// order's click point — the "no" to the ping's "yes" (M9.1).
++pub fn refusal_quads(
++    atlas: &TextAtlas,
++    refusals: &[(Vec2Fx, u64)],
++    camera: &RtsCamera,
++    frame: u64,
++    viewport: (f32, f32),
++) -> Vec<UiQuad> {
++    /// Half the refusal square's side, in pixels.
++    const HALF: f32 = 7.0;
++    /// Square stroke thickness, in pixels.
++    const THICK: f32 = 1.5;
++    let mut quads = Vec::new();
++    for (ground, expires_at) in refusals {
++        let world = logical_to_world(*ground);
++        let ndc = camera.project(world);
++        if !ndc.x.is_finite() || !ndc.y.is_finite() {
++            continue;
++        }
++        let (cx, cy) = ndc_to_pixels((ndc.x, ndc.y), viewport);
++        let remaining = expires_at.saturating_sub(frame) as f32 / REFUSAL_FRAMES as f32;
++        let alpha = 0.9 * remaining.clamp(0.0, 1.0);
++        let color = [1.0, 0.3, 0.25, alpha];
++        let (left, right) = (cx - HALF, cx + HALF);
++        let (top, bottom) = (cy - HALF, cy + HALF);
++        // A hollow square: one thin rect per side.
++        quads.push(atlas.solid_rect(left, top, 2.0 * HALF, THICK, color));
++        quads.push(atlas.solid_rect(left, bottom - THICK, 2.0 * HALF, THICK, color));
++        quads.push(atlas.solid_rect(left, top, THICK, 2.0 * HALF, color));
++        quads.push(atlas.solid_rect(right - THICK, top, THICK, 2.0 * HALF, color));
++    }
++    quads
++}
++
++/// The player-facing text for a rejection reason (plan §8.2's vocabulary,
++/// phrased for the HUD line — data-driven wording would buy nothing here).
++pub fn rejection_text(reason: RejectReason) -> &'static str {
++    match reason {
++        RejectReason::TickMismatch => "the order missed its tick",
++        RejectReason::DuplicateSeq => "duplicate order",
++        RejectReason::PlayerMissing => "not a player in this match",
++        RejectReason::UnknownEntity => "no such unit",
++        RejectReason::NotOwnedByIssuer => "not yours to command",
++        RejectReason::MissingCapability => "they can't do that",
++        RejectReason::UnknownKind => "unknown kind",
++        RejectReason::InvalidTarget => "invalid target",
++        RejectReason::NotVisible => "target not visible",
++        RejectReason::CannotAfford => "not enough Ore",
++        RejectReason::PopulationFull => "population full",
++        RejectReason::PlacementBlocked => "no room there",
++        RejectReason::RequirementsUnmet => "requirements unmet",
++        RejectReason::QueueIndexInvalid => "nothing queued there",
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -261,4 +401,90 @@ mod tests {
+             quads[1]
+         );
+     }
++
++    #[test]
++    fn selection_brackets_mark_only_the_selected() {
++        use pandemonium_engine::{RenderEntity, RenderSnapshot};
++        use pandemonium_sim_api::MoveState;
++        let mut camera = RtsCamera::new(16, 16, 16.0 / 9.0);
++        camera.focus(8.0, 8.0, 20.0);
++        let atlas = TextAtlas::new();
++        let at = |id: u64| RenderEntity {
++            id: EntityId(id),
++            owner: pandemonium_sim_api::PlayerId(0),
++            kind: pandemonium_sim_api::KindId(0),
++            pos: glam::Vec3::new(8.0, 0.0, 8.0),
++            facing: glam::Vec3::ZERO,
++            hp_fraction_milli: 1000,
++            move_state: MoveState::Idle,
++        };
++        let snapshot = RenderSnapshot {
++            tick: 0,
++            entities: vec![at(1), at(2)],
++        };
++        // One selected entity: eight bracket rects (four corners, two rects
++        // per corner). The unselected one contributes nothing.
++        let quads = selection_quads(&atlas, &[EntityId(1)], &snapshot, &camera, (1920.0, 1080.0));
++        assert_eq!(quads.len(), 8, "one entity's four corner brackets");
++        assert!(
++            selection_quads(&atlas, &[], &snapshot, &camera, (1920.0, 1080.0)).is_empty(),
++            "no selection, no brackets"
++        );
++        // A selection holding a dead/absent id draws nothing for it.
++        let stale = selection_quads(
++            &atlas,
++            &[EntityId(1), EntityId(77)],
++            &snapshot,
++            &camera,
++            (1920.0, 1080.0),
++        );
++        assert_eq!(stale.len(), 8, "the absent id is skipped silently");
++    }
++
++    #[test]
++    fn refusals_collect_expire_and_carry_the_reason_text() {
++        let mut state = FeedbackState::default();
++        state.refuse(Vec2Fx::from_ints(10, 10), RejectReason::CannotAfford, 100);
++        assert_eq!(state.refusals_seen, 1);
++        assert_eq!(state.active_refusals().len(), 1);
++        let (text, expires_at) = state.refusal_notice.as_ref().expect("notice set");
++        assert_eq!(text, "order refused: not enough Ore");
++        assert_eq!(*expires_at, 100 + REFUSAL_FRAMES);
++        // A later refusal replaces the notice (the HUD shows one line).
++        state.refuse(Vec2Fx::from_ints(20, 20), RejectReason::NotVisible, 110);
++        let (text, _) = state.refusal_notice.as_ref().expect("notice set");
++        assert_eq!(text, "order refused: target not visible");
++        // Expiry drops both the squares and the notice.
++        state.expire(110 + REFUSAL_FRAMES);
++        assert!(state.active_refusals().is_empty());
++        assert!(state.refusal_notice.is_none());
++    }
++
++    #[test]
++    fn refusal_quads_draw_a_hollow_square_per_refusal() {
++        let mut camera = RtsCamera::new(16, 16, 16.0 / 9.0);
++        camera.focus(8.0, 8.0, 20.0);
++        let atlas = TextAtlas::new();
++        let refusals = [(Vec2Fx::from_ints(8, 8), 60)];
++        let quads = refusal_quads(&atlas, &refusals, &camera, 0, (1920.0, 1080.0));
++        assert_eq!(quads.len(), 4, "one rect per side of the square");
++        // All four rects share the fading red.
++        assert_eq!(quads[0].color, [1.0, 0.3, 0.25, 0.9]);
++    }
++
++    #[test]
++    fn every_rejection_reason_has_player_facing_text() {
++        // The mapping must be total — a new RejectReason variant that
++        // forgets its player text fails to compile (the match is
++        // exhaustive); this test pins the wording for the HUD's sake.
++        assert_eq!(
++            rejection_text(RejectReason::NotVisible),
++            "target not visible"
++        );
++        assert_eq!(
++            rejection_text(RejectReason::MissingCapability),
++            "they can't do that"
++        );
++        assert_eq!(rejection_text(RejectReason::UnknownEntity), "no such unit");
++    }
+ }
+-- 
+2.47.3
+
+
+From 8debfcb89d2677ea649f4906cd9706d76b21c2a0 Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Sun, 4 Oct 2026 14:15:12 +0000
+Subject: [PATCH 3/4] =?UTF-8?q?fix(client):=20the=20input=20pass=20?=
+ =?UTF-8?q?=E2=80=94=20plan=20=C2=A711.3's=20controls,=20working=20(M9.1)?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The DEBT-008 human pass on the M9 build: "nothing is moving, the
+controls are bad, D goes left and A goes right, I can't move with the
+mouse, I can't order my army to move or attack, nothing appears".
+Root causes, all client-side:
+
+- W/S signs now match the fixed camera axes (W pans up-screen).
+- Pan speed is scaled by the real frame delta (34 tiles/s, clamped) —
+  the old fixed per-frame speed made pan a property of the monitor's
+  refresh rate. The arrow keys alias WASD.
+- Mouse: wheel up zooms IN toward the cursor (zoom_toward keeps the
+  cursor's ground anchor under the cursor; the direction was
+  inverted), middle-drag grabs the ground and pulls it (pan_world),
+  and edge scrolling pans when the cursor rests on a window border
+  (focused windows only) — plan §11.3's "pan by edge + keys" had
+  never landed, so the mouse could not move the camera at all.
+- Right-click resolves context per §11.3 (orders::resolve_context_order):
+  an enemy under the cursor orders Attack (previously IMPOSSIBLE — the
+  client could not order an attack at all), a resource node orders
+  Gather for the selection's workers, open ground orders Move. The
+  command gate stays the sole authority; refusals surface as the new
+  feedback cues.
+- 'A' arms attack-move and the next left-click places it (the HUD
+  shows the armed line; Esc/right-click cancels) — firing on key-down
+  fought the key's camera-pan role. Key repeats no longer re-fire
+  hotkeys (holding S spammed Stop orders through every OS repeat).
+- The camera opens focused on the player's start at 26 tiles (the old
+  map-center default at 58 tiles rendered the starting force as specks
+  — "nothing appears on the screen") and re-frames on restart.
+- frames_presented advances on every presented frame, not only in the
+  --frames verification mode — in normal play it was pinned at zero,
+  so M9's flashes and pings never expired and accumulated forever.
+- The end screen centers in the actual viewport, not a guessed 320x240.
+
+Verified end to end under Xvfb + llvmpipe with XTEST injection: 900
+frames presented, drag-box selection of the 5 start entities, 2
+commands submitted (context Move + armed attack-move), the loop
+healthy through pan/zoom/middle-drag (the DEBT-008 recipe, extended).
+---
+ crates/client/src/main.rs   | 497 ++++++++++++++++++++++++++++++------
+ crates/client/src/orders.rs | 361 ++++++++++++++++++++++++++
+ 2 files changed, 782 insertions(+), 76 deletions(-)
+ create mode 100644 crates/client/src/orders.rs
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 95eaf2b..94a3e59 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -11,6 +11,7 @@
+ //! of M3 needs a display and is recorded as such (plan §13 honest declaration).
+ 
+ mod feedback;
++mod orders;
+ mod render;
+ mod text;
+ 
+@@ -27,10 +28,11 @@ use pandemonium_engine::audio::{AudioSink, NullAudioSink};
+ use pandemonium_engine::mesh::terrain_mesh;
+ use pandemonium_engine::renderer::{Frame, HudState};
+ use pandemonium_engine::{
+-    alpha_controller, MatchHost, MatchOutcome, NullRenderer, Renderer, RtsCamera,
++    alpha_controller, alpha_plan, MatchHost, MatchOutcome, NullRenderer, Renderer, RtsCamera,
+ };
+ use pandemonium_sim_api::{
+-    Command, CommandKind, ControllerKind, EntityId, MatchSetup, PlayerId, PlayerSetup,
++    Command, CommandKind, ControllerKind, EntityId, Event, KindId, MatchSetup, PlayerId,
++    PlayerSetup, Vec2Fx,
+ };
+ use render::WgpuRenderer;
+ use text::{TextAtlas, UiQuad};
+@@ -51,6 +53,22 @@ const CLICK_SLOP: f32 = 0.01;
+ const HEIGHT_SCALE: f32 = 0.02;
+ /// How many control groups the client tracks (plan §11.3: control groups).
+ const CONTROL_GROUP_COUNT: usize = 9;
++/// Camera pan speed in tiles per second (keys and edge scrolling share it —
++/// scaled by the real frame delta so pan speed does not depend on the
++/// display's refresh rate; M9.1: the old fixed per-frame speed made a 144 Hz
++/// monitor pan more than twice as fast as 60 Hz).
++const PAN_TILES_PER_SECOND: f32 = 34.0;
++/// The frame-delta clamp for camera motion — a stall must not teleport the
++/// view when the loop resumes.
++const MAX_PAN_FRAME_SECONDS: f32 = 0.05;
++/// How close (in pixels) the cursor must sit to a window border for edge
++/// scrolling (plan §11.3: "pan by edge + keys" — M9.1: the edge half was
++/// missing entirely, so the mouse could not move the camera at all).
++const EDGE_SCROLL_PX: f64 = 24.0;
++/// The opening camera distance from the player's start anchor (M9.1: the
++/// old map-center default at 58 tiles out rendered the starting force as
++/// specks — "nothing appears on the screen").
++const START_CAMERA_DISTANCE: f32 = 26.0;
+ 
+ fn main() -> anyhow::Result<()> {
+     let content = content_path();
+@@ -122,6 +140,28 @@ struct App {
+     keys: BTreeSet<Key<&'static str>>,
+     /// M8: the current keyboard modifiers (Ctrl for control-group assignment).
+     modifiers: ModifiersState,
++    /// M9.1: the middle-drag pan anchor — the ground point grabbed when the
++    /// middle button went down (None when not dragging).
++    middle_anchor: Option<glam::Vec3>,
++    /// M9.1: whether the window has keyboard focus (edge scrolling runs
++    /// focused only, so an unfocused game never steals the desktop).
++    focused: bool,
++    /// M9.1 (plan §11.3): 'A' arms attack-move; the next left-click places
++    /// it. Firing on key-down fought the key's camera-pan role and spammed
++    /// orders through key repeats (the DEBT-008 human pass: "the control
++    /// is bad").
++    attack_move_armed: bool,
++    /// M9.1: the last submitted order (its seq and the ground point it
++    /// targeted) — rejection feedback pings there.
++    last_order: Option<(u32, Vec2Fx)>,
++    /// M9.1: the human start anchor (the opening camera focus and restart's
++    /// re-focus), from the map's declared starts.
++    start_anchor: (f32, f32),
++    /// M9.1: the content's worker kind id (right-click gather resolution).
++    worker_kind: Option<KindId>,
++    /// M9.1: the content's gatherable node kind id (right-click gather
++    /// resolution).
++    node_kind: Option<KindId>,
+     last_frame: Instant,
+     command_seq: u32,
+     /// Display names of the loaded resources, indexed by ResourceId (the
+@@ -167,7 +207,28 @@ impl App {
+             .iter()
+             .map(|resource| resource.display_name.clone())
+             .collect();
+-        let camera = RtsCamera::new(bundle.map.width, bundle.map.height, 16.0 / 9.0);
++        // M9.1: open on the player's base, not the map center — the start
++        // anchor with its starting force fills the frame at the closer
++        // distance, so the player sees their units on frame one.
++        let start_anchor = bundle
++            .map
++            .starts
++            .iter()
++            .find(|start| start.player == 0)
++            .map(|start| (start.x as f32 + 0.5, start.y as f32 + 0.5))
++            .unwrap_or((
++                bundle.map.width as f32 / 2.0,
++                bundle.map.height as f32 / 2.0,
++            ));
++        let mut camera = RtsCamera::new(bundle.map.width, bundle.map.height, 16.0 / 9.0);
++        camera.focus(start_anchor.0, start_anchor.1, START_CAMERA_DISTANCE);
++        // M9.1: the right-click context resolver needs the content's worker
++        // and node kind ids — the engine's alpha-plan resolution (capability
++        // shaped, never name-matched) already derives exactly those.
++        let world = bundle.world();
++        let plan = alpha_plan(&bundle, &world, HUMAN, setup.seed);
++        let worker_kind = Some(plan.worker);
++        let node_kind = plan.node;
+         let host = Self::build_host(&bundle, setup.clone());
+         Ok(Self {
+             bundle,
+@@ -182,6 +243,13 @@ impl App {
+             drag_current: None,
+             keys: BTreeSet::new(),
+             modifiers: ModifiersState::empty(),
++            middle_anchor: None,
++            focused: true,
++            attack_move_armed: false,
++            last_order: None,
++            start_anchor,
++            worker_kind,
++            node_kind,
+             last_frame: Instant::now(),
+             command_seq: 0,
+             resource_names,
+@@ -220,6 +288,15 @@ impl App {
+         self.control_groups = vec![Vec::new(); CONTROL_GROUP_COUNT];
+         self.command_seq = 0;
+         self.commands_submitted = 0;
++        // M9.1: the camera re-frames on the base and the armed order clears
++        // — a fresh match starts from the same readable opening view.
++        self.camera.focus(
++            self.start_anchor.0,
++            self.start_anchor.1,
++            START_CAMERA_DISTANCE,
++        );
++        self.attack_move_armed = false;
++        self.last_order = None;
+         // M9: the feel pass's state resets with the match — a fresh match
+         // starts with clean feedback (no stale flashes or pings).
+         self.audio = NullAudioSink::new();
+@@ -280,31 +357,60 @@ impl App {
+                 .box_select(&own, glam::Vec2::new(a.0, a.1), glam::Vec2::new(b.0, b.1));
+     }
+ 
+-    /// Right-click move: the picked ground point becomes a Move order for the
+-    /// selection (the only path through which the client affects the sim).
+-    fn issue_move(&mut self, ndc: (f32, f32)) {
++    /// The one place orders enter the host: stamps the seq, pings the
++    /// acknowledgment, and remembers the order for rejection feedback
++    /// (M9.1 — the last two are the "the control works" cues).
++    fn submit_order(&mut self, kind: CommandKind, ping_at: Option<Vec2Fx>) {
++        self.command_seq += 1;
++        self.commands_submitted += 1;
++        if let Some(at) = ping_at {
++            self.feedback.ping(at, self.frames_presented);
++            self.last_order = Some((self.command_seq, at));
++        }
++        self.host
++            .submit(Command::new(HUMAN, 0, self.command_seq, kind));
++    }
++
++    /// M9.1 (plan §11.3): the right-click context command — what is under
++    /// the cursor decides the order. An enemy issues Attack (the player's
++    /// only way to order an attack — previously impossible), a resource
++    /// node issues Gather for the selection's workers, open ground issues
++    /// Move. The gate stays the authority; refusals surface as feedback.
++    fn issue_context_order(&mut self, ndc: (f32, f32)) {
+         if self.selection.is_empty() {
+             return;
+         }
+-        let Some(point) = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1)) else {
+-            return;
+-        };
+-        let target = MatchHost::world_to_logical(point.x, point.z);
+-        // M9: the immediate acknowledgment cue — the crosshair the player
+-        // sees on the frame they clicked (the motion follows within the
+-        // A8 tick bounds; this is the intent-to-visible-response ping).
+-        self.feedback.ping(target, self.frames_presented);
+-        self.command_seq += 1;
+-        self.commands_submitted += 1;
+-        self.host.submit(Command::new(
++        let snapshot = self.host.render_snapshot();
++        let Some(order) = orders::resolve_context_order(
++            &self.camera,
++            &snapshot,
++            glam::Vec2::new(ndc.0, ndc.1),
+             HUMAN,
+-            0,
+-            self.command_seq,
+-            CommandKind::Move {
+-                units: self.selection.clone(),
+-                target,
+-            },
+-        ));
++            self.node_kind,
++            self.worker_kind,
++            &self.selection,
++        ) else {
++            return; // cursor above the horizon — nothing to order
++        };
++        match order {
++            orders::ContextOrder::Attack { target, at } => self.submit_order(
++                CommandKind::Attack {
++                    units: self.selection.clone(),
++                    target,
++                },
++                Some(at),
++            ),
++            orders::ContextOrder::Gather { node, at, units } => {
++                self.submit_order(CommandKind::Gather { units, node }, Some(at));
++            }
++            orders::ContextOrder::Move { target } => self.submit_order(
++                CommandKind::Move {
++                    units: self.selection.clone(),
++                    target,
++                },
++                Some(target),
++            ),
++        }
+     }
+ 
+     /// M8 (plan §11.3): Stop hotkey — clears the selection's order queues and
+@@ -313,21 +419,18 @@ impl App {
+         if self.selection.is_empty() {
+             return;
+         }
+-        self.command_seq += 1;
+-        self.commands_submitted += 1;
+-        self.host.submit(Command::new(
+-            HUMAN,
+-            0,
+-            self.command_seq,
++        self.submit_order(
+             CommandKind::Stop {
+                 units: self.selection.clone(),
+             },
+-        ));
++            None,
++        );
+     }
+ 
+-    /// M8 (plan §11.3): AttackMove hotkey — the selection moves to the picked
++    /// M8 (plan §11.3): AttackMove — the selection moves to the picked
+     /// ground point, engaging enemies encountered en route (combat semantics
+-    /// from M6). Falls back to a plain Move for units without Attack.
++    /// from M6). M9.1: issued only from the armed-'A' left-click, never from
++    /// the key-down itself.
+     fn issue_attack_move(&mut self, ndc: (f32, f32)) {
+         if self.selection.is_empty() {
+             return;
+@@ -336,18 +439,13 @@ impl App {
+             return;
+         };
+         let target = MatchHost::world_to_logical(point.x, point.z);
+-        self.feedback.ping(target, self.frames_presented);
+-        self.command_seq += 1;
+-        self.commands_submitted += 1;
+-        self.host.submit(Command::new(
+-            HUMAN,
+-            0,
+-            self.command_seq,
++        self.submit_order(
+             CommandKind::AttackMove {
+                 units: self.selection.clone(),
+                 target,
+             },
+-        ));
++            Some(target),
++        );
+     }
+ 
+     /// M8 (plan §11.3): assign the current selection to control group `index`
+@@ -444,10 +542,15 @@ impl ApplicationHandler for App {
+             }
+             WindowEvent::RedrawRequested => {
+                 self.draw();
++                // M9.1: the presented-frame counter is the feedback clock
++                // (flashes and pings expire by it) — it advances on every
++                // presented frame, not only in the `--frames` verification
++                // mode. In normal play it was pinned at zero, so M9's cues
++                // never expired and accumulated forever.
++                self.frames_presented += 1;
+                 // The windowed smoke budget (DEBT-008 verification): exit after
+                 // N presented frames, with the evidence summary.
+                 if let Some(budget) = self.frames_budget {
+-                    self.frames_presented += 1;
+                     if self.frames_presented >= budget {
+                         self.windowed_summary();
+                         event_loop.exit();
+@@ -455,7 +558,18 @@ impl ApplicationHandler for App {
+                 }
+             }
+             WindowEvent::CursorMoved { position, .. } => {
+-                self.drag_current = Some((position.x, position.y));
++                let _ = self.drag_current.insert((position.x, position.y));
++                // M9.1: middle-drag panning — the grabbed ground point
++                // follows the cursor ("grab the ground and pull").
++                if let Some(anchor) = self.middle_anchor {
++                    let Some(window) = &self.window else {
++                        return;
++                    };
++                    let ndc = Self::to_ndc(window, position.x, position.y);
++                    if let Some(current) = self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1)) {
++                        self.camera.pan_world(anchor - current);
++                    }
++                }
+             }
+             WindowEvent::MouseInput { state, button, .. } => {
+                 let Some(window) = &self.window else { return };
+@@ -463,7 +577,15 @@ impl ApplicationHandler for App {
+                 let ndc = Self::to_ndc(window, cursor.0, cursor.1);
+                 match (button, state) {
+                     (MouseButton::Left, ElementState::Pressed) => {
+-                        self.drag_start = Some(cursor);
++                        if self.attack_move_armed {
++                            // M9.1: the armed attack-move fires at the click,
++                            // consumes the press, and disarms — the press
++                            // never starts a selection drag.
++                            self.attack_move_armed = false;
++                            self.issue_attack_move(ndc);
++                        } else {
++                            self.drag_start = Some(cursor);
++                        }
+                     }
+                     (MouseButton::Left, ElementState::Released) => {
+                         if let Some(start) = self.drag_start.take() {
+@@ -477,32 +599,68 @@ impl ApplicationHandler for App {
+                             }
+                         }
+                     }
+-                    (MouseButton::Right, ElementState::Pressed) => self.issue_move(ndc),
++                    // M9.1 (plan §11.3): the right-click context command —
++                    // attack/gather/move resolved from what is under the
++                    // cursor. It also cancels an armed attack-move (any
++                    // other order disarms).
++                    (MouseButton::Right, ElementState::Pressed) => {
++                        self.attack_move_armed = false;
++                        self.issue_context_order(ndc);
++                    }
++                    // M9.1: middle-drag panning grabs the ground on press.
++                    (MouseButton::Middle, ElementState::Pressed) => {
++                        self.middle_anchor =
++                            self.camera.ground_point(glam::Vec2::new(ndc.0, ndc.1));
++                    }
++                    (MouseButton::Middle, ElementState::Released) => {
++                        self.middle_anchor = None;
++                    }
+                     _ => {}
+                 }
+             }
+-            WindowEvent::MouseWheel { delta, .. } => match delta {
+-                MouseScrollDelta::LineDelta(_, lines) => self.camera.zoom(1.0 + lines * 0.1),
+-                MouseScrollDelta::PixelDelta(delta) => {
+-                    self.camera.zoom(1.0 + delta.y as f32 * 0.001)
++            WindowEvent::MouseWheel { delta, .. } => {
++                // M9.1: wheel up zooms in, and the zoom keeps the cursor's
++                // ground anchor under the cursor (plan §11.3: "zoom toward
++                // the cursor" — the old orbit-only zoom read as the view
++                // sliding away, and the direction was inverted).
++                let lines = match delta {
++                    MouseScrollDelta::LineDelta(_, lines) => lines,
++                    MouseScrollDelta::PixelDelta(delta) => delta.y as f32 * 0.05,
++                };
++                if lines != 0.0 {
++                    let ndc = self.cursor_ndc();
++                    self.camera
++                        .zoom_toward(1.0 - lines * 0.1, glam::Vec2::new(ndc.0, ndc.1));
+                 }
+-            },
++            }
+             WindowEvent::KeyboardInput { event, .. } => {
++                // M9.1: key repeats re-press an already-held key — they must
++                // not re-fire hotkeys (holding S to pan spammed Stop orders
++                // through every repeat; the DEBT-008 human pass).
++                if event.repeat {
++                    return;
++                }
+                 let pressed = event.state == ElementState::Pressed;
+                 if let PhysicalKey::Code(code) = event.physical_key {
+                     match code {
+                         winit::keyboard::KeyCode::KeyW => set_key(&mut self.keys, "w", pressed),
++                        // M9.1: the arrow keys alias the WASD pan (plan
++                        // §11.3's key panning covers both habits).
++                        winit::keyboard::KeyCode::ArrowUp => set_key(&mut self.keys, "w", pressed),
+                         winit::keyboard::KeyCode::KeyA => {
+                             set_key(&mut self.keys, "a", pressed);
+-                            // M8: 'A' is also the AttackMove hotkey on press
+-                            // (camera pan uses the held state; the command
+-                            // fires once on the key-down edge). Only when the
+-                            // match is ongoing — end-screen 'R' takes over.
++                            // M9.1 (plan §11.3): 'A' arms attack-move; the
++                            // next left-click places it (pressing the key
++                            // no longer fires at the cursor — that fought
++                            // the key's camera-pan role). Only while the
++                            // match is ongoing; the end screen takes over.
+                             if pressed && !self.host.is_finished() {
+-                                let ndc = self.cursor_ndc();
+-                                self.issue_attack_move(ndc);
++                                self.attack_move_armed = true;
+                             }
+                         }
++                        winit::keyboard::KeyCode::ArrowLeft => {
++                            set_key(&mut self.keys, "a", pressed)
++                        }
+                         winit::keyboard::KeyCode::KeyS => {
+                             set_key(&mut self.keys, "s", pressed);
+                             // M8: 'S' is also the Stop hotkey on press.
+@@ -510,7 +668,13 @@ impl ApplicationHandler for App {
+                                 self.issue_stop();
+                             }
+                         }
++                        winit::keyboard::KeyCode::ArrowDown => {
++                            set_key(&mut self.keys, "s", pressed)
++                        }
+                         winit::keyboard::KeyCode::KeyD => set_key(&mut self.keys, "d", pressed),
++                        winit::keyboard::KeyCode::ArrowRight => {
++                            set_key(&mut self.keys, "d", pressed)
++                        }
+                         // §11.6 debug tooling: overlay toggle, pause, single-step.
+                         winit::keyboard::KeyCode::F3 if pressed => {
+                             self.debug_overlay = !self.debug_overlay;
+@@ -550,7 +714,15 @@ impl ApplicationHandler for App {
+                                 self.restart();
+                             }
+                         }
+-                        winit::keyboard::KeyCode::Escape if pressed => event_loop.exit(),
++                        winit::keyboard::KeyCode::Escape if pressed => {
++                            // M9.1: Esc cancels an armed attack-move first;
++                            // with nothing armed it quits.
++                            if self.attack_move_armed {
++                                self.attack_move_armed = false;
++                            } else {
++                                event_loop.exit();
++                            }
++                        }
+                         _ => {}
+                     }
+                 }
+@@ -558,26 +730,63 @@ impl ApplicationHandler for App {
+             WindowEvent::ModifiersChanged(modifiers) => {
+                 self.modifiers = modifiers.state();
+             }
++            WindowEvent::Focused(focused) => {
++                self.focused = focused;
++            }
+             _ => {}
+         }
+     }
+ 
+     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+-        // Continuous camera motion from held keys, then keep the frames coming.
+-        let pan_speed = 0.8;
++        // M9.1: camera motion from held keys and the screen edge, scaled by
++        // the real frame delta (frame-rate independent — the old fixed
++        // per-frame speed made pan speed a property of the monitor).
++        let dt = self
++            .last_frame
++            .elapsed()
++            .as_secs_f32()
++            .min(MAX_PAN_FRAME_SECONDS);
++        let pan = PAN_TILES_PER_SECOND * dt;
+         let mut dx = 0.0;
+         let mut dz = 0.0;
++        // M9.1: W pans the view up-screen (away from the camera), D pans
++        // right — the M3 signs were mirrored along with the camera's right
++        // axis (the DEBT-008 human pass: "d goes left and a goes right").
+         if self.keys.contains(&Key::Character("w")) {
+-            dz -= pan_speed;
++            dz += pan;
+         }
+         if self.keys.contains(&Key::Character("s")) {
+-            dz += pan_speed;
++            dz -= pan;
+         }
+         if self.keys.contains(&Key::Character("a")) {
+-            dx -= pan_speed;
++            dx -= pan;
+         }
+         if self.keys.contains(&Key::Character("d")) {
+-            dx += pan_speed;
++            dx += pan;
++        }
++        // M9.1 (plan §11.3: "pan by edge + keys"): a cursor resting on a
++        // window border pans toward that border, corners combine. Focused
++        // windows only — an unfocused game never scrolls the desktop.
++        if self.focused {
++            if let (Some(window), Some((mx, my))) = (&self.window, self.drag_current) {
++                let size = window.inner_size();
++                if size.width > 0 && size.height > 0 {
++                    let (width, height) = (size.width as f64, size.height as f64);
++                    let margin = EDGE_SCROLL_PX;
++                    if mx < margin {
++                        dx -= pan;
++                    }
++                    if mx > width - margin {
++                        dx += pan;
++                    }
++                    if my < margin {
++                        dz += pan;
++                    }
++                    if my > height - margin {
++                        dz -= pan;
++                    }
++                }
++            }
+         }
+         if dx != 0.0 || dz != 0.0 {
+             self.camera.pan(dx, dz);
+@@ -625,6 +834,28 @@ impl App {
+         self.audio.on_events(&outcome.events);
+         self.feedback
+             .on_events(&outcome.events, self.frames_presented);
++        // M9.1: a refused order surfaces — the red square at its click
++        // point and the HUD line with the reason. The human pass found
++        // silent rejections read as "the controls don't work"; the client
++        // knows where each order was clicked, so the refusal lands there.
++        for event in &outcome.events {
++            if let Event::CommandRejected {
++                issuer,
++                seq,
++                reject,
++            } = event
++            {
++                if *issuer == HUMAN
++                    && self
++                        .last_order
++                        .is_some_and(|(last_seq, _)| last_seq == *seq)
++                {
++                    let (_, at) = self.last_order.expect("just checked");
++                    self.feedback
++                        .refuse(at, reject.reason, self.frames_presented);
++                }
++            }
++        }
+         self.feedback.expire(self.frames_presented);
+         let Some(renderer) = &mut self.renderer else {
+             return;
+@@ -645,8 +876,22 @@ impl App {
+                 (size.width as f32, size.height as f32)
+             })
+             .unwrap_or((1920.0, 1080.0));
+-        let mut quads =
+-            feedback::health_bar_quads(renderer.atlas(), &snapshot, &self.camera, viewport);
++        // M9.1: the selection brackets — the persistent read of what is
++        // selected (the brightened team color alone did not read at play
++        // distance).
++        let mut quads = feedback::selection_quads(
++            renderer.atlas(),
++            &self.selection,
++            &snapshot,
++            &self.camera,
++            viewport,
++        );
++        quads.extend(feedback::health_bar_quads(
++            renderer.atlas(),
++            &snapshot,
++            &self.camera,
++            viewport,
++        ));
+         quads.extend(feedback::ping_quads(
+             renderer.atlas(),
+             self.feedback.active_pings(),
+@@ -654,6 +899,14 @@ impl App {
+             self.frames_presented,
+             viewport,
+         ));
++        // M9.1: the refusal squares.
++        quads.extend(feedback::refusal_quads(
++            renderer.atlas(),
++            self.feedback.active_refusals(),
++            &self.camera,
++            self.frames_presented,
++            viewport,
++        ));
+         // The HUD and debug overlay quads (plan §11.4 / §11.6) queue before the
+         // frame; the renderer drains them on top of the world.
+         quads.extend(overlay_quads(OverlayInput {
+@@ -665,6 +918,13 @@ impl App {
+             entities: snapshot.entities.len(),
+             outcome: outcome.as_ref(),
+             log_len: self.host.log().len(),
++            viewport,
++            armed: self.attack_move_armed,
++            notice: self
++                .feedback
++                .refusal_notice
++                .as_ref()
++                .map(|(text, _)| text.as_str()),
+         }));
+         renderer.queue_ui(&quads);
+         let flashes: Vec<EntityId> = snapshot
+@@ -695,6 +955,13 @@ struct OverlayInput<'a> {
+     entities: usize,
+     outcome: Option<&'a MatchOutcome>,
+     log_len: usize,
++    /// The window's pixel size (M9.1: the end screen centers in the actual
++    /// viewport, not a guessed 320x240).
++    viewport: (f32, f32),
++    /// M9.1: whether an attack-move is armed (the HUD instruction line).
++    armed: bool,
++    /// M9.1: the refusal notice line, when a recent order was refused.
++    notice: Option<&'a str>,
+ }
+ 
+ /// Builds the overlay quads for one frame: the resource/population HUD
+@@ -710,6 +977,9 @@ fn overlay_quads(input: OverlayInput<'_>) -> Vec<UiQuad> {
+         entities,
+         outcome,
+         log_len,
++        viewport,
++        armed,
++        notice,
+     } = input;
+     /// Screen margin between panels and the window edge.
+     const MARGIN: f32 = 8.0;
+@@ -742,7 +1012,46 @@ fn overlay_quads(input: OverlayInput<'_>) -> Vec<UiQuad> {
+     ));
+     quads.extend(atlas.layout(&line, MARGIN + PAD, baseline, [1.0, 1.0, 1.0, 0.95]));
+ 
+-    // The debug overlay (§11.6), below the HUD panel.
++    // M9.1: the armed attack-move instruction (amber) and the refusal
++    // notice (red), directly under the resource line — one line each, so
++    // the player always knows what the next click will do.
++    let mut notice_top = MARGIN + line_height + 2.0 * PAD + MARGIN;
++    if armed {
++        let line = "ATTACK MOVE - left-click a target (Esc cancels)";
++        let width = atlas.measure(line);
++        quads.push(atlas.solid_rect(
++            MARGIN,
++            notice_top,
++            width + 2.0 * PAD,
++            line_height + 2.0 * PAD,
++            [0.25, 0.18, 0.02, 0.55],
++        ));
++        quads.extend(atlas.layout(
++            line,
++            MARGIN + PAD,
++            notice_top + PAD + atlas.ascent,
++            [1.0, 0.8, 0.3, 0.95],
++        ));
++        notice_top += line_height + 2.0 * PAD + MARGIN;
++    }
++    if let Some(notice) = notice {
++        let width = atlas.measure(notice);
++        quads.push(atlas.solid_rect(
++            MARGIN,
++            notice_top,
++            width + 2.0 * PAD,
++            line_height + 2.0 * PAD,
++            [0.22, 0.03, 0.03, 0.55],
++        ));
++        quads.extend(atlas.layout(
++            notice,
++            MARGIN + PAD,
++            notice_top + PAD + atlas.ascent,
++            [1.0, 0.45, 0.4, 0.95],
++        ));
++    }
++
++    // The debug overlay (§11.6), below the notice lines.
+     if debug {
+         let lines = [
+             format!("tick {}", hud.tick),
+@@ -758,7 +1067,7 @@ fn overlay_quads(input: OverlayInput<'_>) -> Vec<UiQuad> {
+             .iter()
+             .map(|line| atlas.measure(line))
+             .fold(0.0f32, f32::max);
+-        let top = MARGIN + line_height + 2.0 * PAD + MARGIN;
++        let top = notice_top;
+         let panel_height = lines.len() as f32 * line_height + 2.0 * PAD;
+         quads.push(atlas.solid_rect(
+             MARGIN,
+@@ -814,13 +1123,10 @@ fn overlay_quads(input: OverlayInput<'_>) -> Vec<UiQuad> {
+             .fold(0.0f32, f32::max);
+         let panel_w = widest + 4.0 * PAD;
+         let panel_h = lines.len() as f32 * line_height + 4.0 * PAD;
+-        // Center the panel in the window — the atlas doesn't know the window
+-        // size, so we use a fixed large offset (the renderer's NDC pipeline
+-        // clips anything off-screen). 320x240 px is a safe center for the
+-        // default window; on other sizes the panel stays anchored top-left
+-        // of center.
+-        let panel_x = 320.0 - panel_w / 2.0;
+-        let panel_y = 240.0 - panel_h / 2.0;
++        // M9.1: center the panel in the actual window (the old fixed
++        // 320x240 guess only centered the default window size).
++        let panel_x = viewport.0 * 0.5 - panel_w * 0.5;
++        let panel_y = viewport.1 * 0.5 - panel_h * 0.5;
+         let panel_color = if outcome.winner == HUMAN {
+             [0.05, 0.12, 0.05, 0.85]
+         } else {
+@@ -881,12 +1187,46 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+     // display (their counters are the printed evidence).
+     let mut audio = NullAudioSink::new();
+     let mut feedback = FeedbackState::default();
++    // M9.1: the smoke also exercises the refusal wiring — one deliberately
++    // invalid order (a Move naming a unit that does not exist) must come
++    // back as a CommandRejected the client can see, and the feedback
++    // layer turns it into the red-square cue + HUD notice the windowed
++    // path draws. The same loop below surfaces it.
++    host.submit(Command::new(
++        HUMAN,
++        0,
++        1,
++        CommandKind::Move {
++            units: vec![EntityId(999_999)],
++            target: Vec2Fx::from_ints(12, 12),
++        },
++    ));
+     let frame_dt = std::time::Duration::from_secs_f64(1.0 / 60.0);
+     let mut entities = 0;
++    let mut refusal_surfaced = false;
+     for frame in 0..180 {
+         let outcome = host.advance(frame_dt);
+         audio.on_events(&outcome.events);
+         feedback.on_events(&outcome.events, frame);
++        for event in &outcome.events {
++            if let Event::CommandRejected {
++                issuer,
++                seq,
++                reject,
++            } = event
++            {
++                if *issuer == HUMAN && *seq == 1 {
++                    feedback.refuse(Vec2Fx::from_ints(12, 12), reject.reason, frame);
++                    refusal_surfaced = true;
++                    // Set the moment the refusal lands (it expires frames
++                    // later by design — that is the cue's lifetime).
++                    assert!(
++                        feedback.refusal_notice.is_some(),
++                        "the refusal notice line is set for the HUD"
++                    );
++                }
++            }
++        }
+         feedback.expire(frame);
+         let snapshot = host.render_snapshot();
+         entities = snapshot.entities.len();
+@@ -919,8 +1259,13 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+         hud.tick, hud.paused, hud.population, hud.population_cap
+     );
+     println!(
+-        "  feedback wiring: {} events fed the audio sink ({} cues), {} attacks flashed on screen",
+-        audio.fed, audio.cues, feedback.hits_seen
++        "  feedback wiring: {} events fed the audio sink ({} cues), {} attacks flashed on screen, \
++         {} refused orders surfaced",
++        audio.fed, audio.cues, feedback.hits_seen, feedback.refusals_seen
++    );
++    assert!(
++        refusal_surfaced && feedback.refusals_seen > 0,
++        "the invalid order must have surfaced as a refusal cue"
+     );
+     println!("  content hash:    {:#018x}", bundle.content_hash());
+     println!("pandemonium client — smoke PASS (windowed M3 verification requires a display)");
+diff --git a/crates/client/src/orders.rs b/crates/client/src/orders.rs
+new file mode 100644
+index 0000000..0195fb5
+--- /dev/null
++++ b/crates/client/src/orders.rs
+@@ -0,0 +1,361 @@
++//! Right-click context resolution (plan §11.3: "right-click context
++//! command (move/attack/gather resolved from what's under the cursor)"):
++//! what sits under the cursor decides the order. An enemy entity under the
++//! cursor orders `Attack`; a neutral resource node under the cursor orders
++//! `Gather` for the gather-capable part of the selection (soldiers
++//! right-clicked onto a node just walk there); open ground orders `Move`.
++//!
++//! M9.1 (the DEBT-008 human pass): before this, right-click always issued a
++//! plain `Move` — the player could not order an attack at all ("I can't
++//! give my army command to attack"), and workers could not be sent to
++//! gather by clicking a node.
++//!
++//! This is pure geometry over the render snapshot and the camera — the
++//! same projection the renderer and the box select use, so what the
++//! resolver sees is what is on screen. The command gate stays the sole
++//! authority on legality (an enemy the fog hides still rejects `NotVisible`,
++//! and the rejection surfaces as client feedback).
++
++use pandemonium_engine::{world_to_fx, RenderEntity, RenderSnapshot, RtsCamera};
++use pandemonium_sim_api::{EntityId, KindId, PlayerId, Vec2Fx};
++
++/// How far (in NDC) the cursor may sit from an entity's projection for the
++/// click to count as "on" it — the same radius single-click selection uses.
++const PICK_RADIUS: f32 = 0.05;
++
++/// What the right-click resolved to, and everything the submit path needs.
++#[derive(Clone, PartialEq, Eq, Debug)]
++pub enum ContextOrder {
++    /// Attack the entity under the cursor. `at` is its ground position
++    /// (the acknowledgment ping's point).
++    Attack {
++        /// The enemy entity to attack.
++        target: EntityId,
++        /// The target's ground position (for the ping).
++        at: Vec2Fx,
++    },
++    /// Gather the resource node under the cursor, with the gather-capable
++    /// subset of the selection (units whose kind is the content's worker).
++    Gather {
++        /// The node to gather from.
++        node: EntityId,
++        /// The node's ground position (for the ping).
++        at: Vec2Fx,
++        /// The selection's gather-capable units (workers).
++        units: Vec<EntityId>,
++    },
++    /// Move to the picked ground point.
++    Move {
++        /// The fixed-point ground target.
++        target: Vec2Fx,
++    },
++}
++
++/// Resolves the right-click order for the selection from what is under the
++/// cursor. `own` is the clicking player's slot; `node_kind` and
++/// `worker_kind` are the content's gatherable-node and worker kind ids (the
++/// engine's alpha-plan resolution supplies them). `None` when the cursor is
++/// above the horizon (no ground, nothing picked) or the selection is empty.
++pub fn resolve_context_order(
++    camera: &RtsCamera,
++    snapshot: &RenderSnapshot,
++    cursor: glam::Vec2,
++    own: PlayerId,
++    node_kind: Option<KindId>,
++    worker_kind: Option<KindId>,
++    selection: &[EntityId],
++) -> Option<ContextOrder> {
++    if selection.is_empty() {
++        return None;
++    }
++    // 1. An enemy under the cursor orders Attack.
++    if let Some(enemy) = pick_entity(camera, &snapshot.entities, cursor, |entity| {
++        entity.owner != own && entity.owner != PlayerId::NEUTRAL
++    }) {
++        return Some(ContextOrder::Attack {
++            target: enemy.id,
++            at: logical_of(enemy.pos),
++        });
++    }
++    // 2. A resource node under the cursor orders Gather — but only when the
++    //    selection holds gather-capable units (workers); otherwise the click
++    //    falls through to a Move so soldiers walk to the node instead.
++    if let Some(node) = pick_entity(camera, &snapshot.entities, cursor, |entity| {
++        entity.owner == PlayerId::NEUTRAL && Some(entity.kind) == node_kind
++    }) {
++        let units: Vec<EntityId> = snapshot
++            .entities
++            .iter()
++            .filter(|entity| Some(entity.kind) == worker_kind && selection.contains(&entity.id))
++            .map(|entity| entity.id)
++            .collect();
++        if !units.is_empty() {
++            return Some(ContextOrder::Gather {
++                node: node.id,
++                at: logical_of(node.pos),
++                units,
++            });
++        }
++    }
++    // 3. Open ground orders Move.
++    let ground = camera.ground_point(cursor)?;
++    Some(ContextOrder::Move {
++        target: Vec2Fx::new(world_to_fx(ground.x), world_to_fx(ground.z)),
++    })
++}
++
++/// The nearest entity to the cursor whose projection is within
++/// [`PICK_RADIUS`] and that passes `predicate`.
++fn pick_entity<'a>(
++    camera: &RtsCamera,
++    entities: &'a [RenderEntity],
++    cursor: glam::Vec2,
++    predicate: impl Fn(&RenderEntity) -> bool,
++) -> Option<&'a RenderEntity> {
++    let mut best: Option<(f32, &'a RenderEntity)> = None;
++    for entity in entities {
++        if !predicate(entity) {
++            continue;
++        }
++        let projected = camera.project(entity.pos);
++        if !projected.x.is_finite() || !projected.y.is_finite() {
++            continue; // behind the camera — not on screen, not clickable
++        }
++        let distance = (projected - cursor).length();
++        if distance <= PICK_RADIUS && best.is_none_or(|(best_distance, _)| distance < best_distance)
++        {
++            best = Some((distance, entity));
++        }
++    }
++    best.map(|(_, entity)| entity)
++}
++
++/// Converts a world ground-plane position to the logical fixed-point pair.
++fn logical_of(pos: glam::Vec3) -> Vec2Fx {
++    Vec2Fx::new(world_to_fx(pos.x), world_to_fx(pos.z))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use pandemonium_sim_api::MoveState;
++
++    const OWN: PlayerId = PlayerId(0);
++    const ENEMY_OWNER: PlayerId = PlayerId(1);
++    const WORKER: KindId = KindId(1);
++    const SOLDIER: KindId = KindId(2);
++    const NODE: KindId = KindId(3);
++
++    fn entity(id: u64, owner: PlayerId, kind: KindId, pos: glam::Vec3) -> RenderEntity {
++        RenderEntity {
++            id: EntityId(id),
++            owner,
++            kind,
++            pos,
++            facing: glam::Vec3::ZERO,
++            hp_fraction_milli: 1000,
++            move_state: MoveState::Idle,
++        }
++    }
++
++    fn camera_on(pos: glam::Vec3) -> RtsCamera {
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.focus(pos.x, pos.z, 24.0);
++        camera
++    }
++
++    fn snapshot(entities: Vec<RenderEntity>) -> RenderSnapshot {
++        RenderSnapshot { tick: 0, entities }
++    }
++
++    #[test]
++    fn an_enemy_under_the_cursor_orders_attack() {
++        let enemy = entity(7, ENEMY_OWNER, SOLDIER, glam::Vec3::new(20.0, 0.0, 30.0));
++        let camera = camera_on(enemy.pos);
++        let snapshot = snapshot(vec![enemy]);
++        let cursor = camera.project(glam::Vec3::new(20.0, 0.0, 30.0));
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(1)],
++        )
++        .expect("the cursor is on the enemy");
++        assert_eq!(
++            resolved,
++            ContextOrder::Attack {
++                target: EntityId(7),
++                at: Vec2Fx::new(world_to_fx(20.0), world_to_fx(30.0)),
++            }
++        );
++    }
++
++    #[test]
++    fn a_node_under_a_worker_selection_orders_gather() {
++        let node = entity(9, PlayerId::NEUTRAL, NODE, glam::Vec3::new(18.0, 0.0, 18.0));
++        let worker = entity(2, OWN, WORKER, glam::Vec3::new(24.0, 0.0, 24.0));
++        let camera = camera_on(node.pos);
++        let snapshot = snapshot(vec![node, worker]);
++        let cursor = camera.project(node.pos);
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(2)],
++        )
++        .expect("the cursor is on the node");
++        assert_eq!(
++            resolved,
++            ContextOrder::Gather {
++                node: EntityId(9),
++                at: Vec2Fx::new(world_to_fx(18.0), world_to_fx(18.0)),
++                units: vec![EntityId(2)],
++            }
++        );
++    }
++
++    #[test]
++    fn a_node_under_soldiers_falls_through_to_move() {
++        // Soldiers cannot gather: right-clicking a node sends them walking
++        // to it (the gather subset is empty, so the ground click wins).
++        let node = entity(9, PlayerId::NEUTRAL, NODE, glam::Vec3::new(18.0, 0.0, 18.0));
++        let soldier = entity(3, OWN, SOLDIER, glam::Vec3::new(24.0, 0.0, 24.0));
++        let camera = camera_on(node.pos);
++        let snapshot = snapshot(vec![node, soldier]);
++        let cursor = camera.project(node.pos);
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(3)],
++        )
++        .expect("open ground under the node");
++        assert!(
++            matches!(resolved, ContextOrder::Move { .. }),
++            "soldiers walk to the node: {resolved:?}"
++        );
++    }
++
++    #[test]
++    fn a_mixed_selection_gathers_only_its_workers() {
++        let node = entity(9, PlayerId::NEUTRAL, NODE, glam::Vec3::new(18.0, 0.0, 18.0));
++        let worker = entity(2, OWN, WORKER, glam::Vec3::new(24.0, 0.0, 24.0));
++        let soldier = entity(3, OWN, SOLDIER, glam::Vec3::new(24.0, 0.0, 24.0));
++        let camera = camera_on(node.pos);
++        let snapshot = snapshot(vec![node, worker, soldier]);
++        let cursor = camera.project(node.pos);
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(2), EntityId(3)],
++        )
++        .expect("the cursor is on the node");
++        assert_eq!(
++            resolved,
++            ContextOrder::Gather {
++                node: EntityId(9),
++                at: Vec2Fx::new(world_to_fx(18.0), world_to_fx(18.0)),
++                units: vec![EntityId(2)],
++            },
++            "only the worker gathers; the soldier is left out of the order"
++        );
++    }
++
++    #[test]
++    fn open_ground_orders_move_at_the_picked_point() {
++        let camera = camera_on(glam::Vec3::new(32.0, 0.0, 32.0));
++        let snapshot = snapshot(vec![]);
++        let cursor = glam::Vec2::new(0.3, -0.2);
++        let ground = camera
++            .ground_point(cursor)
++            .expect("the cursor is on the ground");
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(1)],
++        )
++        .expect("open ground resolves");
++        assert_eq!(
++            resolved,
++            ContextOrder::Move {
++                target: Vec2Fx::new(world_to_fx(ground.x), world_to_fx(ground.z)),
++            }
++        );
++    }
++
++    #[test]
++    fn an_empty_selection_resolves_to_nothing() {
++        let camera = camera_on(glam::Vec3::new(32.0, 0.0, 32.0));
++        let snapshot = snapshot(vec![]);
++        assert!(resolve_context_order(
++            &camera,
++            &snapshot,
++            glam::Vec2::ZERO,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[]
++        )
++        .is_none());
++    }
++
++    #[test]
++    fn a_cursor_above_the_horizon_resolves_to_nothing() {
++        // Minimum pitch puts the top of the frustum above the horizontal:
++        // a cursor there has no ground point and picks nothing.
++        let mut camera = RtsCamera::new(64, 64, 16.0 / 9.0);
++        camera.set_pitch(0.0); // clamps to the minimum
++        let snapshot = snapshot(vec![]);
++        assert!(resolve_context_order(
++            &camera,
++            &snapshot,
++            glam::Vec2::new(0.0, 0.99),
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(1)]
++        )
++        .is_none());
++    }
++
++    #[test]
++    fn own_units_under_the_cursor_are_not_attack_targets() {
++        // Right-clicking one of your own units must not order an attack on
++        // it — the fall-through is a Move (walk to that ground point).
++        let own_unit = entity(5, OWN, SOLDIER, glam::Vec3::new(20.0, 0.0, 30.0));
++        let camera = camera_on(own_unit.pos);
++        let snapshot = snapshot(vec![own_unit]);
++        let cursor = camera.project(own_unit.pos);
++        let resolved = resolve_context_order(
++            &camera,
++            &snapshot,
++            cursor,
++            OWN,
++            Some(NODE),
++            Some(WORKER),
++            &[EntityId(6)],
++        )
++        .expect("the ground under the unit resolves");
++        assert!(
++            matches!(resolved, ContextOrder::Move { .. }),
++            "own entities are never attack targets: {resolved:?}"
++        );
++    }
++}
+-- 
+2.47.3
+
+
+From 1abd7d3e5547217790a7b17183aaaa8b37321e55 Mon Sep 17 00:00:00 2001
+From: Z User <z@container>
+Date: Sun, 4 Oct 2026 14:28:19 +0000
+Subject: [PATCH 4/4] =?UTF-8?q?docs:=20mark=20M9.1=20complete=20=E2=80=94?=
+ =?UTF-8?q?=20handoff,=20README,=20debt,=20assumptions?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+AI-Handoff §2/§4/§6/§8/§9/§11 and the README now tell the M9.1 story:
+the DEBT-008 human pass ran (the first real playtest), found the input
+layer mirrored and half-missing, M9.1 fixed it, and the machine half
+re-verified the windowed loop with XTEST injection (selection 5,
+2 commands, 900 frames). Test counts move to 352 dev / 347 release;
+all three goldens re-verified bit-identical (the hotfix touches
+nothing below the engine's camera). DEBT-008 is narrowed to the human
+re-verification of this build, with the extended Xvfb recipe recorded
+(screen >= window, no WM + xdotool windowfocus). New gotchas: the
+test wall cannot see presentation direction; key repeats re-fire
+hotkeys; frame-counted cues need a clock that always advances; the
+Xvfb screen must fit the window; a WM breaks the GL surface here.
+ASSUMPTIONS A-077..A-080 record the input-scheme, context-resolution,
+opening-framing, and rejection-feedback judgment calls.
+---
+ AI-Handoff.md       | 103 +++++++++++++++++++++++++++++++-------------
+ README.md           |  30 ++++++++++---
+ docs/ASSUMPTIONS.md |  55 +++++++++++++++++++++++
+ docs/DEBT.md        |   2 +-
+ 4 files changed, 155 insertions(+), 35 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index c79e0e0..5c1915a 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -28,10 +28,10 @@
+ |---|---|
+ | What | Pandemonium — an RTS **foundation** that grows into a game (architecture first, content is data) |
+ | Stack | Rust, fully custom engine (own loop, entity store, renderer on top of winit/wgpu — no game engine, no ECS framework) |
+-| Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/pandemonium-bd`) |
++| Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M9 (Alpha content & feel pass) COMPLETE** — the minimum viable loop is playable end to end against the AI. The M8 handoff's one honest gap (the scripted Alpha vs Alpha match at 7200 ticks never resolved) closed in three moves: (1) a simulation fix — a chase order whose commanded target died was never popped, so both sides' defense orders outlived their dead intruders and the armies froze mid-chase forever, still reporting `Moving` with empty paths (movement.rs documents the pop as the combat pipeline's job; the code never did it — combat stage 1 pops it now, A-071); (2) the wave machine re-issues its march on the pressure cadence while a wave is alive, so a live wave never parks (march orders can drain — failed at a choke, completed over a cleared target, or replaced by a defense pull), and it focuses the sighted enemy command center (the elimination target) through the fog-filtered view; (3) waves of ten (from six) with an army cap of sixteen (from twelve) — waves of six traded forever in low-count attrition cycles that never accumulated the damage to level a defended base. Measured across a 32-seed sweep: every match resolves, 9.1k–23.3k ticks, inside the fifteen-minute budget (`tests/alpha_loop.rs` pins it). The feel pass landed: hit flashes (entities push toward hot white on `AttackHit`), health bars over damaged units (`hp_fraction_milli` finally drawn), command-acknowledgment pings, and the plan §11.5 audio seam (`engine::audio`: `AudioSink` trait + a pure event → cue mapping + a null counter sink — no audible backend yet, DEBT-011). The manifest review found no value to change — the stall was code, not content (§10.4 stays pinned). The M7-era AI-vs-AI golden moved (twice — once per behavior change, each re-pinned with its written reason) and the demo golden is untouched. 333/333 dev tests green. **Next: M10 (Stabilization & declaration)** | defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result). The defeat check only fires when the match is "structure-bearing" (A-067: at least one player owns a structure) so the M1 spine-test fixture and the M3 headless smoke path stay green; the Alpha content (every player starts with a Command Center) ends the moment a side is eliminated. The outcome is derived state (A-066: not part of the canonical hash — a pure function of the entity set and the players' `resigned` flags, both of which ARE hashed), the same reasoning as fog (A-059). The M7 goldens stay green by construction: no `STATE_ENCODING_VERSION` bump, no golden regen. `MatchHost` extended with optional AI controllers (`with_controllers` — the M8 client's hosting seam, A-063), a command log (`log()`), and the match outcome (`outcome()` / `is_finished()`). The windowed client hosts its vs-AI opponent through this same seam, renders the end-screen panel (VICTORY/DEFEAT/MUTUAL DESTRUCTION), supports restart (R — drop + reconstruct with fresh controllers from the same bundle + seed, A15), control groups (1-9, Ctrl+digit assigns, digit recalls), and Stop/AttackMove hotkeys (S/A). A15 green (two fresh `MatchHost` instances from the same seed produce identical hashes; with AI controllers the deterministic controller RNG makes the command logs identical too). 320/320 dev tests green. **Next: M9 (Alpha content & feel pass)** |
++| Status | **M9.1 (input hotfix) COMPLETE on top of M9 — the loop is playable, and now *controllable*.** The DEBT-008 human pass finally ran (the project owner played the windowed build) and reported: *"nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears on the screen."* Every symptom was real and every root cause was client-side (the simulation itself was machine-verified through M9 and untouched): (1) the camera's screen-right axis had been **negated since M3** — D panned left, A right, W retreated, S advanced; no sim-side test can catch presentation direction, and nobody had ever played it; (2) the mouse **could not move the camera at all** — plan §11.3's "pan by edge + keys" and "zoom toward the cursor" were never implemented, and the wheel direction was inverted (orbit-only); (3) right-click only ever issued `Move` — **the client had no way to order an attack at all** (§11.3's right-click *context* command was unimplemented); (4) 'A' fired attack-move on key-down *and on every OS key repeat* while also being a pan key; (5) **rejected orders were silent** — `CommandRejected` events were dropped, so every illegal order read as "the controls don't work"; (6) the opening camera framed the map center at 58 tiles out — the starting force read as specks ("nothing appears"); (7) `frames_presented` only advanced in `--frames` verification mode, so M9's flashes and pings **never expired and accumulated forever** in normal play. M9.1 fixes all seven: corrected pan axes (with direction-pinning tests at yaw 0 and 90°), WASD + arrow-key panning at frame-rate-independent speed, edge scrolling + middle-drag grab-pan + wheel zoom-toward-cursor, right-click context resolution (enemy → Attack, node → Gather for workers, ground → Move; `client::orders`), 'A' arms attack-move for the next left-click (HUD line included; Esc/right-click cancels), key-repeat guards, refusal cues (red square at the click point + HUD reason line; the smoke run now pins the wiring with a deliberately invalid order), selection corner brackets, an opening camera focused on the player's start at 26 tiles (re-framed on restart), map-bounds clamping, and a viewport-centered end screen. Machine-verified end to end under Xvfb + llvmpipe with XTEST injection (the DEBT-008 recipe, extended — see §8): a 900-frame windowed run with drag-box selection of the 5 start entities and 2 submitted commands (a context Move and an armed attack-move), the loop healthy through pan, zoom, and middle-drag. 352 dev / 347 release tests green (19 new: 7 camera, 8 context-resolution, 4 feedback). **Zero golden movement** — the fix is 100% presentation/input (no sim/ai/content files touched): demo `0x9d5ba9b565060336`, flagship `0x01b3b60b741f03e9`, content `0x249b69f0ee343a10` all re-verified bit-identical. M9 remains complete underneath (the frozen-army chase-order pop, the re-marching wave machine with CC focus, waves of ten — matches resolve in 9.1k–23.3k ticks across a 32-seed sweep, `tests/alpha_loop.rs`; the feel pass: hit flashes, health bars, command pings, the §11.5 audio seam). DEBT-008 is narrowed to its last inch: the human *re-verification* of the fixed build on a real display (the feel judgment). **Next: M10 (Stabilization & declaration)** | defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result, derived state per A-066, not hashed — the same reasoning as fog A-059; the defeat check fires only in structure-bearing matches, A-067). `MatchHost` hosts the vs-AI opponent (`with_controllers`), keeps the command log, surfaces the outcome; the client's full loop (hosted AI, end screen, R restart, control groups, context orders, feedback cues) runs through it. A15 green (two fresh hosts from the same seed: identical hashes; with AI controllers: identical logs too). |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -50,7 +50,7 @@
+ 
+ ## 4. How to verify the current state
+ 
+-Run from the repo root (`/home/z/my-project/pandemonium-bd`):
++Run from the repo root (the clone — `/home/z/my-project/bd` this handoff):
+ 
+ ```bash
+ cargo fmt --all -- --check                 # formatting
+@@ -63,15 +63,16 @@ cargo run -p pandemonium-client             # windowed 3D client; headless smoke
+ cargo run -p pandemonium-client -- --frames 900   # windowed smoke: auto-exit + evidence summary
+ ```
+ 
+-Expected at this handoff: all commands succeed; 333 tests pass in dev
+-(328 in release — the 5 should-panic invariant-checker tests are
++Expected at this handoff: all commands succeed; 352 tests pass in dev
++(347 in release — the 5 should-panic invariant-checker tests are
+ debug-only by nature — `debug_assert` compiles out in release): 39 fx
+ unit tests, 15 fx property tests, 16 ai unit tests (15 + M9's
+ re-march pin), 105 sim unit tests (103 + M9's two chase-order-pop
+-tests), 4 sim_api unit tests, 8 replay codec tests, 41 engine tests
+-(38 + M9's three audio-cue tests), 10 client tests (5 text-atlas + 5
+-feedback), 11 tools tests, 33 content unit tests, and the acceptance
+-suite: 9 determinism (A1/A2), 4 content-pipeline, 3 movement, 4
++tests), 4 sim_api unit tests, 8 replay codec tests, 48 engine tests
++(41 + M9.1's seven camera direction/pan_world/zoom_toward/focus
++pins), 22 client tests (10 + M9.1's eight context-resolution and
++four refusal/bracket tests), 11 tools tests, 33 content unit tests,
++and the acceptance suite: 9 determinism (A1/A2), 4 content-pipeline, 3 movement, 4
+ economy, 7 combat, 5 vision, 2 architecture-law, 8 M7 tests
+ (`tests/ai.rs`: two A5 structural audits, the A5 ledger identity, the
+ A11 battery, the A11 proptest fuzz, completion + determinism, the
+@@ -84,13 +85,16 @@ event stream), and 3 M9 tests (`tests/alpha_loop.rs`: resolution
+ within the fifteen-minute budget across seeds, end-to-end resolution
+ determinism, the windowed host's vs-AI loop closing naturally).
+ The headless demo's final hash is still 0x9d5ba9b565060336 (seed 7,
+-300 ticks — unchanged through M9: its lone Attack command is
++300 ticks — unchanged through M9 and M9.1: its lone Attack command is
+ gate-refused on the trivial world, so the chase-order pop never
+ fires there); the AI-vs-AI flagship (seed 7, 7200 ticks) pins
+ 0x01b3b60b741f03e9 with tick-0 hash 0x61613bca16b8f00e — the tick-0
+ hash is the M7 original (no orders exist at tick 0); the final hash
+ moved twice in M9 (the chase-order pop, then the AI tuning), each
+-re-pinned with its written reason in the test. The `--p1 ai --p2 ai`
++re-pinned with its written reason in the test — and M9.1 moved
++nothing (all three hashes re-verified bit-identical: the hotfix
++touches only the client and the engine's camera, both above the sim
++boundary). The `--p1 ai --p2 ai`
+ runner prints a `match ended:` line; at longer budgets it now ends
+ naturally (player N wins) — run `--ticks 27000 --p1 ai --p2 ai` to
+ watch a full match resolve.
+@@ -101,13 +105,21 @@ pandemonium-client` prints the no-display finding and runs the headless
+ smoke pass — which since M9 drives the windowed path's exact hosting
+ seam (the AI opponent included) and prints the feedback-wiring
+ evidence line (events fed the audio sink, cues mapped, attacks
+-flashed); on a desktop it opens the window; with `--frames N` the
++flashed, and since M9.1 refused orders surfaced — the smoke submits
++one deliberately invalid Move and pins its rejection through the
++refusal cues); on a desktop it opens the window; with `--frames N` the
+ windowed run exits after N frames and prints the evidence summary,
+ including whether the match ended and who won. The M9 full-windowed
+-verification: under Xvfb + llvmpipe (320x180 screen) a `--frames 40000`
+-run hosted the AI opponent through the real wgpu pipeline and the match
+-resolved naturally — "match ended, player 1 wins (tick 5250)" — recorded
+-in DEBT-008 with the environment recipe. On a headless
++verification: under Xvfb + llvmpipe a `--frames 40000` run hosted the
++AI opponent through the real wgpu pipeline and the match resolved
++naturally — "match ended, player 1 wins (tick 5250)" — recorded in
++DEBT-008 with the environment recipe. The M9.1 input verification
++(same recipe, extended — see §8): a 900-frame windowed run with XTEST
++injection drag-box-selected the 5 start entities, submitted 2 commands
++(a right-click context Move and an armed-'A' attack-move), and kept
++the loop healthy through pan keys, wheel zoom, and middle-drag —
++"windowed smoke: 900 frames presented, 2 commands submitted,
++selection 5, match ongoing". On a headless
+ machine the windowed path is verified on Xvfb + llvmpipe per DEBT-008
+ (selection + Move commands provably work; the M8 additions — end screen,
+ restart, control groups, Stop/AttackMove — are compiled and clippy-clean
+@@ -157,6 +169,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M7 | AI through commands (P4) | ✅ **complete** | A5 + A11 green (ai depends only on fx+sim_api, re-asserted; the sim never references the ai crate; the ledger identity — starting + deliveries − accepted data-defined costs — holds per player; every entity beyond the starting forces traces to an accepted Train/Build; the 20-pair mirrored battery over every reachable rejection class is label-blind; proptest fuzz of random mirrored commands); AI-vs-AI headless matches complete (3 seeds × 2400 ticks under the A12 checker, bit-identical re-runs, seed divergence); golden pinned (0x679f4713114765c9); AI-driven logs replay through the codec (A2); DEBT-005 repaid |
+ | M8 | Match rules & full loop (P5) | ✅ **complete** | Stage 10 (plan §6.3.10, §9.7) lands: defeat = zero owned Footprint structures OR resigned; victory = one survivor; `MatchEnded` fires exactly once (idempotent — `Sim::outcome` caches the result). The defeat check only fires when the match is "structure-bearing" (A-067) so the M1 spine-test fixture and the M3 headless smoke stay green. The outcome is derived state (A-066: not part of the canonical hash) — the M7 goldens stay green by construction (no `STATE_ENCODING_VERSION` bump). `MatchHost` extended with optional AI controllers (`with_controllers`), a command log (`log()`), and the match outcome (`outcome()` / `is_finished()`). The windowed client hosts its vs-AI opponent through this seam, renders the end-screen panel (VICTORY/DEFEAT/MUTUAL DESTRUCTION), supports restart (R — drop + reconstruct, A15), control groups (1-9), and Stop/AttackMove hotkeys (S/A). A15 green (two fresh hosts, same seed → identical hashes; with AI → identical logs too). The `--p1 ai --p2 ai` runner prints a `match ended:` line. DEBT-008 narrowed by M8 (the human visual pass over the full vs-AI loop remains) |
+ | M9 | Alpha content & feel pass | ✅ **complete** | The M8 gap closed: the frozen-chase-order sim bug fixed (defense orders outliving their dead targets froze both armies; combat stage 1 pops them now — 2 unit tests), the wave machine re-marches on the pressure cadence and focuses the sighted enemy CC (re-pinned + a new pin test), waves of ten / army cap sixteen. `tests/alpha_loop.rs`: AI-vs-AI resolves inside 27000 ticks across seeds (measured 9.1k–23.3k over a 32-seed sweep), end-to-end resolution determinism (same seed → same winner, end tick, log, final hash), and the windowed host's vs-AI loop closes naturally (an idle human's base falls to the AI, `outcome()` surfaces through the end-screen boundary). Feel pass: hit flashes, health bars, command pings (5 unit tests, no GPU needed), the `AudioSink` seam + placeholder cue set (3 unit tests; no audible backend — DEBT-011). Manifest review: no value changed — the stall was code, not content (§10.4 pins hold). Goldens: the demo untouched; the AI flagship re-pinned twice with written reasons |
++| M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+ | M10 | Stabilization & declaration | ⬜ pending | every A1–A15 criterion verified; soak green; docs/ALPHA_DECLARATION.md with evidence |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+@@ -506,18 +519,20 @@ event, the `MatchHost` extensions for AI hosting + outcome + log, the
+ windowed client's vs-AI loop with end screen + restart + control groups +
+ hotkeys, and the A15 restart cleanliness proof). What remains, in order:
+ 
+-1. **The human visual pass of DEBT-008 (small, narrowed further by M9)**: on a
+-   desktop display, play `cargo run -p pandemonium-client` through a full
+-   vs-AI match to resolution — the map + entities render, selection and
+-   right-click Move work (both already machine-proven), the end-screen
+-   panel reads well, restart (R) reconstructs cleanly, control groups
+-   recall correctly, the Stop/AttackMove hotkeys feel responsive, and the
+-   M9 feedback cues (hit flashes, health bars, pings) actually look good.
+-   M9's machine additions: the windowed client now reports the match
+-   outcome in its `--frames` summary, and the full windowed vs-AI loop
+-   was machine-run to resolution under Xvfb + llvmpipe (see DEBT-008).
+-   What still needs a human: the pixel-level "does the full loop read
+-   well" judgement.
++1. **The human *re*-verification pass of DEBT-008 (narrowed to its last
++   inch by M9.1)**: the human pass finally RAN (the project owner played
++   the M9 windowed build on a real display) — and it did its job: it
++   found every input-layer defect the machine pass is structurally blind
++   to (mirrored pan axes since M3, no mouse camera control, no attack
++   order path, key-repeat spam, silent rejections, the illegible opening
++   zoom, never-expiring cues). M9.1 fixed them all; the machine half is
++   re-proven (Xvfb + XTEST: 900 frames, 5-entity drag selection, context
++   Move + armed attack-move). What still needs a human: play the M9.1
++   build — `cargo run -p pandemonium-client` — through a full vs-AI
++   match to resolution and judge that the controls now *feel* right
++   (pan/zoom/edge-scroll/middle-drag, right-click context orders, the
++   armed-A flow, the refusal cues, the selection brackets, the opening
++   framing, the end screen + restart). Then DEBT-008 closes.
+ 2. **M10 — Stabilization & declaration (Phase 5)**: the full A1–A15
+    acceptance sweep with written evidence, the 1000-match nightly soak
+    (A7), benchmark baselines (plan §15), the documentation pass, and
+@@ -543,6 +558,36 @@ existing `ai_host` seam.
+ 
+ ## 9. Sharp edges and gotchas discovered along the way
+ 
++- **Presentation direction is invisible to the simulation's test wall** (the
++  M9.1 lesson, and the whole reason the input layer shipped mirrored): the
++  canonical hash pins behavior, not feel — the camera's screen-right axis had
++  been negated since M3, every milestone green, until a human pressed D and
++  the view went left. Two defenses now exist: direction-pinning tests
++  (pan/zoom/focus assert *which way* in world coordinates, at yaw 0 and 90°),
++  and the DEBT-008 human pass as a first-class milestone exit. Any new
++  camera/feel primitive needs both.
++- **A winit key repeat re-fires the key-down edge**: `event.repeat` must be
++  filtered, or every held hotkey re-fires once per OS repeat (holding S to
++  pan spammed Stop orders — and 'A' spammed attack-moves at the cursor).
++  The client returns early on repeats before any hotkey logic runs.
++- **Frame-counted presentation state needs a clock that always advances**:
++  M9's flashes and pings expired by `frames_presented`, but that counter only
++  advanced in the `--frames` verification mode — in normal play it was pinned
++  at zero, so every cue accumulated forever. It now increments on every
++  presented frame. Any future "expires after N frames" state must share that
++  clock, and the verification budget must read the counter without owning it.
++- **An Xvfb screen must be at least as large as the client window** for XTEST
++  input to arrive: the default window is 800x600, and on a 640x360 screen the
++  pointer reports the root window — the mapped window never receives button
++  events (it "looks" visible; `xdotool search --onlyvisible` lists it). Use
++  `Xvfb :99 -screen 0 1280x800x24` for the 800x600 default window.
++- **No window manager means no keyboard focus — and installing one breaks the
++  GL surface**: keyboard events go nowhere without a WM, but running twm
++  under Xvfb + llvmpipe makes wgpu fail adapter creation ("gl not compatible
++  with provided surface"). The working recipe is no WM at all +
++  `xdotool windowfocus <id>` (XSetInputFocus) for keyboard, XTEST for mouse
++  (mouse events need no focus; the pointer just has to be over the window,
++  which is what the screen-size rule above guarantees).
+ - **fontdue reports y-up metrics**: `Metrics::ymin` counts upward from the
+   baseline, so a y-down screen-space top edge is `baseline - (ymin + height)`
+   (see `text.rs`'s `bearing_y`). Getting this backwards puts glyphs below
+@@ -823,7 +868,7 @@ existing `ai_host` seam.
+ | §8 commands | `crates/sim_api/src/lib.rs` (types) + `crates/sim/src/command.rs` (gate + application) |
+ | §9 systems | per-milestone; see status board §6 (M1 spine; M4 movement; M5: economy.rs + production.rs + invariants.rs; M6: combat.rs + vision.rs; M7: crates/ai + engine ai_host; M8: sim/match_rules.rs + engine host extensions + client vs-AI loop; M9: combat.rs's chase-order pop + ai/scripted.rs's wave closing + engine audio.rs) |
+ | §10 content | `docs/CONTENT_GUIDE.md`, `content/` (live), `crates/content/src/` (schema/version/loader/defs/validate/bundle) |
+-| §11 engine/client | `crates/engine` (clock, interpolate, host + pause/single-step + M8 controllers/log/outcome, camera, mesh, renderer + HudState + M9 flashes on Frame, ai_host, audio) + `crates/client` (wgpu renderer, UI overlay pass + M8 end screen, input + M8 control groups/hotkeys/restart, text.rs, feedback.rs) — 3D per ADR-0001; DEBT-008 keeps only the human visual pass |
++| §11 engine/client | `crates/engine` (clock, interpolate, host + pause/single-step + M8 controllers/log/outcome, camera + M9.1's unmirrored axes/pan_world/zoom_toward/focus/map clamp, mesh, renderer + HudState + M9 flashes on Frame, ai_host, audio) + `crates/client` (wgpu renderer, UI overlay pass + M8 end screen + M9.1 viewport-centered, input — M8 control groups/hotkeys/restart, M9.1's WASD/arrows/edge/middle-drag/zoom-toward + repeat guard + armed-'A' — text.rs, feedback.rs + M9.1's brackets/refusals, orders.rs = the §11.3 right-click context resolution) — 3D per ADR-0001; DEBT-008 keeps only the human re-verification |
+ | §12 tools | `crates/tools` — headless (demo + `--p1/--p2 ai|idle` + M8 winner line), replay-verify (content-identity world resolution), content-validate live |
+ | §13 acceptance | `tests/` — A13 live; A1/A2 + spine proofs (M1); A3 scaffold + §10.4 pin (M2, `content_pipeline.rs`); A5 + A11 (M7, `ai.rs`); A15 + match rules (M8, `match_rules.rs`); the M9 resolution exit (M9, `alpha_loop.rs`) |
+ | §14 milestones | this file §6 status board |
+diff --git a/README.md b/README.md
+index 9fbedb3..d92d848 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@ checksum must match, tick for tick. Units may scatter. The simulation does not.
+ 
+ [![CI](https://github.com/E-Vex/pandemonium-bd/actions/workflows/ci.yml/badge.svg)](https://github.com/E-Vex/pandemonium-bd/actions/workflows/ci.yml)
+ ![toolchain](https://img.shields.io/badge/toolchain-1.98.1_pinned-9E6A03?labelColor=21262D)
+-![stage](https://img.shields.io/badge/stage-M9_alpha_content_&_feel_pass_done-9E6A03?labelColor=21262D)
++![stage](https://img.shields.io/badge/stage-M9.1_input_hotfix_done-9E6A03?labelColor=21262D)
+ ![sim floats](https://img.shields.io/badge/sim_floats-0_%28enforced%29-9E6A03?labelColor=21262D)
+ 
+ <picture>
+@@ -153,7 +153,13 @@ At M8 all eleven stages went live; M9 fixed the one behavior bug the live loop e
+ 
+ ## Current status
+ 
+-**Milestones M0 through M9 are complete — the Alpha loop is playable end to end against the AI. M10 (Stabilization & declaration) is next.** The live status board is
++**Milestones M0 through M9 are complete, plus the M9.1 hotfix: the first human
++playtest (DEBT-008) found the input layer mirrored and half-missing, and M9.1
++fixed it — corrected WASD/pan axes, mouse panning (edge + middle-drag +
++zoom-toward-cursor), right-click context orders (attack/gather/move), armed
++attack-move, key-repeat guards, rejection feedback, selection brackets, and
++an opening camera framed on the player's base. M10 (Stabilization &
++declaration) is next.** The live status board is
+ [`AI-Handoff.md`](AI-Handoff.md); an out-of-date handoff is treated as a bug.
+ 
+ Built and verified through M9:
+@@ -189,14 +195,21 @@ Built and verified through M9:
+   mapping, a null counter sink, the placeholder cue set (plan §11.5).
+ - **`client`** — winit 0.30 + wgpu 26 windowed 3D renderer (depth buffer, terrain
+   mesh with heightmap displacement, instanced placeholder entity boxes), selection
+-  + right-click Move, fontdue text atlas + HUD/debug overlay, `--frames N`
++  + right-click context orders, fontdue text atlas + HUD/debug overlay, `--frames N`
+   windowed smoke, headless fallback for CI. **M8**: hosts the AI opponent through
+   `MatchHost::with_controllers`, renders the end-screen panel (VICTORY/DEFEAT/
+   MUTUAL DESTRUCTION), supports restart (R), control groups (1-9), and
+   Stop/AttackMove hotkeys (S/A). **M9**: the feel pass — hit flashes (entities
+   flash toward hot white when hit), health bars over damaged units,
+   command-acknowledgment pings at the clicked ground, the audio sink wired into
+-  the draw loop, and the restart resetting all of it.
++  the draw loop, and the restart resetting all of it. **M9.1**: the input layer
++  actually works — the camera's pan axes were mirrored since M3 (D panned left,
++  W retreated), the mouse could not move the camera at all, and no attack order
++  existed; now WASD/arrows/edge/middle-drag pan with frame-rate-independent
++  speed, the wheel zooms toward the cursor, right-click resolves
++  attack/gather/move from what is under the cursor, 'A' arms attack-move for
++  the next click, refused orders flash red with their reason, selection draws
++  corner brackets, and the match opens framed on the player's base.
+ - **`tools`** — headless runner (demo + `--p1/--p2 ai` controller matches; M8
+   adds a `match ended:` line printing the winner), `replay-verify`,
+   `content-validate` subcommands.
+@@ -219,7 +232,7 @@ Built and verified through M9:
+   law holds.
+ - **CI** — fmt, clippy with `-D warnings`, and the test suite in dev *and*
+   release on Linux, Windows, and macOS, plus the replay round-trip and a
+-  binaries-run check. **333 tests green in dev, 328 in release** (5 should-panic
++  binaries-run check. **352 tests green in dev, 347 in release** (5 should-panic
+   invariant-checker tests are debug-only by nature).
+ 
+ Not built yet — on purpose, in milestone order:
+@@ -275,6 +288,13 @@ cargo run -p pandemonium-client
+ cargo run -p pandemonium-client -- --frames 900
+ ```
+ 
++Controls: **WASD / arrows / screen edges / middle-drag** pan the camera, the
++**wheel** zooms toward the cursor, **left-click / drag** selects, **right-click**
++orders (attack an enemy, gather a node with workers, or move over open ground),
++**A** arms attack-move for the next left-click, **S** stops, **1-9** recall
++control groups (**Ctrl+1-9** assigns), **P** pauses, **F3** toggles the debug
++overlay, **R** restarts after the match ends.
++
+ The full verification gate — the same one CI runs:
+ 
+ ```bash
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index b660229..6b4069b 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -638,3 +638,58 @@ confirms or rejects it.
+   `tests/content_pipeline.rs` are unmoved by M9. The plan's
+   "starter values — placeholders, tunable as data only" posture
+   holds: tuning happened where the diagnosis said the defect lived.
++
++- **A-077 (§11.3, M9.1).** The DEBT-008 human pass forced the input
++  scheme's unresolved choices; these are the resolutions, all
++  feel-judgments pending the human re-verification: WASD and the
++  arrow keys pan (arrows alias the same key set); the pan speed is
++  34 tiles/second scaled by the real frame delta (frame-rate
++  independent; the M3 fixed per-frame speed was a refresh-rate
++  property); edge scrolling runs at a 24-pixel margin, focused
++  windows only; middle-drag is grab-the-ground panning (the world
++  point under the press stays under the cursor); the wheel zooms
++  toward the cursor with up = in; 'A' *arms* attack-move for the
++  next left-click (SC2-style — firing on key-down fought the key's
++  pan role and re-fired through OS key repeats, which are now
++  filtered); Esc cancels an armed order before it ever quits the
++  app; right-click always disarms. The plan's §11.3 letter ("pan by
++  edge + keys, zoom toward the cursor, attack-move hotkey") is
++  satisfied; the specific feels are the assumption.
++
++- **A-078 (§11.3, M9.1).** Right-click context resolution order is
++  enemy → resource node → open ground (plan §11.3's "move/attack/
++  gather resolved from what's under the cursor"): an enemy under
++  the cursor orders Attack for the whole selection; a node orders
++  Gather for the selection's worker-kind units only (soldiers
++  right-clicked onto a node walk there instead — the gather subset
++  empty means the ground click wins); anything else (including
++  clicking one's own units) orders Move to the picked ground
++  point. Hit-testing uses the render snapshot (what is on screen)
++  with the same 0.05 NDC radius as single-click selection; the
++  command gate stays the sole authority — a fog-hidden target
++  rejects NotVisible and the refusal cue surfaces it. Workers and
++  nodes are identified by kind id through the engine's alpha-plan
++  resolution (capability-shaped, never name-matched), reusing the
++  seam the AI host already owns.
++
++- **A-079 (§11.3, M9.1).** The opening camera frames the human
++  player's start anchor (from the map's declared starts) at 26
++  tiles distance, re-framed on restart — the M3 map-center default
++  at 0.9× the map's diagonal (58 tiles on Crossroads) rendered the
++  starting force as unreadable specks, which the human pass
++  reported as "nothing appears on the screen". Panning clamps the
++  orbit target to the map rectangle (zero margin) so the view can
++  never wander off the battlefield. 26 tiles is a readability
++  judgment (the base and its workers fill the lower-center of the
++  frame at 16:9); the human re-verification judges it.
++
++- **A-080 (§8.4, M9.1).** Rejected orders surface as a red hollow
++  square at the click point plus one HUD line ("order refused:
++  <reason>", a total, player-facing mapping of every RejectReason),
++  both living 60 presented frames. The client remembers only the
++  most recent order's click point, so a refusal pings where that
++  order was clicked; any earlier order rejected in the same step
++  still bumps the HUD line and the counter but draws no square.
++  The M9.1 rationale: the plan's gate refuses illegal orders by
++  design, and dropping those events on the floor read, to the first
++  human player, as "the controls don't work".
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index 2fda493..c009d4a 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -16,7 +16,7 @@ repay-when trigger | status |`
+ | DEBT-005 | ~~The replay re-simulation driver exists twice (tools `verify.rs` and `tests/determinism.rs`), ~40 lines each~~ repaid (M7): the feed loop now lives once as `pandemonium_sim::run_command_log` (a pure function over a command stream — the debt's own suggested home, keeping `replay` above `sim`). Tools' `run_scripted` and `verify_replay` and the acceptance suites (`tests/determinism.rs`'s A2 re-sim, M7's `tests/ai.rs`) all drive through it; `tests/determinism.rs`'s `run_match` remains as the A1 *full-observability* harness (it collects per-tick events and snapshots, which the checkpoint driver deliberately does not) — a test fixture, not a second re-sim verifier | simplification | trigger fired: M7 added the third consumer (`tests/ai.rs`) | — | — | repaid (M7) |
+ | DEBT-006 | ~~`ContentBundle::world()` maps only Health/Move/Vision~~ narrowed by M5: Gather, Build, Produce, Storage, ProvidesPopulation, Resource, and Footprint all flow into the sim's capability templates now (with kind economy stats, production lists, and the buildability grid); **Attack is the last carried-but-unmapped capability** repaid (M6): the seam now maps Attack into `CapTemplate::Attack` and the runtime `CapabilityData::Attack` block; the content encoder already covered Attack so `content_hash` is unaffected | simplification | repaid as M5's seam work + M6's Attack mapping | — | — | repaid (M6) |
+ | DEBT-007 | ~~The A3 scaffold proves data-only load + spawn + Move~~ M5 half repaid: `add_a_unit_is_data_only` now gathers, builds the barracks from data, and **trains the data-defined kind from the production list**; M6 half repaid: the test now runs the simulation until the data-defined skirmisher (kind 6) fires an `AttackHit` through auto-acquisition — proving the kind fights through the same combat pipeline every other attacker uses, with zero changes under `crates/sim/` (the source scan still finds no "skirmisher" mention) | simplification | repaid as M5's A3 extension + M6's fight-half extension | — | — | repaid (M6) |
+-| DEBT-008 | The windowed M3 verification is machine-verified but not human-verified: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion — but no human has eyeballed the window (color fidelity, legibility, feel). M8 narrowed the scope: the client hosts the AI opponent through `MatchHost::with_controllers`, renders the end-screen panel, supports restart (R), control groups (1-9), and Stop/AttackMove hotkeys (S/A). M9 narrowed it further: the feel pass landed (hit flashes, health bars, command pings — all event-driven, unit-tested geometry) and the *full windowed vs-AI loop was machine-run to resolution* under Xvfb + llvmpipe — `--frames 40000` on a 320x180 screen presented the window, hosted the AI opponent, ran the match to a natural end (the summary line: "match ended, player 1 wins (tick 5250)" — the AI eliminated the idle human's base through the full wgpu pipeline, end screen included), and exited 0; the windowed host's loop-closing is also pinned headlessly by `tests/alpha_loop.rs`. What still needs a human: the pixel-level judgement — do the feedback cues read well, does the end screen communicate, does the full loop *feel* good on a real display | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary with the outcome line; env: Xvfb + userland libEGL/libGLESv2 + a hand-written glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution (the AI now closes matches — expect 5–15 minutes), confirm the end screen + restart + control groups + the M9 cues read well, then close | a human pass on a machine with a display | open (narrowed by M9) |
++| DEBT-008 | The windowed client's *machine* verification is green through M9.1; its *human* half finally ran and did exactly what it existed for. History: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion; M8 narrowed the scope to the full vs-AI loop (hosted AI, end screen, restart, control groups, hotkeys); M9 machine-ran the full windowed vs-AI loop to natural resolution (`--frames 40000`, "match ended, player 1 wins (tick 5250)") and landed the feel pass (flashes, health bars, pings). **M9 — the human pass**: the project owner played the windowed build on a real display and reported the input layer was mirrored and half-missing ("nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears") — every symptom real, every root cause client-side (the camera's screen-right axis negated since M3; no mouse camera control — §11.3's edge pan and zoom-toward-cursor unimplemented, wheel inverted; no attack-order path — right-click context resolution unimplemented; 'A' firing attack-move on key-down and key repeats while doubling as a pan key; silent rejections; the 58-tile map-center opening zoom; M9's cues never expiring because the feedback clock only advanced in `--frames` mode). **M9.1** fixed all of it (direction-pinned camera tests, context-resolution tests, refusal-cue tests, the smoke's invalid-order pin, and the extended Xvfb+XTEST input verification: 900 frames, 5-entity drag selection, context Move + armed attack-move submitted) | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary; env: Xvfb with a screen at least as large as the 800x600 default window — e.g. 1280x800 — userland libEGL/libGLESv2 + a glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst, keyboard focus via `xdotool windowfocus`; no window manager — a WM breaks wgpu's GL surface here) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution with the M9.1 controls (pan/zoom/edge/middle-drag, right-click context orders, armed-'A', refusal cues, brackets), confirm the controls feel right and the end screen + restart + control groups + cues read well, then close | a human pass on the M9.1 build | open (narrowed to the re-verification by M9.1) |
+ | DEBT-009 | ~~M3's minimal HUD and debug overlays (plan §11.6) are not implemented~~ repaid: the HUD slice landed — fontdue text atlas (embedded "Pandemonium Sans" subset), screen-space UI pass, resource/population HUD, F3 debug overlay (tick, state hash, entity/selection counts), P pause, `.` single-step | simplification | repaid as the second M3 sub-slice | — | — | repaid (M3) |
+ | DEBT-010 | ~~The A12 `population <= cap` invariant is asserted strictly, with no allowance for the over-cap window classic RTS rules allow when population-providing structures are destroyed while units live~~ decided (M6, A-053): the strict invariant is **relaxed to "spawn-blocking"** — usage may exceed cap when combat destroys population-providing structures, and new spawns are blocked at the spawn gate (already the M5 production behavior — completed items hold at the queue front until headroom returns, A-042); no units die or decay from over-cap. The decision touches A12 only, not §9.4's reading (production/construction semantics are unchanged) | verification | decided as M6's first work item (the brief calls this out as blocking honest combat) | — | M6 combat exit (this row) | retired (M6) |
+ | DEBT-011 | Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence) | simplification | plan §11.5's Alpha scope is the seam ("optionally a few placeholder cues"); a real backend needs a dependency + device decision that buys the Alpha nothing (the machine check is the cue flow, which the smoke run prints) | implement a mixer sink behind the same `AudioSink` trait (the client swaps the sink; nothing above the boundary moves), probably `cpal` + a small PCM cue bank, with an external-crate allow-list amendment | the post-Alpha audio pass (plan §19: renderer, UI skin, audio are rewritten on purpose over time) or a human playtest that demands audible cues | open (M9) |
+-- 
+2.47.3
+

@@ -1,0 +1,3732 @@
+From 0b456a1c2aa0c6c5fbebad945533d6d8611650d7 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 10:43:16 +0000
+Subject: [PATCH 1/5] feat(client): the rodio audio backend joins the client
+ (A-100, PLAN-M10.2 4.1)
+
+The Phase 4 dependency: rodio 0.22.2 (playback feature only - the
+decoders and the noise/rand machinery stay off; every sound this pass
+makes is synthesized PCM). The allow-list amendment rides in the same
+commit per the plan's global rules, and ADR-0002 records the choice,
+the resolved version, and the feature trim with the alternatives
+considered. A-119 registers the owner's Phase 4 go (2026-10-08).
+
+No code uses it yet - the next commits build the sink behind the
+existing engine seam.
+---
+ Cargo.lock                           | 563 +++++++++++++++++++++++----
+ crates/client/Cargo.toml             |   1 +
+ docs/ASSUMPTIONS.md                  |   8 +
+ docs/adr/0002-rodio-audio-backend.md | 101 +++++
+ tests/architecture_law.rs            |   4 +
+ 5 files changed, 610 insertions(+), 67 deletions(-)
+ create mode 100644 docs/adr/0002-rodio-audio-backend.md
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 3df8211..7a3417d 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -37,6 +37,28 @@ version = "0.2.21"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
+ 
++[[package]]
++name = "alsa"
++version = "0.11.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "812947049edcd670a82cd5c73c3661d2e58468577ba8489de58e1a73c04cbd5d"
++dependencies = [
++ "alsa-sys",
++ "bitflags 2.13.2",
++ "cfg-if",
++ "libc",
++]
++
++[[package]]
++name = "alsa-sys"
++version = "0.4.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ad7569085a265dd3f607ebecce7458eaab2132a84393534c95b18dcbc3f31e04"
++dependencies = [
++ "libc",
++ "pkg-config",
++]
++
+ [[package]]
+ name = "android-activity"
+ version = "0.6.1"
+@@ -46,7 +68,7 @@ dependencies = [
+  "android-properties",
+  "bitflags 2.13.2",
+  "cc",
+- "jni",
++ "jni 0.22.4",
+  "libc",
+  "log",
+  "ndk",
+@@ -214,7 +236,16 @@ version = "0.5.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "2c132eebf10f5cad5289222520a4a058514204aed6d791f1cf4fe8088b82d15f"
+ dependencies = [
+- "objc2",
++ "objc2 0.5.2",
++]
++
++[[package]]
++name = "block2"
++version = "0.6.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "cdeb9d870516001442e364c5220d3574d2da8dc765554b4a617230d33fa58ef5"
++dependencies = [
++ "objc2 0.6.5",
+ ]
+ 
+ [[package]]
+@@ -287,6 +318,12 @@ dependencies = [
+  "shlex",
+ ]
+ 
++[[package]]
++name = "cesu8"
++version = "1.1.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6d43a04d8753f35258c91f8ec639f792891f748a1edbd759cf1dcea3382ad83c"
++
+ [[package]]
+ name = "cfg-if"
+ version = "1.0.5"
+@@ -445,6 +482,50 @@ dependencies = [
+  "libm",
+ ]
+ 
++[[package]]
++name = "coreaudio-rs"
++version = "0.14.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7d5d7dca3ebcf65a035582c9ad4385371a9d9ee6537474d2a278f4e1e475bb58"
++dependencies = [
++ "bitflags 2.13.2",
++ "libc",
++ "objc2-audio-toolbox",
++ "objc2-core-audio",
++ "objc2-core-audio-types",
++ "objc2-core-foundation",
++]
++
++[[package]]
++name = "cpal"
++version = "0.17.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d8942da362c0f0d895d7cac616263f2f9424edc5687364dfd1d25ef7eba506d7"
++dependencies = [
++ "alsa",
++ "coreaudio-rs",
++ "dasp_sample",
++ "jni 0.21.1",
++ "js-sys",
++ "libc",
++ "mach2",
++ "ndk",
++ "ndk-context",
++ "num-derive",
++ "num-traits",
++ "objc2 0.6.5",
++ "objc2-audio-toolbox",
++ "objc2-avf-audio",
++ "objc2-core-audio",
++ "objc2-core-audio-types",
++ "objc2-core-foundation",
++ "objc2-foundation 0.3.2",
++ "wasm-bindgen",
++ "wasm-bindgen-futures",
++ "web-sys",
++ "windows 0.62.2",
++]
++
+ [[package]]
+ name = "crossbeam-utils"
+ version = "0.8.23"
+@@ -463,12 +544,28 @@ version = "1.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+ 
++[[package]]
++name = "dasp_sample"
++version = "0.11.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "0c87e182de0887fd5361989c677c4e8f5000cd9491d6d563161a8f3a5519fc7f"
++
+ [[package]]
+ name = "dispatch"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "bd0c93bb4b0c6d9b77f4435b0ae98c24d17f1c45b2ff844c6151a07256ca923b"
+ 
++[[package]]
++name = "dispatch2"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
++dependencies = [
++ "bitflags 2.13.2",
++ "objc2 0.6.5",
++]
++
+ [[package]]
+ name = "dlib"
+ version = "0.5.3"
+@@ -699,7 +796,7 @@ dependencies = [
+  "log",
+  "presser",
+  "thiserror 1.0.69",
+- "windows",
++ "windows 0.58.0",
+ ]
+ 
+ [[package]]
+@@ -785,6 +882,22 @@ version = "1.70.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+ 
++[[package]]
++name = "jni"
++version = "0.21.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "1a87aa2bb7d2af34197c04845522473242e1aa17c12f4935d5856491a7fb8c97"
++dependencies = [
++ "cesu8",
++ "cfg-if",
++ "combine",
++ "jni-sys 0.3.1",
++ "log",
++ "thiserror 1.0.69",
++ "walkdir",
++ "windows-sys 0.45.0",
++]
++
+ [[package]]
+ name = "jni"
+ version = "0.22.4"
+@@ -948,6 +1061,15 @@ version = "0.4.34"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
+ 
++[[package]]
++name = "mach2"
++version = "0.5.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6a1b95cd5421ec55b445b5ae102f5ea0e768de1f82bd3001e11f426c269c3aea"
++dependencies = [
++ "libc",
++]
++
+ [[package]]
+ name = "malloc_buf"
+ version = "0.0.6"
+@@ -1043,6 +1165,47 @@ dependencies = [
+  "jni-sys 0.3.1",
+ ]
+ 
++[[package]]
++name = "num-bigint"
++version = "0.4.8"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
++dependencies = [
++ "num-integer",
++ "num-traits",
++]
++
++[[package]]
++name = "num-derive"
++version = "0.4.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
++[[package]]
++name = "num-integer"
++version = "0.1.47"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7ce2d95d4b3734dc35aa2f45e1aa22cd416814592a4f9d9205e11affd5b8e10b"
++dependencies = [
++ "num-traits",
++]
++
++[[package]]
++name = "num-rational"
++version = "0.4.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
++dependencies = [
++ "num-bigint",
++ "num-integer",
++ "num-traits",
++]
++
+ [[package]]
+ name = "num-traits"
+ version = "0.2.19"
+@@ -1100,6 +1263,15 @@ dependencies = [
+  "objc2-encode",
+ ]
+ 
++[[package]]
++name = "objc2"
++version = "0.6.5"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "08849bbd4767dfae9457696856ae1c84fe4e0281bbe4a7abff2d0e06fb7981f8"
++dependencies = [
++ "objc2-encode",
++]
++
+ [[package]]
+ name = "objc2-app-kit"
+ version = "0.2.2"
+@@ -1107,15 +1279,40 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e4e89ad9e3d7d297152b17d39ed92cd50ca8063a89a9fa569046d41568891eff"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
++ "block2 0.5.1",
+  "libc",
+- "objc2",
++ "objc2 0.5.2",
+  "objc2-core-data",
+  "objc2-core-image",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+  "objc2-quartz-core",
+ ]
+ 
++[[package]]
++name = "objc2-audio-toolbox"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6948501a91121d6399b79abaa33a8aa4ea7857fe019f341b8c23ad6e81b79b08"
++dependencies = [
++ "bitflags 2.13.2",
++ "libc",
++ "objc2 0.6.5",
++ "objc2-core-audio",
++ "objc2-core-audio-types",
++ "objc2-core-foundation",
++ "objc2-foundation 0.3.2",
++]
++
++[[package]]
++name = "objc2-avf-audio"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "13a380031deed8e99db00065c45937da434ca987c034e13b87e4441f9e4090be"
++dependencies = [
++ "objc2 0.6.5",
++ "objc2-foundation 0.3.2",
++]
++
+ [[package]]
+ name = "objc2-cloud-kit"
+ version = "0.2.2"
+@@ -1123,10 +1320,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "74dd3b56391c7a0596a295029734d3c1c5e7e510a4cb30245f8221ccea96b009"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
++ "block2 0.5.1",
++ "objc2 0.5.2",
+  "objc2-core-location",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1135,9 +1332,32 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a5ff520e9c33812fd374d8deecef01d4a840e7b41862d849513de77e44aa4889"
+ dependencies = [
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
++]
++
++[[package]]
++name = "objc2-core-audio"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e1eebcea8b0dbff5f7c8504f3107c68fc061a3eb44932051c8cf8a68d969c3b2"
++dependencies = [
++ "dispatch2",
++ "objc2 0.6.5",
++ "objc2-core-audio-types",
++ "objc2-core-foundation",
++ "objc2-foundation 0.3.2",
++]
++
++[[package]]
++name = "objc2-core-audio-types"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "5a89f2ec274a0cf4a32642b2991e8b351a404d290da87bb6a9a9d8632490bd1c"
++dependencies = [
++ "bitflags 2.13.2",
++ "objc2 0.6.5",
+ ]
+ 
+ [[package]]
+@@ -1147,9 +1367,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "617fbf49e071c178c0b24c080767db52958f716d9eabdf0890523aeae54773ef"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
++]
++
++[[package]]
++name = "objc2-core-foundation"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "2a180dd8642fa45cdb7dd721cd4c11b1cadd4929ce112ebd8b9f5803cc79d536"
++dependencies = [
++ "bitflags 2.13.2",
++ "block2 0.6.2",
++ "dispatch2",
++ "libc",
++ "objc2 0.6.5",
+ ]
+ 
+ [[package]]
+@@ -1158,9 +1391,9 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "55260963a527c99f1819c4f8e3b47fe04f9650694ef348ffd2227e8196d34c80"
+ dependencies = [
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
+  "objc2-metal",
+ ]
+ 
+@@ -1170,10 +1403,10 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "000cfee34e683244f284252ee206a27953279d370e309649dc3ee317b37e5781"
+ dependencies = [
+- "block2",
+- "objc2",
++ "block2 0.5.1",
++ "objc2 0.5.2",
+  "objc2-contacts",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1189,10 +1422,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0ee638a5da3799329310ad4cfa62fbf045d5f56e3ef5ba4149e7452dcf89d5a8"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
++ "block2 0.5.1",
+  "dispatch",
+  "libc",
+- "objc2",
++ "objc2 0.5.2",
++]
++
++[[package]]
++name = "objc2-foundation"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
++dependencies = [
++ "bitflags 2.13.2",
++ "block2 0.6.2",
++ "libc",
++ "objc2 0.6.5",
++ "objc2-core-foundation",
+ ]
+ 
+ [[package]]
+@@ -1201,10 +1447,10 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "a1a1ae721c5e35be65f01a03b6d2ac13a54cb4fa70d8a5da293d7b0020261398"
+ dependencies = [
+- "block2",
+- "objc2",
++ "block2 0.5.1",
++ "objc2 0.5.2",
+  "objc2-app-kit",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1214,9 +1460,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "dd0cba1276f6023976a406a14ffa85e1fdd19df6b0f737b063b95f6c8c7aadd6"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1226,9 +1472,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e42bee7bff906b14b167da2bac5efe6b6a07e6f7c0a21a7308d40c960242dc7a"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
+  "objc2-metal",
+ ]
+ 
+@@ -1238,8 +1484,8 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0a684efe3dec1b305badae1a28f6555f6ddd3bb2c2267896782858d5a78404dc"
+ dependencies = [
+- "objc2",
+- "objc2-foundation",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1249,13 +1495,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b8bb46798b20cd6b91cbd113524c490f1686f4c4e8f49502431415f3512e2b6f"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
++ "block2 0.5.1",
++ "objc2 0.5.2",
+  "objc2-cloud-kit",
+  "objc2-core-data",
+  "objc2-core-image",
+  "objc2-core-location",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+  "objc2-link-presentation",
+  "objc2-quartz-core",
+  "objc2-symbols",
+@@ -1269,9 +1515,9 @@ version = "0.2.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "44fa5f9748dbfe1ca6c0b79ad20725a11eca7c2218bceb4b005cb1be26273bfe"
+ dependencies = [
+- "block2",
+- "objc2",
+- "objc2-foundation",
++ "block2 0.5.1",
++ "objc2 0.5.2",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1281,10 +1527,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "76cfcbf642358e8689af64cee815d139339f3ed8ad05103ed5eaf73db8d84cb3"
+ dependencies = [
+  "bitflags 2.13.2",
+- "block2",
+- "objc2",
++ "block2 0.5.1",
++ "objc2 0.5.2",
+  "objc2-core-location",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+ ]
+ 
+ [[package]]
+@@ -1351,6 +1597,7 @@ dependencies = [
+  "pandemonium-sim",
+  "pandemonium-sim-api",
+  "pollster",
++ "rodio",
+  "wgpu",
+  "winit",
+ ]
+@@ -1730,6 +1977,18 @@ version = "1.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
+ 
++[[package]]
++name = "rodio"
++version = "0.22.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "d0a536bb79db59098ef71a4dd4246c02eb87b316deceb1b68e0cde7167ec01eb"
++dependencies = [
++ "cpal",
++ "dasp_sample",
++ "num-rational",
++ "thiserror 2.0.21",
++]
++
+ [[package]]
+ name = "ron"
+ version = "0.9.0"
+@@ -2529,8 +2788,8 @@ dependencies = [
+  "wasm-bindgen",
+  "web-sys",
+  "wgpu-types",
+- "windows",
+- "windows-core",
++ "windows 0.58.0",
++ "windows-core 0.58.0",
+ ]
+ 
+ [[package]]
+@@ -2562,8 +2821,29 @@ version = "0.58.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
+ dependencies = [
+- "windows-core",
+- "windows-targets",
++ "windows-core 0.58.0",
++ "windows-targets 0.52.6",
++]
++
++[[package]]
++name = "windows"
++version = "0.62.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
++dependencies = [
++ "windows-collections",
++ "windows-core 0.62.2",
++ "windows-future",
++ "windows-numerics",
++]
++
++[[package]]
++name = "windows-collections"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
++dependencies = [
++ "windows-core 0.62.2",
+ ]
+ 
+ [[package]]
+@@ -2572,11 +2852,35 @@ version = "0.58.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
+ dependencies = [
+- "windows-implement",
+- "windows-interface",
+- "windows-result",
+- "windows-strings",
+- "windows-targets",
++ "windows-implement 0.58.0",
++ "windows-interface 0.58.0",
++ "windows-result 0.2.0",
++ "windows-strings 0.1.0",
++ "windows-targets 0.52.6",
++]
++
++[[package]]
++name = "windows-core"
++version = "0.62.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
++dependencies = [
++ "windows-implement 0.60.2",
++ "windows-interface 0.59.3",
++ "windows-link",
++ "windows-result 0.4.1",
++ "windows-strings 0.5.1",
++]
++
++[[package]]
++name = "windows-future"
++version = "0.3.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
++dependencies = [
++ "windows-core 0.62.2",
++ "windows-link",
++ "windows-threading",
+ ]
+ 
+ [[package]]
+@@ -2590,6 +2894,17 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "windows-implement"
++version = "0.60.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "windows-interface"
+ version = "0.58.0"
+@@ -2601,19 +2916,49 @@ dependencies = [
+  "syn 2.0.119",
+ ]
+ 
++[[package]]
++name = "windows-interface"
++version = "0.59.3"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
++dependencies = [
++ "proc-macro2",
++ "quote",
++ "syn 2.0.119",
++]
++
+ [[package]]
+ name = "windows-link"
+ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "f0805222e57f7521d6a62e36fa9163bc891acd422f971defe97d64e70d0a4fe5"
+ 
++[[package]]
++name = "windows-numerics"
++version = "0.3.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
++dependencies = [
++ "windows-core 0.62.2",
++ "windows-link",
++]
++
+ [[package]]
+ name = "windows-result"
+ version = "0.2.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1d1043d8214f791817bab27572aaa8af63732e11bf84aa21a45a78d6c317ae0e"
+ dependencies = [
+- "windows-targets",
++ "windows-targets 0.52.6",
++]
++
++[[package]]
++name = "windows-result"
++version = "0.4.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7781fa89eaf60850ac3d2da7af8e5242a5ea78d1a11c49bf2910bb5a73853eb5"
++dependencies = [
++ "windows-link",
+ ]
+ 
+ [[package]]
+@@ -2622,8 +2967,26 @@ version = "0.1.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
+ dependencies = [
+- "windows-result",
+- "windows-targets",
++ "windows-result 0.2.0",
++ "windows-targets 0.52.6",
++]
++
++[[package]]
++name = "windows-strings"
++version = "0.5.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "7837d08f69c77cf6b07689544538e017c1bfcf57e34b4c0ff58e6c2cd3b37091"
++dependencies = [
++ "windows-link",
++]
++
++[[package]]
++name = "windows-sys"
++version = "0.45.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "75283be5efb2831d37ea142365f009c02ec203cd29a3ebecbc093d52315b66d0"
++dependencies = [
++ "windows-targets 0.42.2",
+ ]
+ 
+ [[package]]
+@@ -2632,7 +2995,7 @@ version = "0.52.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "282be5f36a8ce781fad8c8ae18fa3f9beff57ec1b52cb3de0789201425d9a33d"
+ dependencies = [
+- "windows-targets",
++ "windows-targets 0.52.6",
+ ]
+ 
+ [[package]]
+@@ -2641,7 +3004,7 @@ version = "0.59.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "1e38bc4d79ed67fd075bcc251a1c39b32a1776bbe92e5bef1f0bf1f8c531853b"
+ dependencies = [
+- "windows-targets",
++ "windows-targets 0.52.6",
+ ]
+ 
+ [[package]]
+@@ -2653,34 +3016,76 @@ dependencies = [
+  "windows-link",
+ ]
+ 
++[[package]]
++name = "windows-targets"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8e5180c00cd44c9b1c88adb3693291f1cd93605ded80c250a75d472756b4d071"
++dependencies = [
++ "windows_aarch64_gnullvm 0.42.2",
++ "windows_aarch64_msvc 0.42.2",
++ "windows_i686_gnu 0.42.2",
++ "windows_i686_msvc 0.42.2",
++ "windows_x86_64_gnu 0.42.2",
++ "windows_x86_64_gnullvm 0.42.2",
++ "windows_x86_64_msvc 0.42.2",
++]
++
+ [[package]]
+ name = "windows-targets"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
+ dependencies = [
+- "windows_aarch64_gnullvm",
+- "windows_aarch64_msvc",
+- "windows_i686_gnu",
++ "windows_aarch64_gnullvm 0.52.6",
++ "windows_aarch64_msvc 0.52.6",
++ "windows_i686_gnu 0.52.6",
+  "windows_i686_gnullvm",
+- "windows_i686_msvc",
+- "windows_x86_64_gnu",
+- "windows_x86_64_gnullvm",
+- "windows_x86_64_msvc",
++ "windows_i686_msvc 0.52.6",
++ "windows_x86_64_gnu 0.52.6",
++ "windows_x86_64_gnullvm 0.52.6",
++ "windows_x86_64_msvc 0.52.6",
++]
++
++[[package]]
++name = "windows-threading"
++version = "0.2.1"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "3949bd5b99cafdf1c7ca86b43ca564028dfe27d66958f2470940f73d86d75b37"
++dependencies = [
++ "windows-link",
+ ]
+ 
++[[package]]
++name = "windows_aarch64_gnullvm"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "597a5118570b68bc08d8d59125332c54f1ba9d9adeedeef5b99b02ba2b0698f8"
++
+ [[package]]
+ name = "windows_aarch64_gnullvm"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+ 
++[[package]]
++name = "windows_aarch64_msvc"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "e08e8864a60f06ef0d0ff4ba04124db8b0fb3be5776a5cd47641e942e58c4d43"
++
+ [[package]]
+ name = "windows_aarch64_msvc"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+ 
++[[package]]
++name = "windows_i686_gnu"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "c61d927d8da41da96a81f029489353e68739737d3beca43145c8afec9a31a84f"
++
+ [[package]]
+ name = "windows_i686_gnu"
+ version = "0.52.6"
+@@ -2693,24 +3098,48 @@ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+ 
++[[package]]
++name = "windows_i686_msvc"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "44d840b6ec649f480a41c8d80f9c65108b92d89345dd94027bfe06ac444d1060"
++
+ [[package]]
+ name = "windows_i686_msvc"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+ 
++[[package]]
++name = "windows_x86_64_gnu"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "8de912b8b8feb55c064867cf047dda097f92d51efad5b491dfb98f6bbb70cb36"
++
+ [[package]]
+ name = "windows_x86_64_gnu"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+ 
++[[package]]
++name = "windows_x86_64_gnullvm"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "26d41b46a36d453748aedef1486d5c7a85db22e56aff34643984ea85514e94a3"
++
+ [[package]]
+ name = "windows_x86_64_gnullvm"
+ version = "0.52.6"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+ 
++[[package]]
++name = "windows_x86_64_msvc"
++version = "0.42.2"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "9aec5da331524158c6d1a4ac0ab1541149c0b9505fde06423b02f5ef0106b9f0"
++
+ [[package]]
+ name = "windows_x86_64_msvc"
+ version = "0.52.6"
+@@ -2727,7 +3156,7 @@ dependencies = [
+  "android-activity",
+  "atomic-waker",
+  "bitflags 2.13.2",
+- "block2",
++ "block2 0.5.1",
+  "bytemuck",
+  "calloop",
+  "cfg_aliases",
+@@ -2740,9 +3169,9 @@ dependencies = [
+  "libc",
+  "memmap2",
+  "ndk",
+- "objc2",
++ "objc2 0.5.2",
+  "objc2-app-kit",
+- "objc2-foundation",
++ "objc2-foundation 0.2.2",
+  "objc2-ui-kit",
+  "orbclient",
+  "percent-encoding",
+diff --git a/crates/client/Cargo.toml b/crates/client/Cargo.toml
+index 35e7316..95e9aaa 100644
+--- a/crates/client/Cargo.toml
++++ b/crates/client/Cargo.toml
+@@ -20,3 +20,4 @@ pollster = "0.4"
+ wgpu = "26"
+ winit = "0.30"
+ glam = "0.30"
++rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 14467e4..52a4fe0 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -1025,3 +1025,11 @@ confirms or rejects it.
+   limitation). The multi-map note rides with it: the renderer's terrain
+   mesh is built from the tree's first map at window creation; a second
+   authored map would need a mesh-update path (DEBT-017).
++
++- **A-119 (PLAN-M10.2 §4, M10.2 Phase 4).** The owner's Phase 4 go
++  (2026-10-08): the Phase 3 menus/settings re-test was accepted and the
++  audio pass was directed to proceed on the standing plan, with the backend
++  pre-chosen (rodio, A-100) and its allow-list amendment + ADR due with the
++  work (ADR-0002). DEBT-015's remaining scope ("Phase 4 only") is therefore
++  spent; the A14 declaration stays blocked on the >=5-tester playtest gate,
++  which is the owner's to run.
+diff --git a/docs/adr/0002-rodio-audio-backend.md b/docs/adr/0002-rodio-audio-backend.md
+new file mode 100644
+index 0000000..8141aab
+--- /dev/null
++++ b/docs/adr/0002-rodio-audio-backend.md
+@@ -0,0 +1,101 @@
++# ADR-0002: rodio as the client's audio backend
++
++- **Date:** 2026-10-08
++- **Status:** accepted
++- **Frozen decision affected:** plan §4 dependency law (the client crate's
++  external allow-list). No FD-1..FD-10 decision changes: the `AudioSink` seam
++  (plan §11.5, FD-9) stays exactly as M9 built it — the sink is fed after the
++  step from the presentation layer and feeds nothing back.
++- **Proposed by:** E-Vex (project owner) — the backend was pre-chosen as
++  A-100 during the M10.2 planning pass; this ADR records the choice, the
++  resolved version, and the feature trim.
++
++## Context
++
++DEBT-011 tracked the M9 state: the `AudioSink` trait, the pure event → cue
++mapping, and the null counter sink exist, the client feeds them every frame,
++but no audible backend does anything with the cues. PLAN-M10.2 §4.1 (Phase 4)
++requires one audio backend in the client: "Choose the smallest dependable
++option (for example rodio or cpal-based) and justify it in an ADR; update the
++architecture-law allow-list for the client crate only." The owner's re-test
++of Phase 3 unblocked Phase 4 (A-107's chain, DEBT-015 narrowed to "Phase 4
++only"), and A-100 records the owner's decision made in advance: rodio.
++
++## Proposal
++
++Add `rodio` to `pandemonium-client` only, with default features disabled and
++exactly the `playback` feature enabled:
++
++```toml
++rodio = { version = "0.22.2", default-features = false, features = ["playback"] }
++```
++
++and add `"rodio"` to the client's entry in `allowed_external()` in
++`tests/architecture_law.rs` (the same amendment the plan's global rules
++require for every new external crate). The resolved version is **0.22.2**
++(as resolved by `cargo add` on 2026-10-08, locked in `Cargo.lock`).
++
++The client's sink keeps the rodio device stream (`rodio::stream::MixerDeviceSink`
++— 0.22's stream-owning type, the successor of the older `OutputStream`) stored
++in the sink struct for the App's entire lifetime: dropping it ends playback,
++which is exactly the "store the stream or everything goes silent" rule. Sounds
++are synthesized PCM (PLAN §4.2 — no decoder formats needed), which is why the
++decoder features stay off: rodio is used only for its device-probe, mixing,
++and resampling path.
++
++## Evidence
++
++- **The dependency tree stays small.** With `default-features = false,
++  features = ["playback"]`, `cargo tree` for the client adds exactly: `cpal`
++  → `alsa`/`alsa-sys`/`libc`, `dasp_sample`, `num-rational` (num chain), and
++  `thiserror` (already in the tree). The default feature set would have added
++  `symphonia` decoders (flac/vorbis/mp3/mp4) plus `rand` for the noise
++  generators — none of which a synthesized-PCM pass needs; `rand` additionally
++  collides with the plan §3.2 forbidden-crate posture.
++- **The API fits the seam.** `DeviceSinkBuilder::from_default_device()` +
++  `open_sink_or_fallback()` probes the device once and returns
++  `Result<MixerDeviceSink, DeviceSinkError>` — the Err arm is the null
++  fallback (PLAN §4.3: CI, Xvfb, headless). `Mixer::add(source)` appends a
++  source to the mixer *infallibly* (a channel send), mixes any number of
++  concurrent sources, and resamples whatever the source declares to the
++  device's rate — no per-cue blocking, no per-cue fallible device work in the
++  render loop (PLAN §4.3's "never crash or block the render loop").
++- **The error callback is ownable.** The builder accepts a custom stream
++  error callback, so a device lost mid-session is observable (a flag the sink
++  polls) without the default `eprintln!` path — keeping PLAN §4.3's silent
++  fallback and the pass's no-stderr-spam rule.
++
++## Consequences
++
++- The client binary links ALSA on Linux (`libasound`) — a runtime-only system
++  dependency the windowed build already tolerated (`cpal` sat on the plan's
++  dependency table since day zero; machines without a sound stack take the
++  null arm).
++- The allow-list change touches `tests/architecture_law.rs` only; every other
++  member's law is unchanged, and the sim/sim_api/fx/ai/content crates gain no
++  audio knowledge whatsoever (FD-9 intact).
++- No golden hash moves: the backend lives entirely above the sim boundary
++  (the phase's global rule).
++- If rodio's API drifts again (0.20 → 0.22 renamed `OutputStream` to
++  `MixerDeviceSink`), the seam absorbs it: only `crates/client/src/sound.rs`
++  sees rodio types.
++
++## Alternatives considered
++
++- **Raw `cpal`** (DEBT-011's original sketch): the same device probe plus a
++  hand-written mixer thread, sample-format conversion, and resampling —
++  exactly the machinery rodio's mixer already is, maintained and tested
++  elsewhere. Rejected as duplicated systems code for zero Alpha value.
++- **`kira`** (game-audio crate): stronger spatial/parameter model, but a
++  heavier dependency tree for sounds this pass deliberately keeps to short
++  synthesized mono buffers. Rejected for weight.
++- **Do nothing** (keep DEBT-011 open): the plan's Phase 4 exists because the
++  playtest found the game silent; the owner already directed the backend
++  (A-100). Rejected by the owner.
++
++## Decision
++
++Accepted 2026-10-08: rodio 0.22.2 (playback feature only) is the client's
++audio backend behind the existing `AudioSink` seam — the owner's pre-choice
++(A-100) recorded with its resolved version and the null fallback as the
++constructor's other arm.
+diff --git a/tests/architecture_law.rs b/tests/architecture_law.rs
+index 0598218..6ec1af4 100644
+--- a/tests/architecture_law.rs
++++ b/tests/architecture_law.rs
+@@ -132,6 +132,9 @@ fn allowed_external() -> BTreeMap<&'static str, &'static [&'static str]> {
+     // math for the presentation layer only, never in the sim's tree.
+     m.insert("pandemonium-engine", &["glam", "thiserror"][..]);
+     m.insert("pandemonium-content", &["serde", "ron", "thiserror"][..]);
++    // rodio joined the client's allow-list with ADR-0002 (M10.2 Phase 4
++    // audio, the owner's pre-choice A-100): the playback backend behind the
++    // engine's AudioSink seam — client-only, never in the sim's tree.
+     m.insert(
+         "pandemonium-client",
+         &[
+@@ -143,6 +146,7 @@ fn allowed_external() -> BTreeMap<&'static str, &'static [&'static str]> {
+             "glam",
+             "image",
+             "pollster",
++            "rodio",
+             "thiserror",
+             "wgpu",
+             "winit",
+-- 
+2.47.3
+
+
+From 52caafbb3a57401340f4ae51c3926586681ab9ae Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 10:48:20 +0000
+Subject: [PATCH 2/5] feat(engine): the three client-side cues join AudioCue
+ and the sink seam gains on_cue
+
+PLAN-M10.2 4.2's nine-cue vocabulary: CommandAck, SelectionClick, and
+UiClick are client-side moments with no sim event, so they join the
+AudioCue enum (fed directly through a new AudioSink::on_cue) and
+deliberately get no cue_for arm - the event -> cue mapping is
+untouched, which is their defining property. AudioCue gains ALL (the
+cue bank's layout order), index() (the dense bank index), and name()
+(evidence lines name what they counted). The null sink counts
+client-side cues on their own counter - the wiring oracle the Phase 4
+fallback arm counts through.
+
+3 new engine tests pin the enum layout, the direct-path counter, and
+the no-event-maps-to-client-cue property.
+---
+ crates/engine/src/audio.rs | 167 +++++++++++++++++++++++++++++++++++--
+ 1 file changed, 159 insertions(+), 8 deletions(-)
+
+diff --git a/crates/engine/src/audio.rs b/crates/engine/src/audio.rs
+index 12981a0..e252b8e 100644
+--- a/crates/engine/src/audio.rs
++++ b/crates/engine/src/audio.rs
+@@ -14,13 +14,20 @@
+ //! fed from the presentation layer after the step, never from inside the
+ //! simulation, and produces no state the simulation could observe. The
+ //! mapping is a pure function of an event; the null sink is a no-op.
++//!
++//! M10.2 Phase 4 (PLAN §4.2) widened the cue vocabulary: three client-side
++//! moments with no sim event at all (command acknowledged, selection click,
++//! UI click) join the enum, fed directly through [`AudioSink::on_cue`] from
++//! the wiring layer — the event → cue mapping stays untouched, which is the
++//! point: nothing below the boundary learned anything.
+ 
+ use pandemonium_sim_api::Event;
+ 
+-/// A placeholder audio cue: one named feedback moment. The variants are the
+-/// Alpha's "few placeholder cues" — combat, loss, production, economy, and
+-/// the match end, the moments a player needs to hear even while looking
+-/// elsewhere.
++/// A placeholder audio cue: one named feedback moment. Six variants are
++/// the Alpha's event-derived moments (combat, loss, production, economy,
++/// and the match end); the three client-side moments (PLAN §4.2 — command
++/// acknowledgment, selection, UI) have no sim event and are fed directly
++/// via [`AudioSink::on_cue`], never through [`cue_for`].
+ #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+ pub enum AudioCue {
+     /// An attack landed (`AttackHit`) — the combat heartbeat.
+@@ -35,13 +42,70 @@ pub enum AudioCue {
+     Delivery,
+     /// The match ended (`MatchEnded`) — victory or defeat.
+     MatchEnded,
++    /// An order was submitted to the host (PLAN §4.2's command
++    /// acknowledgment — a client-side moment: the sim's acceptance is a
++    /// separate, later fact, surfaced through the refusal feedback).
++    CommandAck,
++    /// The selection's membership changed (a client-side moment).
++    SelectionClick,
++    /// A menu row was activated (a client-side moment).
++    UiClick,
++}
++
++impl AudioCue {
++    /// Every cue, in declaration order — the client's cue bank indexes its
++    /// synthesized buffers with [`AudioCue::index`], so this order is the
++    /// bank's layout. Pinned by test against the variant list.
++    pub const ALL: [AudioCue; 9] = [
++        AudioCue::AttackLanded,
++        AudioCue::UnitLost,
++        AudioCue::UnitReady,
++        AudioCue::StructureDone,
++        AudioCue::Delivery,
++        AudioCue::MatchEnded,
++        AudioCue::CommandAck,
++        AudioCue::SelectionClick,
++        AudioCue::UiClick,
++    ];
++
++    /// The cue's index into [`AudioCue::ALL`] (the cue bank's layout).
++    pub fn index(self) -> usize {
++        match self {
++            AudioCue::AttackLanded => 0,
++            AudioCue::UnitLost => 1,
++            AudioCue::UnitReady => 2,
++            AudioCue::StructureDone => 3,
++            AudioCue::Delivery => 4,
++            AudioCue::MatchEnded => 5,
++            AudioCue::CommandAck => 6,
++            AudioCue::SelectionClick => 7,
++            AudioCue::UiClick => 8,
++        }
++    }
++
++    /// The cue's log name (evidence lines name what they counted).
++    pub fn name(self) -> &'static str {
++        match self {
++            AudioCue::AttackLanded => "AttackLanded",
++            AudioCue::UnitLost => "UnitLost",
++            AudioCue::UnitReady => "UnitReady",
++            AudioCue::StructureDone => "StructureDone",
++            AudioCue::Delivery => "Delivery",
++            AudioCue::MatchEnded => "MatchEnded",
++            AudioCue::CommandAck => "CommandAck",
++            AudioCue::SelectionClick => "SelectionClick",
++            AudioCue::UiClick => "UiClick",
++        }
++    }
+ }
+ 
+ /// The pure event → cue mapping (plan §11.5's "fed by events"). Every cue a
+ /// real sink would voice, derived from exactly the events the boundary
+-/// already emits — no new event variants, no sim changes. Events with no
+-/// audio moment (spawn bookkeeping, rejections, path failures, depletion)
+-/// map to `None`.
++/// already emits — no new event variants, no sim changes. The three
++/// client-side cues (CommandAck, SelectionClick, UiClick) deliberately have
++/// no arm here: they have no sim event, which is their defining property.
++/// Events with no audio moment (spawn bookkeeping, rejections, path
++/// failures, depletion) map to `None`.
+ pub fn cue_for(event: &Event) -> Option<AudioCue> {
+     match event {
+         Event::AttackHit { .. } => Some(AudioCue::AttackLanded),
+@@ -66,11 +130,18 @@ pub fn cue_for(event: &Event) -> Option<AudioCue> {
+ pub trait AudioSink {
+     /// Feed one step's events (in emission order).
+     fn on_events(&mut self, events: &[Event]);
++    /// One client-side cue with no sim event (PLAN §4.2: the command
++    /// acknowledgment, selection click, and UI click moments). Called by
++    /// the wiring layer at the moment itself — the same outward-only flow
++    /// as `on_events`, minus the event.
++    fn on_cue(&mut self, cue: AudioCue);
+ }
+ 
+ /// The headless sink: accepts and discards events. Exists so tests, soak
+ /// runs, and CI exercise exactly the path the windowed client feeds (the
+-/// same shape as the null renderer, plan §11.2).
++/// same shape as the null renderer, plan §11.2). The M10.2 Phase 4 fallback
++/// arm: a client with no audio device counts through this exact type
++/// ("fall back to NullAudioSink"), so its counters are the wiring oracle.
+ #[derive(Default)]
+ pub struct NullAudioSink {
+     /// How many events it has been fed (the smoke summary's evidence that
+@@ -78,6 +149,9 @@ pub struct NullAudioSink {
+     pub fed: usize,
+     /// How many of those mapped to cues.
+     pub cues: usize,
++    /// How many client-side cues reached [`AudioSink::on_cue`] (PLAN §4.2:
++    /// the direct path's evidence — the wiring tests' oracle).
++    pub client_cues: usize,
+ }
+ 
+ impl NullAudioSink {
+@@ -92,6 +166,10 @@ impl AudioSink for NullAudioSink {
+         self.fed += events.len();
+         self.cues += events.iter().filter_map(cue_for).count();
+     }
++
++    fn on_cue(&mut self, _cue: AudioCue) {
++        self.client_cues += 1;
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -172,4 +250,77 @@ mod tests {
+         sink.on_events(&[]);
+         assert_eq!((sink.fed, sink.cues), (3, 2));
+     }
++
++    #[test]
++    fn the_null_sink_counts_client_side_cues_on_the_direct_path() {
++        // PLAN §4.2's direct path: the three client-side moments reach
++        // `on_cue` and advance their own counter — this is the wiring
++        // oracle the client's fallback arm counts through.
++        let mut sink = NullAudioSink::new();
++        assert_eq!(sink.client_cues, 0);
++        sink.on_cue(AudioCue::CommandAck);
++        sink.on_cue(AudioCue::SelectionClick);
++        sink.on_cue(AudioCue::UiClick);
++        assert_eq!(sink.client_cues, 3);
++        // The direct path is separate from the event path's counters.
++        assert_eq!((sink.fed, sink.cues), (0, 0));
++    }
++
++    #[test]
++    fn every_variant_is_in_all_once_with_a_dense_index_and_a_name() {
++        // The cue bank's layout contract: ALL lists every variant exactly
++        // once (9 of them), `index` is the dense 0..9 map into ALL, and
++        // every variant names itself (evidence lines name what they
++        // counted).
++        assert_eq!(AudioCue::ALL.len(), 9);
++        for (position, cue) in AudioCue::ALL.iter().enumerate() {
++            assert_eq!(
++                cue.index(),
++                position,
++                "{} sits at its ALL position",
++                cue.name()
++            );
++            assert!(!cue.name().is_empty());
++        }
++        // Dense and injective: the indices are exactly 0..9.
++        let mut indices: Vec<usize> = AudioCue::ALL.iter().map(|c| c.index()).collect();
++        indices.sort_unstable();
++        indices.dedup();
++        assert_eq!(indices, (0..AudioCue::ALL.len()).collect::<Vec<usize>>());
++        // The three client-side cues exist and are distinct variants.
++        assert_eq!(AudioCue::CommandAck.name(), "CommandAck");
++        assert_eq!(AudioCue::SelectionClick.name(), "SelectionClick");
++        assert_eq!(AudioCue::UiClick.name(), "UiClick");
++    }
++
++    #[test]
++    fn no_event_maps_to_a_client_side_cue() {
++        // The defining property of the three client-side cues: no sim event
++        // produces them, so `cue_for` has no arm that could — they arrive
++        // only through the direct path.
++        let every_event_shape = [
++            hit(),
++            died(),
++            delivered(),
++            rejected(),
++            match_ended(),
++            Event::ProductionCompleted {
++                producer: EntityId(9),
++                producible: pandemonium_sim_api::KindId(5),
++            },
++            Event::ConstructionCompleted { site: EntityId(28) },
++        ];
++        let client_side = [
++            AudioCue::CommandAck,
++            AudioCue::SelectionClick,
++            AudioCue::UiClick,
++        ];
++        for event in &every_event_shape {
++            let cue = cue_for(event);
++            assert!(
++                cue.is_none() || !client_side.contains(&cue.unwrap()),
++                "no event may map to a client-side cue"
++            );
++        }
++    }
+ }
+-- 
+2.47.3
+
+
+From f9f4a26d0b0ac428d8cb739512c3de65ab111516 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 11:03:05 +0000
+Subject: [PATCH 3/5] feat(client): nine synthesized cues, the rate limiter,
+ and the two-arm sink (sound.rs, PLAN-M10.2 4.2-4.4)
+
+The Phase 4 sound module, wired live: CueBank synthesizes the nine cue
+buffers at startup (mono 44100 Hz PCM, deterministic, all under a
+second, pairwise distinct, soft-limited into the rail); RateLimiter
+gives every cue its own 80 ms window (first passes, repeats inside
+drop, the window reopens after - a big fight stays a heartbeat); Sound
+is the App's sink behind the engine's AudioSink seam - the constructor
+probes the device once (a /dev/snd pre-check keeps the no-device path
+from waking libasound's chatty config parser: the fallback is
+silent), a live device takes the rodio arm whose stream owner lives
+for the App's whole lifetime, any failure or a mid-session device
+loss takes the null arm (the engine's NullAudioSink counting what
+would have played - never a panic, never a block, one honest startup
+line).
+
+The wiring (thin, in main.rs): the step's events still feed the sink
+after the step (FD-9 order kept); an order submitted acknowledges on
+the direct path (A-120: submitted, not non-rejected - the sim's
+verdict surfaces separately); every user-driven selection change
+funnels through one set_selection gate that cues the membership
+change (A-122); every menu row activation funnels through one
+menu_activate core that cues the UI click (A-121 - Enter, click, and
+the end-screen R shortcut share it). The master volume row now drives
+the sink live (A-115 semantics). The headless smoke constructs the
+real sink (the probe runs, the null arm under CI), and the --frames
+summary plus the smoke print what audio did: the arm and the cues'
+fed/voiced/dropped fates - never a claim of audible sound on a
+machine that cannot hear.
+
+A-120..A-124 register the pass's guesses. 17 new tests: the bank
+(short, distinct, deterministic, in-range), the limiter (window,
+independence, reset), the fallback arm (no panic, the null-sink
+oracle), the shared limiter across sources, the per-match reset, the
+volume clamp, the evidence line, and the three wiring paths through
+App (the null arm forced - the machine's probe result is never a
+test input). All three goldens bit-identical.
+---
+ crates/client/src/main.rs  | 257 ++++++++++--
+ crates/client/src/sound.rs | 782 +++++++++++++++++++++++++++++++++++++
+ docs/ASSUMPTIONS.md        |  50 +++
+ 3 files changed, 1063 insertions(+), 26 deletions(-)
+ create mode 100644 crates/client/src/sound.rs
+
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 24512db..9dfdc4a 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -18,6 +18,7 @@ mod render;
+ mod report;
+ mod screens;
+ mod silhouette;
++mod sound;
+ mod text;
+ mod ui;
+ 
+@@ -31,7 +32,7 @@ use feedback::FeedbackState;
+ use input::{RightButton, RightRelease};
+ use pandemonium_ai::Controller;
+ use pandemonium_content::{ContentBundle, ContentTree};
+-use pandemonium_engine::audio::{AudioSink, NullAudioSink};
++use pandemonium_engine::audio::{AudioCue, AudioSink};
+ use pandemonium_engine::mesh::terrain_mesh;
+ use pandemonium_engine::renderer::{Frame, HudState};
+ use pandemonium_engine::{
+@@ -323,10 +324,12 @@ struct App {
+     /// a menu-end state: "no match" and "a match that was dropped" are
+     /// different facts).
+     matches_started: u32,
+-    /// M9 (plan §11.5): the audio sink fed by the step's events — the null
+-    /// implementation (cue-counting; a mixer swaps in post-Alpha behind the
+-    /// same trait).
+-    audio: NullAudioSink,
++    /// M10.2 Phase 4 (PLAN §4, the audio pass): the sink that voices the
++    /// nine cues — rodio behind the engine's `AudioSink` seam when the
++    /// startup probe found a device, the null counting arm when it did
++    /// not (ADR-0002; FD-9: fed after the step from the presentation
++    /// layer, feeds nothing back).
++    audio: sound::Sound,
+     /// M9 (plan §11.2/§11.5, the feel pass): event-driven feedback — hit
+     /// flashes, command acknowledgment pings, and the counters the smoke
+     /// summary reports.
+@@ -420,6 +423,14 @@ impl App {
+         );
+         camera.focus(start_anchor.0, start_anchor.1, START_CAMERA_DISTANCE);
+         let settings = config::load();
++        // PLAN-M10.2 §4.1/§4.3 (the Phase 4 audio pass): probe the audio
++        // device ONCE at startup — a live device takes the rodio arm (the
++        // stream owner lives in the sink for the App's whole lifetime,
++        // ADR-0002), any failure takes the null arm silently, and either
++        // way one honest startup line says which (the machine cannot hear:
++        // under Xvfb/CI the probe finds nothing and the run exercises the
++        // fallback).
++        let audio = sound::Sound::new(settings.master_volume);
+         Ok(Self {
+             tree,
+             screen: AppState::at_main_menu(),
+@@ -465,7 +476,7 @@ impl App {
+             frames_budget: None,
+             frames_presented: 0,
+             commands_submitted: 0,
+-            audio: NullAudioSink::new(),
++            audio,
+             feedback: FeedbackState::default(),
+             view_interp: Interpolator::new(),
+             fog_tick: u64::MAX,
+@@ -628,8 +639,11 @@ impl App {
+             START_CAMERA_DISTANCE,
+         );
+         // M9: the feel pass's state resets with the match — a fresh match
+-        // starts with clean feedback (no stale flashes or pings).
+-        self.audio = NullAudioSink::new();
++        // starts with clean feedback (no stale flashes or pings). The
++        // Phase 4 sink resets its counters and rate-limit windows with it;
++        // the device, the cue bank, and the volume persist (the audio
++        // outlives matches — a fresh match is not a fresh probe).
++        self.audio.reset();
+         self.feedback = FeedbackState::default();
+     }
+ 
+@@ -706,8 +720,10 @@ impl App {
+     /// has been wired since Phase 1), the zoom limits re-clamp the camera
+     /// now, the debug overlay follows (it is also the match-start default),
+     /// fullscreen toggles the window, and pan speed is read live from the
+-    /// struct already. Master volume stores for Phase 4 (the sink is
+-    /// null-backed, DEBT-011).
++    /// struct already. M10.2 Phase 4: master volume now goes straight to
++    /// the sink (every later voice uses it — DEBT-011's repayment made the
++    /// row real; the volume semantics are A-115's: live now, Done saves,
++    /// Esc leaves this run's value unsaved).
+     fn adjust_setting(&mut self, row: usize, dir: i32) {
+         self.settings = config::adjust_setting(self.settings, row, dir);
+         match row {
+@@ -715,6 +731,7 @@ impl App {
+             2 | 3 => self
+                 .camera
+                 .clamp_distance_to(self.settings.zoom_min, self.settings.zoom_max),
++            4 => self.audio.set_volume(self.settings.master_volume),
+             6 => self.debug_overlay = self.settings.debug_overlay,
+             5 => self.apply_fullscreen(),
+             _ => {}
+@@ -925,6 +942,10 @@ impl App {
+     /// The one place orders enter the host: stamps the seq, pings the
+     /// acknowledgment, and remembers the order for rejection feedback
+     /// (M9.1 — the last two are the "the control works" cues).
++    /// M10.2 Phase 4 (PLAN §4.2, A-120): "acknowledged" means SUBMITTED —
++    /// stamped, accepted into the host's queue, pinged on the ground. The
++    /// sim's own verdict is a later, separate fact: a rejection surfaces
++    /// through the refusal feedback and does not retract the ack cue.
+     fn submit_order(&mut self, kind: CommandKind, ping_at: Option<Vec2Fx>) {
+         // PLAN-M10.2 §3.3 (A-113): spectate silences the human's order path
+         // at the orders layer — a hidden-but-live path would inject P1
+@@ -945,6 +966,8 @@ impl App {
+             self.last_order = Some((self.command_seq, at));
+         }
+         host.submit(Command::new(HUMAN, 0, self.command_seq, kind));
++        // The submission's own sound (PLAN §4.2's command acknowledgment).
++        self.audio.on_cue(AudioCue::CommandAck);
+     }
+ 
+     /// M9.1 (plan §11.3): the right-click context command — what is under
+@@ -1110,11 +1133,26 @@ impl App {
+             .iter()
+             .map(|entity| entity.id)
+             .collect();
+-        self.selection = self.control_groups[index]
++        let next = self.control_groups[index]
+             .iter()
+             .copied()
+             .filter(|id| live.contains(id))
+             .collect();
++        self.set_selection(next);
++    }
++
++    /// M10.2 Phase 4 (PLAN §4.2, A-122): the one selection gate — every
++    /// user-driven selection change funnels through here so the selection
++    /// click cue fires exactly when the membership actually changes (a
++    /// redundant re-select of the same members is not a change; a clear,
++    /// a toggle-off, a recall, and a box-select are). The match reset
++    /// bypasses this gate on purpose — a fresh match's empty selection is
++    /// not a click.
++    fn set_selection(&mut self, next: Vec<EntityId>) {
++        if next != self.selection {
++            self.selection = next;
++            self.audio.on_cue(AudioCue::SelectionClick);
++        }
+     }
+ }
+ 
+@@ -1357,13 +1395,15 @@ impl ApplicationHandler for App {
+                             if dragged {
+                                 // Box select (M10.2 PLAN §1.3: shift+box
+                                 // ADDS to the selection instead of
+-                                // replacing it).
++                                // replacing it). The one selection gate
++                                // (A-122) cues the change.
+                                 let picked = self.box_pick(start_ndc, ndc);
+-                                self.selection = if shift {
++                                let next = if shift {
+                                     input::union_selection(&self.selection, &picked)
+                                 } else {
+                                     picked
+                                 };
++                                self.set_selection(next);
+                             } else {
+                                 // A click. M10.2 (PLAN §1.3): a double click
+                                 // (two clicks inside the window) selects
+@@ -1382,17 +1422,19 @@ impl ApplicationHandler for App {
+                                             picked,
+                                         )
+                                         .unwrap_or_default();
+-                                        self.selection = if shift {
++                                        let next = if shift {
+                                             input::union_selection(&self.selection, &same_kind)
+                                         } else {
+                                             same_kind
+                                         };
++                                        self.set_selection(next);
+                                     } else if shift {
+                                         // Shift+click toggles membership.
+-                                        self.selection =
++                                        let next =
+                                             input::shift_click_selection(&self.selection, picked);
++                                        self.set_selection(next);
+                                     } else {
+-                                        self.selection = vec![picked];
++                                        self.set_selection(vec![picked]);
+                                     }
+                                 }
+                                 // else: a click on empty ground. PLAN §1.1:
+@@ -1701,7 +1743,10 @@ impl ApplicationHandler for App {
+                                     self.placement = None;
+                                 }
+                                 input::EscapeAction::ClearSelection => {
+-                                    self.selection.clear();
++                                    // Through the selection gate (A-122):
++                                    // a clear of a non-empty selection is a
++                                    // change, and it clicks.
++                                    self.set_selection(Vec::new());
+                                 }
+                                 // PLAN-M10.2 §3.5: the ladder's exhausted
+                                 // rung opens the pause menu (it quit the
+@@ -1869,6 +1914,9 @@ impl App {
+                 self.frames_presented,
+                 self.screen.name()
+             );
++            // PLAN-M10.2 §4.5: what the audio did this run — the arm and the
++            // cues' fates, the same evidence line the match branch prints.
++            println!("pandemonium client — audio: {}", self.audio.evidence_line());
+             return;
+         };
+         let outcome = match host.outcome() {
+@@ -1893,6 +1941,11 @@ impl App {
+             outcome,
+             self.screen.name()
+         );
++        // PLAN-M10.2 §4.5: what the audio did this match segment — the arm
++        // (active or fallback) and the cues' three fates. Under Xvfb this
++        // always reads the null fallback (the machine cannot hear; the
++        // counters are the claim, never "audio ok").
++        println!("pandemonium client — audio: {}", self.audio.evidence_line());
+     }
+ 
+     /// Menu pointer hover (PLAN-M10.2 §3.6): the hit-test against the menu
+@@ -1912,6 +1965,16 @@ impl App {
+         }
+     }
+ 
++    /// M10.2 Phase 4 (PLAN §4.2, A-121): activates a menu row — the shared
++    /// core of the click path, the Enter path, and the end screen's R
++    /// shortcut, wrapped so the UI click cue fires on every activation of
++    /// the screens state machine (thin wiring over the pure machine; the
++    /// machine itself never owns a sink).
++    fn menu_activate(&mut self, index: usize, ctx: &KeyContext) -> (AppState, Effect) {
++        self.audio.on_cue(AudioCue::UiClick);
++        self.screen.activate_index(index, ctx)
++    }
++
+     /// Menu click: activate the hovered/clicked button (the mouse path over
+     /// the machine's `activate_index`).
+     fn menu_click(&mut self, event_loop: &ActiveEventLoop) {
+@@ -1925,7 +1988,7 @@ impl App {
+         else {
+             return; // a click off every button: nothing (menus never order)
+         };
+-        let (next, effect) = self.screen.activate_index(index, &self.menu_ctx());
++        let (next, effect) = self.menu_activate(index, &self.menu_ctx());
+         self.screen = next;
+         self.apply_effect(effect, event_loop);
+     }
+@@ -1937,7 +2000,7 @@ impl App {
+                            // The end screen keeps the card's R shortcut (rematch).
+         if matches!(self.screen.screen, Screen::EndScreen) && code == winit::keyboard::KeyCode::KeyR
+         {
+-            let (next, effect) = self.screen.activate_index(0, &self.menu_ctx());
++            let (next, effect) = self.menu_activate(0, &self.menu_ctx());
+             self.screen = next;
+             self.apply_effect(effect, event_loop);
+             return;
+@@ -1984,6 +2047,16 @@ impl App {
+             }
+             _ => return, // every other key is inert at a menu
+         };
++        // PLAN §4.2 (A-121): Enter activates the focused row — routed
++        // through the same activation core the mouse path uses, so the UI
++        // click cue fires on both (Left/Right adjust values; they are not
++        // activations and do not click).
++        if matches!(key, NavKey::Enter) {
++            let (next, effect) = self.menu_activate(self.screen.focus, &self.menu_ctx());
++            self.screen = next;
++            self.apply_effect(effect, event_loop);
++            return;
++        }
+         let (next, effect) = self.screen.on_key(key, &self.menu_ctx());
+         self.screen = next;
+         self.apply_effect(effect, event_loop);
+@@ -2766,10 +2839,13 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+     // flow's Player vs AI mode builds exactly this host (A-112).
+     let mut host = App::build_host(bundle, setup, MatchMode::PlayerVsAi);
+     let mut null_renderer = NullRenderer::new();
+-    // M9: the smoke run exercises the feel pass's event wiring too — the
+-    // same sink + feedback state the windowed draw feeds, driven without a
+-    // display (their counters are the printed evidence).
+-    let mut audio = NullAudioSink::new();
++    // M10.2 Phase 4 (PLAN §4.3): the smoke constructs the REAL sink — the
++    // startup probe runs here (on a machine with no audio device: the null
++    // arm, the same silent fallback the windowed client takes under
++    // Xvfb/CI; the probe's one honest line prints above), and the counters
++    // below are the audio evidence. Whatever arm this machine's probe
++    // found, the smoke asserts counting, never audible sound.
++    let mut audio = sound::Sound::new(config::load().master_volume);
+     let mut feedback = FeedbackState::default();
+     // M9.1: the smoke also exercises the refusal wiring — one deliberately
+     // invalid order (a Move naming a unit that does not exist) must come
+@@ -2843,19 +2919,148 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+         hud.tick, hud.paused, hud.population, hud.population_cap
+     );
+     println!(
+-        "  feedback wiring: {} events fed the audio sink ({} cues), {} attacks flashed on screen, \
+-         {} refused orders surfaced",
+-        audio.fed, audio.cues, feedback.hits_seen, feedback.refusals_seen
++        "  feedback wiring: {} attacks flashed on screen, {} refused orders surfaced",
++        feedback.hits_seen, feedback.refusals_seen
+     );
++    // PLAN-M10.2 §4.5: what the audio did — the arm (fallback vs active —
++    // this machine's probe result, stated as a fact, never claimed as
++    // audible sound) and the cues' three fates.
++    println!("  audio wiring: {}", audio.evidence_line());
+     assert!(
+         refusal_surfaced && feedback.refusals_seen > 0,
+         "the invalid order must have surfaced as a refusal cue"
+     );
++    // The audio wiring ran: the deliberate rejection is itself an event,
++    // so a zero count would mean the sink was never fed (counting is the
++    // claim — audible sound is never claimed on a machine that cannot
++    // hear).
++    assert!(
++        audio.events_fed() > 0,
++        "the audio sink was fed at least the rejection event"
++    );
+     println!("  content hash:    {:#018x}", bundle.content_hash());
+     println!("pandemonium client — smoke PASS (windowed M3 verification requires a display)");
+     Ok(())
+ }
+ 
++#[cfg(test)]
++mod audio_wiring {
++    //! PLAN-M10.2 §4.2's wiring pins: the three client-side moments reach
++    //! the sink's direct path. The oracle is the null arm's counter (the
++    //! engine's `NullAudioSink` counting what reached `on_cue`), so every
++    //! test FORCES the null arm first — this machine's probe result is a
++    //! fact about the machine, never a test input. One call per fresh app:
++    //! the first cue of a kind always passes the rate limiter, so the
++    //! oracle count is deterministic.
++
++    use super::*;
++
++    /// An app over the repo content with the null audio arm forced (the
++    /// wiring oracle's precondition).
++    fn app() -> App {
++        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../content"));
++        let tree = ContentTree::load_dir(path).expect("the repo content loads");
++        let bundle = tree
++            .bundle(
++                &tree
++                    .maps
++                    .first()
++                    .map(|map| map.id.clone())
++                    .expect("the tree lists a map"),
++            )
++            .expect("the default map bundles");
++        let mut app = App::new(tree, bundle, Some(7), None).expect("the app constructs");
++        // The forced null arm: what the no-device constructor yields, so
++        // the oracle counter exists whatever this machine can hear.
++        app.audio = sound::Sound::without_device(1.0);
++        app
++    }
++
++    #[test]
++    fn a_submitted_order_acknowledges_on_the_direct_path() {
++        let mut app = app();
++        // No order leaves a menu (the belt under the routing): no ack.
++        app.submit_order(
++            CommandKind::Move {
++                units: vec![EntityId(1)],
++                target: Vec2Fx::from_ints(10, 10),
++            },
++            Some(Vec2Fx::from_ints(10, 10)),
++        );
++        assert_eq!(app.audio.null_client_cues(), 0, "no host, no submission");
++        app.begin_match(MatchMode::PlayerVsAi, 7, 0);
++        assert_eq!(app.audio.client_cues(), 0, "begin_match itself is silent");
++        // A-120: "acknowledged" = submitted (stamped and handed to the
++        // host), not non-rejected — the cue fires at submission.
++        app.submit_order(
++            CommandKind::Move {
++                units: vec![EntityId(1)],
++                target: Vec2Fx::from_ints(10, 10),
++            },
++            Some(Vec2Fx::from_ints(10, 10)),
++        );
++        assert_eq!(
++            app.audio.null_client_cues(),
++            1,
++            "the submission's ack reached the sink"
++        );
++    }
++
++    #[test]
++    fn a_spectators_order_path_stays_silent() {
++        // A-113's carry into audio: spectate silences the human order path
++        // at the orders layer — a spectator's idle orders are not
++        // acknowledgments.
++        let mut app = app();
++        app.begin_match(MatchMode::AiVsAi, 7, 0);
++        app.submit_order(
++            CommandKind::Move {
++                units: vec![EntityId(1)],
++                target: Vec2Fx::from_ints(10, 10),
++            },
++            Some(Vec2Fx::from_ints(10, 10)),
++        );
++        assert_eq!(app.audio.client_cues(), 0, "the wiring never fired");
++    }
++
++    #[test]
++    fn a_selection_membership_change_clicks_but_a_redundant_one_does_not() {
++        // A-122: the cue is the *change* — a redundant re-select of the
++        // same membership is not a click.
++        let mut app = app();
++        app.set_selection(vec![EntityId(1)]);
++        assert_eq!(app.audio.null_client_cues(), 1);
++        assert_eq!(app.selection, vec![EntityId(1)]);
++        app.set_selection(vec![EntityId(1)]); // same membership: no cue at all
++        assert_eq!(app.audio.client_cues(), 1, "the wiring never fired");
++    }
++
++    #[test]
++    fn clearing_a_selection_through_the_escape_ladder_clicks() {
++        // Escape's ClearSelection rung routes through the same gate (the
++        // clear of a non-empty selection is a change).
++        let mut app = app();
++        app.set_selection(vec![EntityId(2)]);
++        assert_eq!(app.audio.null_client_cues(), 1);
++    }
++
++    #[test]
++    fn activating_a_menu_row_clicks_the_ui_cue() {
++        // A-121: every row activation — Enter, click, or the end screen's
++        // R — funnels through one core that cues the UI click. Pinned here
++        // at the core (menu_activate); the input paths route through it.
++        let mut app = app();
++        let (next, effect) = app.menu_activate(1, &app.menu_ctx());
++        assert!(matches!(next.screen, Screen::Settings { .. }));
++        assert_eq!(effect, Effect::None);
++        assert_eq!(
++            app.audio.null_client_cues(),
++            1,
++            "the activation reached the sink"
++        );
++    }
++}
++
+ #[cfg(test)]
+ mod mode_pins {
+     //! The in-match half of the mode mapping (PLAN-M10.2 §3.3, A-112):
+diff --git a/crates/client/src/sound.rs b/crates/client/src/sound.rs
+new file mode 100644
+index 0000000..e8d4e18
+--- /dev/null
++++ b/crates/client/src/sound.rs
+@@ -0,0 +1,782 @@
++//! The M10.2 Phase 4 audio pass (PLAN-M10.2 §4): synthesized sounds behind
++//! the engine's [`AudioSink`] seam, so events and UI moments feel real.
++//!
++//! Everything here is presentation-only (FD-9): the sink is fed after the
++//! step from the wiring layer and feeds nothing back. Three pure pieces —
++//!
++//! - [`CueBank`]: the nine cue PCM buffers, synthesized deterministically
++//!   at startup (PLAN §4.2's "no asset licensing" — mono f32 at one fixed
++//!   [`SAMPLE_RATE`], every buffer under a second, all nine pairwise
++//!   distinct by construction);
++//! - [`RateLimiter`]: the per-cue cooldown (PLAN §4.4's "so it does not
++//!   become noise") — the first cue of a kind voices, repeats inside the
++//!   window drop, and the window reopens after, independently per cue;
++//! - [`Sound`]: the sink itself. The constructor probes the device once
++//!   (ADR-0002): a device means the rodio arm — the stream owner lives in
++//!   the struct for the App's whole lifetime (dropping it silences
++//!   everything), cues hand the pre-built buffer to the mixer, an
++//!   infallible channel send that never blocks the render loop. ANY probe
++//!   failure (no device, Xvfb, CI) or a device lost mid-session takes the
++//!   other arm: the engine's [`NullAudioSink`], silently — no panic, no
++//!   stderr spam, one honest startup line, and the counters keep saying
++//!   what the audio did (the machine cannot hear; the evidence lines never
++//!   claim more than counting).
++//!
++//! The machine cannot hear: Xvfb and CI have no audio device, so every
++//! machine-verified run here exercises the null arm. Sounds are distinct
++//! *by construction* (each cue's recipe differs in frequency, envelope,
++//! and duration, pinned by test) — whether they *sound good* is the
++//! owner's re-test on real hardware, never a machine claim.
++
++use std::num::NonZero;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use pandemonium_engine::audio::{cue_for, AudioCue, AudioSink, NullAudioSink};
++use pandemonium_sim_api::Event;
++use rodio::source::Source;
++use rodio::{DeviceSinkBuilder, MixerDeviceSink};
++
++/// The one fixed synthesis rate (picked once, logged at startup): every
++/// cue buffer is mono `f32` PCM at this rate, and the mixer resamples to
++/// whatever the device actually wants — there is exactly one rate in this
++/// pass, never a per-cue or per-device choice.
++pub const SAMPLE_RATE: u32 = 44_100;
++
++/// The per-cue cooldown (PLAN §4.4's ~50-100 ms window): a big fight's
++/// many-attacks-per-tick collapse into at most one voice per cue per
++/// window, so combat stays a heartbeat instead of noise.
++pub const CUE_COOLDOWN: Duration = Duration::from_millis(80);
++
++/// Mono output — one channel everywhere in this pass.
++fn mono() -> rodio::ChannelCount {
++    NonZero::new(1).expect("one channel is nonzero")
++}
++
++/// The synthesis rate as rodio's nonzero type.
++fn rate() -> rodio::SampleRate {
++    NonZero::new(SAMPLE_RATE).expect("44100 is nonzero")
++}
++
++// ── the cue bank: nine synthesized buffers ────────────────────────────
++
++/// The nine pre-built cue buffers (PLAN §4.2's one distinct sound per
++/// moment): mono [`SAMPLE_RATE`] PCM, generated once at startup by pure
++/// functions — deterministic (two runs synthesize identical banks), short
++/// (every buffer is well under a second), and pairwise distinct.
++pub struct CueBank {
++    buffers: [Vec<f32>; AudioCue::ALL.len()],
++}
++
++impl CueBank {
++    /// Synthesizes the whole bank (a pure function of nothing).
++    pub fn generate() -> Self {
++        Self {
++            buffers: AudioCue::ALL.map(generate_cue),
++        }
++    }
++
++    /// The cue's PCM buffer (mono, [`SAMPLE_RATE`]).
++    pub fn buffer(&self, cue: AudioCue) -> &[f32] {
++        &self.buffers[cue.index()]
++    }
++}
++
++/// One cue's recipe → its PCM buffer, soft-limited into the rail (peaks
++/// past 0.95 pull back to it — a chord's summed samples can exceed 1.0,
++/// and valid PCM is part of the bank's contract).
++fn generate_cue(cue: AudioCue) -> Vec<f32> {
++    soft_limit(match cue {
++        AudioCue::AttackLanded => attack_landed(),
++        AudioCue::UnitLost => unit_lost(),
++        AudioCue::UnitReady => unit_ready(),
++        AudioCue::StructureDone => structure_done(),
++        AudioCue::Delivery => delivery(),
++        AudioCue::MatchEnded => match_ended(),
++        AudioCue::CommandAck => command_ack(),
++        AudioCue::SelectionClick => selection_click(),
++        AudioCue::UiClick => ui_click(),
++    })
++}
++
++/// Scales a finished cue into the `[-1, 1]` rail: a peak at or above 0.95
++/// is pulled back to 0.95 (every buffer valid PCM by construction,
++/// shapes preserved).
++fn soft_limit(mut buffer: Vec<f32>) -> Vec<f32> {
++    let peak = buffer
++        .iter()
++        .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
++    if peak > 0.95 {
++        let scale = 0.95 / peak;
++        for sample in &mut buffer {
++            *sample *= scale;
++        }
++    }
++    buffer
++}
++
++/// A phase-accumulated sine sweeping `f0 -> f1` over `seconds`, shaped by a
++/// linear attack and an exponential decay — the pass's one tone shape
++/// (cues differ by frequency, sweep direction, envelope, and duration).
++fn tone(f0: f32, f1: f32, seconds: f32, attack_s: f32, decay_per_s: f32, gain: f32) -> Vec<f32> {
++    let frames = (seconds * SAMPLE_RATE as f32).round() as usize;
++    let mut out = Vec::with_capacity(frames);
++    let mut phase = 0.0f32;
++    for frame in 0..frames {
++        let t = frame as f32 / SAMPLE_RATE as f32;
++        let sweep = f0 + (f1 - f0) * (t / seconds);
++        phase += std::f32::consts::TAU * sweep / SAMPLE_RATE as f32;
++        let attack = (t / attack_s).min(1.0);
++        let decay = (-decay_per_s * t).exp();
++        out.push(gain * attack * decay * phase.sin());
++    }
++    out
++}
++
++/// A decaying deterministic noise burst (a 32-bit xorshift — no RNG crate,
++/// no OS entropy; the bank is a pure function of its constants, so two
++/// runs synthesize identical bytes).
++fn noise_burst(seconds: f32, decay_per_s: f32, gain: f32, seed: u32) -> Vec<f32> {
++    let frames = (seconds * SAMPLE_RATE as f32).round() as usize;
++    let mut state = seed | 1;
++    let mut out = Vec::with_capacity(frames);
++    for frame in 0..frames {
++        state ^= state << 13;
++        state ^= state >> 17;
++        state ^= state << 5;
++        let white = state as f32 / u32::MAX as f32 * 2.0 - 1.0;
++        let t = frame as f32 / SAMPLE_RATE as f32;
++        let decay = (-decay_per_s * t).exp();
++        out.push(gain * white * decay);
++    }
++    out
++}
++
++/// Mixes two buffers into one (summed sample-by-sample, zero-padded to the
++/// longer — a chord, not a sequence).
++fn mix(a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
++    let len = a.len().max(b.len());
++    let mut out = vec![0.0f32; len];
++    for (sample, a_sample) in out.iter_mut().zip(a) {
++        *sample += a_sample;
++    }
++    for (sample, b_sample) in out.iter_mut().zip(b) {
++        *sample += b_sample;
++    }
++    out
++}
++
++/// Concatenates two buffers into one (a sequence, not a chord).
++fn seq(a: Vec<f32>, b: Vec<f32>) -> Vec<f32> {
++    let mut out = a;
++    out.extend_from_slice(&b);
++    out
++}
++
++/// **AttackLanded** — a low thud: a fast 90->55 Hz body under a 30 ms noise
++/// click. The combat heartbeat: short, low, percussive.
++fn attack_landed() -> Vec<f32> {
++    mix(
++        tone(90.0, 55.0, 0.10, 0.002, 22.0, 0.9),
++        noise_burst(0.03, 40.0, 0.35, 0x0A11_0BAD),
++    )
++}
++
++/// **UnitLost** — a descending two-step (520 Hz, then 340->300 Hz): a loss
++/// reads as "down", and two steps keep it distinct from any sweep.
++fn unit_lost() -> Vec<f32> {
++    seq(
++        tone(520.0, 520.0, 0.09, 0.004, 9.0, 0.55),
++        tone(340.0, 300.0, 0.13, 0.004, 7.0, 0.5),
++    )
++}
++
++/// **UnitReady** — a rising 440->900 Hz chirp capped by a short 900 Hz
++/// blip: production done reads as "up and ready".
++fn unit_ready() -> Vec<f32> {
++    seq(
++        tone(440.0, 900.0, 0.13, 0.004, 6.0, 0.5),
++        tone(900.0, 900.0, 0.05, 0.002, 12.0, 0.45),
++    )
++}
++
++/// **StructureDone** — a solid low chord (115 Hz + 230 Hz, the octave),
++/// slow-ish decay: construction finished reads as heavy and finished.
++fn structure_done() -> Vec<f32> {
++    mix(
++        tone(115.0, 100.0, 0.26, 0.006, 6.0, 0.7),
++        tone(230.0, 210.0, 0.26, 0.006, 5.0, 0.35),
++    )
++}
++
++/// **Delivery** — a bright ding: 1318 Hz with its 1976 Hz overtone dying
++/// faster — the economy's gentle bell.
++fn delivery() -> Vec<f32> {
++    mix(
++        tone(1318.0, 1318.0, 0.19, 0.001, 8.0, 0.45),
++        tone(1976.0, 1976.0, 0.12, 0.001, 10.0, 0.2),
++    )
++}
++
++/// **MatchEnded** — a three-tone ascending fanfare (C5, E5, G5->C6): the
++/// longest cue, still under 0.6 s, and unmistakably "the end".
++fn match_ended() -> Vec<f32> {
++    seq(
++        seq(
++            tone(523.0, 523.0, 0.16, 0.006, 4.0, 0.55),
++            tone(659.0, 659.0, 0.16, 0.006, 4.0, 0.55),
++        ),
++        tone(784.0, 1046.0, 0.22, 0.006, 3.0, 0.6),
++    )
++}
++
++/// **CommandAck** — a sharp high tick (1050 Hz, 35 ms): "order submitted".
++fn command_ack() -> Vec<f32> {
++    tone(1050.0, 1050.0, 0.035, 0.001, 45.0, 0.5)
++}
++
++/// **SelectionClick** — a soft low tick (500->480 Hz, 28 ms): quieter than
++/// the ack, so selecting many units never competes with ordering them.
++fn selection_click() -> Vec<f32> {
++    tone(500.0, 480.0, 0.028, 0.001, 50.0, 0.45)
++}
++
++/// **UiClick** — an up-blip (760->840 Hz, 45 ms): the menus' own sound,
++/// distinct from both the selection tick and the command ack.
++fn ui_click() -> Vec<f32> {
++    tone(760.0, 840.0, 0.045, 0.002, 30.0, 0.45)
++}
++
++// ── the rate limiter ──────────────────────────────────────────────────
++
++/// The per-cue rate limiter (PLAN §4.4): the first cue of a kind passes,
++/// repeats inside the cooldown drop, the window reopens after — each cue
++/// independent of the others. Pure: the caller supplies the clock (`now`
++/// is an input), so the tests pin the window without sleeping.
++pub struct RateLimiter {
++    cooldown: Duration,
++    last: [Option<Instant>; AudioCue::ALL.len()],
++}
++
++impl RateLimiter {
++    /// A limiter with this cooldown, all windows closed-open (nothing has
++    /// played yet).
++    pub fn new(cooldown: Duration) -> Self {
++        Self {
++            cooldown,
++            last: [None; AudioCue::ALL.len()],
++        }
++    }
++
++    /// Whether this cue may voice at `now` — and remembers it if it may.
++    pub fn allow(&mut self, cue: AudioCue, now: Instant) -> bool {
++        match self.last[cue.index()] {
++            Some(then) if now.duration_since(then) < self.cooldown => false,
++            _ => {
++                self.last[cue.index()] = Some(now);
++                true
++            }
++        }
++    }
++
++    /// Forgets every window (the match-boundary reset — a fresh match's
++    /// first cue always voices).
++    pub fn reset(&mut self) {
++        self.last = [None; AudioCue::ALL.len()];
++    }
++}
++
++// ── the sink ──────────────────────────────────────────────────────────
++
++/// The device arm's payload (boxed inside [`Arm`] — it is the heavy
++/// variant, and the sink stays one pointer wide either way).
++struct DeviceArm {
++    /// The stream owner (0.22's `OutputStream` successor), kept for the
++    /// App's whole lifetime — dropping it ends playback (ADR-0002's
++    /// lifetime rule).
++    sink: MixerDeviceSink,
++    /// Set by the stream's error callback the moment the device dies
++    /// mid-session — polled per cue, one degrade, never a panic.
++    degraded: Arc<AtomicBool>,
++    /// The nine pre-built buffers.
++    bank: CueBank,
++}
++
++/// The output arm: a probed-live device, or the null fallback.
++enum Arm {
++    /// The rodio arm: the device stream owner plus its pre-built cue bank.
++    Device(Box<DeviceArm>),
++    /// The fallback arm: no device found at startup (CI, Xvfb, headless)
++    /// or one lost mid-session. The engine's counter sink counts what
++    /// would have played — that counting IS the fallback's behavior
++    /// ("fall back to NullAudioSink", PLAN §4.3).
++    Null(NullAudioSink),
++}
++
++/// The client's audio sink: the rate limiter, the volume, and one output
++/// arm, behind the engine's [`AudioSink`] seam. Constructed once per run
++/// (`App::new` / the headless smoke); the arm survives every match
++/// boundary (the match reset clears counters and windows, never the
++/// device).
++pub struct Sound {
++    arm: Arm,
++    limiter: RateLimiter,
++    /// Master volume, 0.0..=1.0 — applied live to every voice (A-115:
++    /// changes apply immediately; Done persists, Esc leaves the run's
++    /// value unsaved).
++    volume: f32,
++    /// The evidence counters, reset per match like the other match-scoped
++    /// counters (the `--frames` summary reports the live segment).
++    events_fed: usize,
++    cues_fed: usize,
++    cues_voiced: usize,
++    cues_dropped: usize,
++    /// How many client-side cues reached [`AudioSink::on_cue`] (the
++    /// wiring-layer evidence — pre-limiter: the wiring ran).
++    client_cues: usize,
++}
++
++impl Sound {
++    /// The real constructor (PLAN §4.1/§4.3): probe the device ONCE at
++    /// startup. A live device means the rodio arm and one honest startup
++    /// line; ANY failure — no device, Xvfb, CI, a probe error — means the
++    /// null arm, silently: no panic, no stderr spam, one honest line.
++    /// Never blocks the render loop (the probe runs before it exists).
++    pub fn new(volume: f32) -> Self {
++        match probe_device() {
++            Some((sink, degraded)) => {
++                println!(
++                    "pandemonium client — audio: active (rodio), {} Hz, {} synthesized cues",
++                    SAMPLE_RATE,
++                    AudioCue::ALL.len()
++                );
++                Self {
++                    arm: Arm::Device(Box::new(DeviceArm {
++                        sink,
++                        degraded,
++                        bank: CueBank::generate(),
++                    })),
++                    limiter: RateLimiter::new(CUE_COOLDOWN),
++                    volume: volume.clamp(0.0, 1.0),
++                    events_fed: 0,
++                    cues_fed: 0,
++                    cues_voiced: 0,
++                    cues_dropped: 0,
++                    client_cues: 0,
++                }
++            }
++            None => Self::without_device(volume),
++        }
++    }
++
++    /// The constructor's other arm, built directly — the no-device
++    /// fallback (tests pin this path; the machine pass exercises it under
++    /// Xvfb and CI, where the probe finds nothing).
++    pub fn without_device(volume: f32) -> Self {
++        println!(
++            "pandemonium client — audio: no device — null fallback (cues counted, never voiced)"
++        );
++        Self {
++            arm: Arm::Null(NullAudioSink::new()),
++            limiter: RateLimiter::new(CUE_COOLDOWN),
++            volume: volume.clamp(0.0, 1.0),
++            events_fed: 0,
++            cues_fed: 0,
++            cues_voiced: 0,
++            cues_dropped: 0,
++            client_cues: 0,
++        }
++    }
++
++    /// The live master volume (A-115): every later voice uses it. Saved by
++    /// Done, left unsaved-but-live by Esc — the settings screen's own law.
++    pub fn set_volume(&mut self, volume: f32) {
++        self.volume = volume.clamp(0.0, 1.0);
++    }
++
++    /// The effective output gain: the master volume as played.
++    pub fn gain(&self) -> f32 {
++        self.volume
++    }
++
++    /// Whether the device arm is live (the evidence line's
++    /// active-vs-fallback fact — a claim about the arm, never about
++    /// audible sound).
++    pub fn is_active(&self) -> bool {
++        matches!(self.arm, Arm::Device(_))
++    }
++
++    /// The match-boundary reset: counters and rate-limit windows zero; the
++    /// arm, the bank, and the volume persist (the device outlives matches
++    /// — a fresh match is not a fresh probe).
++    pub fn reset(&mut self) {
++        self.limiter.reset();
++        self.events_fed = 0;
++        self.cues_fed = 0;
++        self.cues_voiced = 0;
++        self.cues_dropped = 0;
++        self.client_cues = 0;
++    }
++
++    /// How many events the sink was fed (the smoke's old "events fed"
++    /// evidence, unchanged in meaning).
++    pub fn events_fed(&self) -> usize {
++        self.events_fed
++    }
++
++    /// How many client-side cues reached the direct path (pre-limiter —
++    /// the wiring-layer evidence).
++    pub fn client_cues(&self) -> usize {
++        self.client_cues
++    }
++
++    /// The audio evidence line (the `--frames` summary and the headless
++    /// smoke print it): the arm's fact (active or fallback — the honest
++    /// frame for every number that follows) and the cues' three fates —
++    /// fed, voiced (passed the limiter into the arm), dropped (the
++    /// limiter ate them).
++    pub fn evidence_line(&self) -> String {
++        let arm = if self.is_active() {
++            format!("active (rodio, {} Hz)", SAMPLE_RATE)
++        } else {
++            "null fallback (no device)".to_string()
++        };
++        let client_side = self.client_cues();
++        format!(
++            "{arm}, cues fed/voiced/dropped {}/{}/{} ({client_side} client-side)",
++            self.cues_fed, self.cues_voiced, self.cues_dropped
++        )
++    }
++
++    /// One cue attempt: count it fed, rate-limit it, hand survivors to the
++    /// output arm. Cheap by construction — the drop path is one array
++    /// lookup, and the voice path is bounded by the cooldown (a big fight
++    /// costs at most one voice per cue per window).
++    fn voice(&mut self, cue: AudioCue) {
++        self.cues_fed += 1;
++        if !self.limiter.allow(cue, Instant::now()) {
++            self.cues_dropped += 1;
++            return;
++        }
++        self.cues_voiced += 1;
++        self.output(cue);
++    }
++
++    /// Hands a surviving cue to the arm. Device arm: the pre-built buffer
++    /// wrapped and appended to the mixer — an infallible channel send to
++    /// rodio's mixing thread (never blocks, never panics). A device lost
++    /// mid-session (the stream's error callback fired) degrades to the
++    /// null arm: one line, once, and counting continues.
++    fn output(&mut self, cue: AudioCue) {
++        let device_degraded = match &self.arm {
++            Arm::Device(device) => device.degraded.load(Ordering::Relaxed),
++            Arm::Null(_) => false,
++        };
++        if device_degraded {
++            println!(
++                "pandemonium client — audio: device lost mid-session, degrading to null (counting \
++                 continues)"
++            );
++            self.arm = Arm::Null(NullAudioSink::new());
++        }
++        let gain = self.gain();
++        match &mut self.arm {
++            Arm::Null(null) => null.on_cue(cue),
++            Arm::Device(device) => {
++                let buffer = device.bank.buffer(cue).to_vec();
++                device.sink.mixer().add(
++                    rodio::buffer::SamplesBuffer::new(mono(), rate(), buffer)
++                        .amplify_normalized(gain),
++                );
++            }
++        }
++    }
++}
++
++/// Whether an audio device is even plausible before any library wakes
++/// up (the cheap pre-probe). Linux: `/dev/snd` is the kernel sound stack's
++/// device directory — its absence means no card, no daemon backend,
++/// nothing for ALSA to open, and libasound's config parser would chatter
++/// a stderr burst on its way to that same conclusion (this pass's rule is
++/// a silent fallback, PLAN §4.3 — the pre-check keeps the no-device path
++/// quiet). The corner: a socket-forwarded Pulse server without a local
++/// `/dev/snd` reads as no-device here — logged as A-124, accepted (the
++/// CI/headless class dwarfs that corner). Other platforms probe directly.
++fn device_plausible() -> bool {
++    if cfg!(target_os = "linux") {
++        std::path::Path::new("/dev/snd").exists()
++    } else {
++        true
++    }
++}
++
++/// Probes the default output device once (ADR-0002): builds rodio's stream
++/// owner with a silent error callback (the default one prints to stderr —
++/// this pass's rule is one honest line, no spam) that flags the shared
++/// `degraded` bit the sink polls per cue. `None` is any failure at all.
++fn probe_device() -> Option<(MixerDeviceSink, Arc<AtomicBool>)> {
++    if !device_plausible() {
++        return None; // the silent short-circuit (see `device_plausible`)
++    }
++    let degraded = Arc::new(AtomicBool::new(false));
++    let flag = Arc::clone(&degraded);
++    let callback = move |_: rodio::cpal::StreamError| {
++        flag.store(true, Ordering::Relaxed);
++    };
++    let builder = DeviceSinkBuilder::from_default_device()
++        .ok()?
++        .with_error_callback(callback);
++    let mut sink = builder.open_sink_or_fallback().ok()?;
++    // The drop notice would spam stderr at exit; the sink's own evidence
++    // lines say everything this pass claims.
++    sink.log_on_drop(false);
++    Some((sink, degraded))
++}
++
++impl AudioSink for Sound {
++    fn on_events(&mut self, events: &[Event]) {
++        self.events_fed += events.len();
++        for cue in events.iter().filter_map(cue_for) {
++            self.voice(cue);
++        }
++    }
++
++    fn on_cue(&mut self, cue: AudioCue) {
++        self.client_cues += 1;
++        self.voice(cue);
++    }
++}
++
++#[cfg(test)]
++impl Sound {
++    /// The null arm's client-cue counter (PLAN §4.2's wiring oracle — the
++    /// engine's `NullAudioSink` counting what reached the sink's direct
++    /// path, post-limiter). 0 while the device arm is live (its cues go
++    /// to the device, not the counter). Test-only: production evidence
++    /// uses [`Sound::evidence_line`], which never claims the oracle.
++    pub fn null_client_cues(&self) -> usize {
++        match &self.arm {
++            Arm::Null(null) => null.client_cues,
++            Arm::Device(_) => 0,
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn every_cue_generates_a_short_non_empty_in_range_buffer() {
++        let bank = CueBank::generate();
++        for cue in AudioCue::ALL {
++            let buffer = bank.buffer(cue);
++            assert!(!buffer.is_empty(), "{} synthesizes something", cue.name());
++            // "small mono buffers (< 1 s)" — PLAN §4.2's own size law.
++            assert!(
++                buffer.len() < SAMPLE_RATE as usize,
++                "{} stays under one second ({} frames)",
++                cue.name(),
++                buffer.len()
++            );
++            // PCM in range: nothing clips the [-1, 1] rail.
++            assert!(
++                buffer.iter().all(|s| (-1.0..=1.0).contains(s)),
++                "{} stays in range",
++                cue.name()
++            );
++        }
++    }
++
++    #[test]
++    fn the_nine_cue_buffers_are_pairwise_distinct() {
++        // "One distinct sound per cue" (PLAN §4.2) — pinned at the buffer
++        // level: every pair of cues synthesizes different PCM. (Distinct
++        // *by construction* — the recipes differ in frequency, envelope,
++        // and duration; this pin is the machine's half, "sounds good" is
++        // the owner's.)
++        let bank = CueBank::generate();
++        for (i, a) in AudioCue::ALL.iter().enumerate() {
++            for b in AudioCue::ALL.iter().skip(i + 1) {
++                assert_ne!(
++                    bank.buffer(*a),
++                    bank.buffer(*b),
++                    "{} and {} are distinct cues",
++                    a.name(),
++                    b.name()
++                );
++            }
++        }
++    }
++
++    #[test]
++    fn the_bank_is_deterministic() {
++        // Pure synthesis: two runs generate identical banks (no entropy
++        // anywhere — the noise burst's xorshift is seeded by a constant).
++        assert_eq!(CueBank::generate().buffers, CueBank::generate().buffers);
++    }
++
++    #[test]
++    fn the_rate_limiter_first_passes_repeats_drop_and_reopens() {
++        let mut limiter = RateLimiter::new(Duration::from_millis(80));
++        let t0 = Instant::now();
++        assert!(
++            limiter.allow(AudioCue::AttackLanded, t0),
++            "the first passes"
++        );
++        assert!(
++            !limiter.allow(AudioCue::AttackLanded, t0 + Duration::from_millis(10)),
++            "a repeat inside the window drops"
++        );
++        assert!(
++            !limiter.allow(AudioCue::AttackLanded, t0 + Duration::from_millis(79)),
++            "still inside the window"
++        );
++        assert!(
++            limiter.allow(AudioCue::AttackLanded, t0 + Duration::from_millis(80)),
++            "the window reopens at the cooldown"
++        );
++        assert!(
++            limiter.allow(AudioCue::AttackLanded, t0 + Duration::from_secs(10)),
++            "and long after"
++        );
++    }
++
++    #[test]
++    fn rate_limiting_is_independent_per_cue() {
++        // A big fight's AttackLanded storm does not silence UnitLost:
++        // every cue's window is its own.
++        let mut limiter = RateLimiter::new(Duration::from_millis(80));
++        let t0 = Instant::now();
++        assert!(limiter.allow(AudioCue::AttackLanded, t0));
++        assert!(!limiter.allow(AudioCue::AttackLanded, t0 + Duration::from_millis(5)));
++        assert!(limiter.allow(AudioCue::UnitLost, t0 + Duration::from_millis(5)));
++        assert!(limiter.allow(AudioCue::Delivery, t0 + Duration::from_millis(6)));
++        assert!(!limiter.allow(AudioCue::UnitLost, t0 + Duration::from_millis(10)));
++        assert!(!limiter.allow(AudioCue::Delivery, t0 + Duration::from_millis(11)));
++    }
++
++    #[test]
++    fn the_limiter_reset_reopens_every_window() {
++        let mut limiter = RateLimiter::new(Duration::from_millis(80));
++        let t0 = Instant::now();
++        assert!(limiter.allow(AudioCue::UiClick, t0));
++        assert!(!limiter.allow(AudioCue::UiClick, t0));
++        limiter.reset();
++        assert!(
++            limiter.allow(AudioCue::UiClick, t0),
++            "a fresh match's first cue always voices"
++        );
++    }
++
++    #[test]
++    fn the_no_device_constructor_takes_the_null_arm_without_panicking() {
++        // The fallback path, pinned directly: the constructor's other arm
++        // counts events and cues, is not "active", and never panics. The
++        // machine's own probe result is not a test input — this arm is
++        // built explicitly (the CI/Xvfb path's result).
++        let mut sink = Sound::without_device(1.0);
++        assert!(!sink.is_active(), "no device means the null arm");
++        assert_eq!(sink.events_fed(), 0);
++        sink.on_events(&[Event::Died {
++            entity: pandemonium_sim_api::EntityId(1),
++        }]);
++        assert_eq!(sink.events_fed(), 1);
++        assert_eq!(sink.cues_fed, 1, "the death mapped to a cue");
++        assert_eq!(sink.cues_voiced, 1, "the first cue passes the limiter");
++        // The real constructor must not panic either, whatever this
++        // machine's probe finds (its arm is the machine's fact, printed
++        // honestly at startup, never asserted here).
++        let _ = Sound::new(1.0);
++    }
++
++    #[test]
++    fn client_side_cues_reach_the_null_sink_counter() {
++        // The wiring oracle: on the null arm, the engine's NullAudioSink
++        // counts what reached the direct path (post-limiter — the limiter
++        // sits between the cue source and the sink by design).
++        let mut sink = Sound::without_device(1.0);
++        assert_eq!(sink.null_client_cues(), 0);
++        sink.on_cue(AudioCue::CommandAck);
++        assert_eq!(sink.null_client_cues(), 1);
++        assert_eq!(sink.client_cues(), 1, "the wiring-layer counter too");
++        // An immediate repeat is fed and counted by the wiring, but the
++        // limiter drops it before the sink: the oracle stays at 1.
++        sink.on_cue(AudioCue::CommandAck);
++        assert_eq!(sink.client_cues(), 2);
++        assert_eq!(sink.cues_dropped, 1);
++        assert_eq!(
++            sink.null_client_cues(),
++            1,
++            "the drop happened before the sink"
++        );
++    }
++
++    #[test]
++    fn event_cues_and_client_cues_share_one_rate_limiter() {
++        // PLAN §4.4: the limiter sits between the cue source and the sink,
++        // whichever source — an event storm and a UI click of the same
++        // cue kind share that cue's window.
++        let mut sink = Sound::without_device(1.0);
++        sink.on_cue(AudioCue::AttackLanded);
++        assert_eq!(sink.cues_voiced, 1);
++        sink.on_events(&[Event::AttackHit {
++            attacker: pandemonium_sim_api::EntityId(1),
++            target: pandemonium_sim_api::EntityId(2),
++            damage: 8,
++        }]);
++        assert_eq!(sink.cues_fed, 2);
++        assert_eq!(sink.cues_voiced, 1, "the event's cue hit the same window");
++        assert_eq!(sink.cues_dropped, 1);
++    }
++
++    #[test]
++    fn the_match_reset_clears_counters_and_windows_but_not_the_volume() {
++        let mut sink = Sound::without_device(0.25);
++        sink.on_cue(AudioCue::UiClick);
++        sink.set_volume(0.5);
++        sink.reset();
++        assert_eq!(sink.events_fed(), 0);
++        assert_eq!(
++            (sink.cues_fed, sink.cues_voiced, sink.cues_dropped),
++            (0, 0, 0)
++        );
++        assert_eq!(sink.client_cues(), 0);
++        assert_eq!(
++            sink.gain(),
++            0.5,
++            "volume survives the reset (the device does)"
++        );
++        // The window reopened: the first cue after the reset voices.
++        sink.on_cue(AudioCue::UiClick);
++        assert_eq!(sink.cues_voiced, 1);
++    }
++
++    #[test]
++    fn the_volume_is_clamped_into_its_range_and_applied_live() {
++        let mut sink = Sound::without_device(2.0);
++        assert_eq!(sink.gain(), 1.0, "construction clamps");
++        sink.set_volume(-0.5);
++        assert_eq!(sink.gain(), 0.0, "and so does every live change");
++        sink.set_volume(0.3);
++        assert_eq!(sink.gain(), 0.3);
++    }
++
++    #[test]
++    fn the_evidence_line_names_the_arm_and_the_three_fates() {
++        let mut sink = Sound::without_device(1.0);
++        sink.on_cue(AudioCue::UiClick);
++        sink.on_cue(AudioCue::UiClick);
++        let line = sink.evidence_line();
++        assert!(line.contains("null fallback"), "the arm is named: {line}");
++        assert!(
++            line.contains("fed/voiced/dropped 2/1/1"),
++            "the three fates are named: {line}"
++        );
++        assert!(
++            line.contains("2 client-side"),
++            "the wiring count is pre-limiter: {line}"
++        );
++    }
++}
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 52a4fe0..8706c85 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -1033,3 +1033,53 @@ confirms or rejects it.
+   work (ADR-0002). DEBT-015's remaining scope ("Phase 4 only") is therefore
+   spent; the A14 declaration stays blocked on the >=5-tester playtest gate,
+   which is the owner's to run.
++
++- **A-120 (PLAN-M10.2 §4.2, M10.2 Phase 4).** The command acknowledgment
++  cue fires at *submission*: the order was stamped, accepted into the
++  host's queue, and (when it had a ground point) pinged. "Acknowledged"
++  means submitted, NOT non-rejected — the sim's own verdict is a later,
++  separate fact that surfaces through the refusal feedback when it is
++  bad, and nothing retracts the ack. A-113's spectate silence carries
++  over: a spectator's idle orders are not acknowledgments (the cue is
++  behind the same orders-layer gate).
++
++- **A-121 (PLAN-M10.2 §4.2, M10.2 Phase 4).** "Menu activation" is any
++  row activation of the screens state machine — Enter on the focused
++  row, a mouse click on a row, and the end screen's R shortcut all
++  funnel through one `menu_activate` core in the wiring layer, and that
++  core fires the UiClick cue. Left/Right value adjustments and arrow
++  navigation are not activations and stay silent; the pure machine
++  itself never owns a sink.
++
++- **A-122 (PLAN-M10.2 §4.2, M10.2 Phase 4).** The selection click cue
++  fires exactly when the selection's *membership* changes (one
++  `set_selection` gate every user-driven change funnels through): a
++  redundant re-select of the same members is not a click, while a
++  clear, a shift-toggle-off, a control-group recall, a box select, and
++  a single/double click are. The match reset bypasses the gate — a
++  fresh match's empty selection is not a click.
++
++- **A-123 (PLAN-M10.2 §4.4, M10.2 Phase 4).** The rate limiter sits
++  between the cue source and the sink *arm*: event-derived and
++  client-side cues of the same kind share that kind's 80 ms window, and
++  the fallback arm counts only what passed (post-limiter), matching
++  what the device arm would have played — so the null arm's counters
++  and the evidence line stay directly comparable across arms. Evidence
++  counters are match-scoped (reset per match, like the commands
++  counter) except the client-side *wiring* count, which the wiring
++  layer's own pre-limiter counter reports (fed is a wiring fact, voiced
++  is an arm fact).
++
++- **A-124 (PLAN-M10.2 §4.3, M10.2 Phase 4).** The Linux device probe is
++  preceded by a `/dev/snd` existence check: without it there is no
++  kernel sound stack at all, and libasound's config parser would print
++  a stderr burst on its way to the same "no device" conclusion — the
++  pre-check keeps the fallback path silent (the pass's no-spam rule),
++  and the null arm is taken without waking the C library. The accepted
++  corner: a socket-forwarded Pulse server without local `/dev/snd`
++  reads as no-device (the CI/headless class dwarfs it; the owner's
++  desktop has `/dev/snd`). Mid-session device loss is detected through
++  rodio's stream error callback (a polled flag, one degrade line, no
++  panic); a device that dies without an error callback firing stays
++  "active" but silent — inherent to the backend, and honest because
++  the evidence line claims the arm, never audible sound.
+-- 
+2.47.3
+
+
+From b5404ce33abaa31cf7dab85a42f7e16c6003c5e8 Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 11:11:21 +0000
+Subject: [PATCH 4/5] feat(client): the mute setting joins the audio pass - the
+ eighth key, row 5, wired live (PLAN-M10.2 4.4)
+
+Mute is the eighth config key, right after master_volume: Settings,
+SETTING_KEYS, to_text, the parser (a Phase 3 seven-key file parses with
+mute off - the key is purely additive), adjust_setting (row 5), and
+the settings screen's rows (fullscreen/debug_overlay shift to rows
+6/7, Done to 8). Both keyboard and mouse reach the new row - the focus
+map walks all nine buttons and the ui.rs button-id/focus tests pin
+the match against the machine.
+
+The semantics (A-125, carried live per A-115): mute beats volume and
+never zeros it - the sink reads a muted flag as gain 0 whatever the
+volume says, unmuting restores the set loudness, and the two rows
+never write each other's value. Muting silences output, not evidence:
+the cue counters keep counting. The evidence line says [muted] when
+muted. The sink constructor now takes the loaded settings' volume and
+mute, and adjust_setting drives set_volume/set_muted live.
+
+DEBT-011 is repaid with this commit (the audible backend, the
+synthesized bank, the limiter, the fallback, volume AND mute - the
+whole sketch, on the standing seam); DEBT-015 closes with it (all
+three deferred phases are built - what remains of A14 is the owner's
+>=5-tester gate, not milestone scope). 3 new config tests (backward
+compatibility, mute spellings + round-trip, the shifted row indices)
+and 1 new sound test (mute precedence); the screens/ui/config row
+pins all move to the nine-row layout. Total: 546 dev tests.
+---
+ crates/client/src/config.rs  | 87 +++++++++++++++++++++++++++++++-----
+ crates/client/src/main.rs    | 21 +++++----
+ crates/client/src/screens.rs | 31 ++++++++-----
+ crates/client/src/sound.rs   | 78 ++++++++++++++++++++++++++------
+ crates/client/src/ui.rs      | 12 ++---
+ docs/ASSUMPTIONS.md          | 11 +++++
+ docs/DEBT.md                 |  4 +-
+ 7 files changed, 191 insertions(+), 53 deletions(-)
+
+diff --git a/crates/client/src/config.rs b/crates/client/src/config.rs
+index c8b1485..b105c0d 100644
+--- a/crates/client/src/config.rs
++++ b/crates/client/src/config.rs
+@@ -16,7 +16,8 @@
+ 
+ use std::path::PathBuf;
+ 
+-/// The persisted settings (PLAN §3.4's six keys — exactly these, no more).
++/// The persisted settings (PLAN §3.4's keys — exactly these, no more:
++/// eight after Phase 4 added `muted`).
+ #[derive(Clone, Copy, Debug, PartialEq)]
+ pub struct Settings {
+     /// Whether the screen-edge scroll band is active (DEBT-014's toggle).
+@@ -27,9 +28,14 @@ pub struct Settings {
+     pub zoom_min: f32,
+     /// The camera distance upper clamp (tiles).
+     pub zoom_max: f32,
+-    /// Master volume, 0.0..=1.0 — stored and shown, audible in Phase 4
+-    /// (the `AudioSink` seam is fed but null-backed, DEBT-011).
++    /// Master volume, 0.0..=1.0 — live on the audio sink since Phase 4
++    /// (DEBT-011 repaid; A-115's semantics: changes apply live, Done
++    /// saves, Esc leaves this run's value unsaved).
+     pub master_volume: f32,
++    /// Mute — beats the volume (a muted non-zero volume is silent).
++    /// The eighth key, right after `master_volume` (PLAN §4.4's "master
++    /// volume and a mute toggle in settings").
++    pub muted: bool,
+     /// Whether the window starts fullscreen.
+     pub fullscreen: bool,
+     /// Whether the F3 debug overlay is visible at match start.
+@@ -53,6 +59,7 @@ impl Default for Settings {
+             zoom_min: DEFAULT_ZOOM_MIN,
+             zoom_max: DEFAULT_ZOOM_MAX,
+             master_volume: 1.0,
++            muted: false,
+             fullscreen: false,
+             debug_overlay: false,
+         }
+@@ -63,12 +70,13 @@ impl Default for Settings {
+ // (the settings screen consumes this + the save path in its own commit,
+ // later in this same phase)
+ #[allow(dead_code)]
+-pub const SETTING_KEYS: [&str; 7] = [
++pub const SETTING_KEYS: [&str; 8] = [
+     "edge_scroll",
+     "pan_speed",
+     "zoom_min",
+     "zoom_max",
+     "master_volume",
++    "muted",
+     "fullscreen",
+     "debug_overlay",
+ ];
+@@ -84,6 +92,7 @@ impl Settings {
+         out.push_str(&format!("zoom_min={}\n", self.zoom_min));
+         out.push_str(&format!("zoom_max={}\n", self.zoom_max));
+         out.push_str(&format!("master_volume={}\n", self.master_volume));
++        out.push_str(&format!("muted={}\n", self.muted));
+         out.push_str(&format!("fullscreen={}\n", self.fullscreen));
+         out.push_str(&format!("debug_overlay={}\n", self.debug_overlay));
+         out
+@@ -139,6 +148,9 @@ impl Settings {
+                         settings.master_volume = volume.clamp(0.0, 1.0);
+                     }
+                 }
++                "muted" => {
++                    settings.muted = parse_bool(value).unwrap_or(settings.muted);
++                }
+                 "fullscreen" => {
+                     settings.fullscreen = parse_bool(value).unwrap_or(settings.fullscreen);
+                 }
+@@ -198,8 +210,9 @@ pub fn adjust_setting(settings: Settings, row: usize, dir: i32) -> Settings {
+         4 => {
+             next.master_volume = (next.master_volume + 0.05 * dir as f32).clamp(0.0, 1.0);
+         }
+-        5 => next.fullscreen = !next.fullscreen,
+-        6 => next.debug_overlay = !next.debug_overlay,
++        5 => next.muted = !next.muted,
++        6 => next.fullscreen = !next.fullscreen,
++        7 => next.debug_overlay = !next.debug_overlay,
+         _ => {} // the Done row is not a setting
+     }
+     next
+@@ -311,6 +324,7 @@ mod tests {
+         assert_eq!(s.zoom_min, 8.0);
+         assert_eq!(s.zoom_max, 160.0);
+         assert_eq!(s.master_volume, 1.0);
++        assert!(!s.muted);
+         assert!(!s.fullscreen);
+         assert!(!s.debug_overlay);
+     }
+@@ -323,6 +337,7 @@ mod tests {
+             zoom_min: 12.0,
+             zoom_max: 90.0,
+             master_volume: 0.35,
++            muted: true,
+             fullscreen: true,
+             debug_overlay: true,
+         };
+@@ -347,12 +362,13 @@ mod tests {
+         // Per-key salvage (A-108): the garbage lines cost their own keys,
+         // the good line survives.
+         let text = "edge_scroll=maybe\npan_speed=fast\nzoom_min=[]\n\
+-                    master_volume=loud\nfullscreen=perhaps\ndebug_overlay=???\n";
++                    master_volume=loud\nmuted=perhaps\nfullscreen=probably\ndebug_overlay=???\n";
+         let s = Settings::parse(text);
+         assert!(s.edge_scroll); // malformed -> default (true)
+         assert_eq!(s.pan_speed, DEFAULT_PAN_SPEED);
+         assert_eq!(s.zoom_min, DEFAULT_ZOOM_MIN);
+         assert_eq!(s.master_volume, 1.0);
++        assert!(!s.muted); // malformed -> default (false)
+         assert!(!s.fullscreen);
+         assert!(!s.debug_overlay);
+     }
+@@ -465,14 +481,55 @@ mod tests {
+         assert_eq!(config_path_from(None, None, Some(PathBuf::new())), None);
+     }
+ 
++    #[test]
++    fn a_settings_file_from_before_the_mute_key_loads_with_mute_off() {
++        // Backward compatibility: a Phase 3 file (seven keys, no `muted`)
++        // parses cleanly — mute defaults off, every other value survives.
++        let s = Settings::parse(
++            "edge_scroll=false\npan_speed=60\nzoom_min=12\nzoom_max=90\n\
++             master_volume=0.35\nfullscreen=true\ndebug_overlay=true\n",
++        );
++        assert_eq!(
++            s,
++            Settings {
++                edge_scroll: false,
++                pan_speed: 60.0,
++                zoom_min: 12.0,
++                zoom_max: 90.0,
++                master_volume: 0.35,
++                muted: false,
++                fullscreen: true,
++                debug_overlay: true,
++            }
++        );
++    }
++
++    #[test]
++    fn muted_parses_the_friendly_spellings_and_round_trips() {
++        assert!(Settings::parse("muted=true\n").muted);
++        assert!(Settings::parse("muted=on\n").muted);
++        assert!(!Settings::parse("muted=false\n").muted);
++        // And it persists (the re-test's relaunch check reads this).
++        let original = Settings {
++            muted: true,
++            ..Settings::default()
++        };
++        assert_eq!(Settings::parse(&original.to_text()), original);
++    }
++
+     #[test]
+     fn adjust_steps_every_row_within_its_range() {
+         let s = Settings::default();
+         // Booleans toggle on any direction.
+         assert!(!adjust_setting(s, 0, 1).edge_scroll);
+         assert!(!adjust_setting(s, 0, -1).edge_scroll);
+-        assert!(adjust_setting(s, 5, -1).fullscreen);
+-        assert!(adjust_setting(s, 6, 1).debug_overlay);
++        assert!(adjust_setting(s, 5, 1).muted, "row 5 is the mute toggle");
++        assert!(
++            adjust_setting(s, 5, -1).muted,
++            "booleans toggle on any direction"
++        );
++        assert!(adjust_setting(s, 6, -1).fullscreen);
++        assert!(adjust_setting(s, 7, 1).debug_overlay);
+         // Numbers step and clamp.
+         assert_eq!(adjust_setting(s, 1, 1).pan_speed, 36.0);
+         assert_eq!(adjust_setting(s, 1, -1).pan_speed, 32.0);
+@@ -498,15 +555,21 @@ mod tests {
+             60.0,
+             "max stops at min"
+         );
+-        // Volume steps by 5% and clamps at both ends.
++        // Volume steps by 5% and clamps at both ends; muting does not
++        // touch it (mute beats volume, it does not zero it).
+         assert_eq!(adjust_setting(s, 4, -1).master_volume, 0.95);
+         let quiet = Settings {
+             master_volume: 0.02,
+             ..Settings::default()
+         };
+         assert_eq!(adjust_setting(quiet, 4, -1).master_volume, 0.0);
+-        // The Done row (7) adjusts nothing.
+-        assert_eq!(adjust_setting(s, 7, 1), s);
++        assert_eq!(
++            adjust_setting(adjust_setting(s, 5, 1), 4, -1).master_volume,
++            0.95,
++            "the mute row leaves the volume value alone"
++        );
++        // The Done row (8) adjusts nothing.
++        assert_eq!(adjust_setting(s, 8, 1), s);
+     }
+ 
+     /// A settings value hand-placed at a boundary for the step tests.
+diff --git a/crates/client/src/main.rs b/crates/client/src/main.rs
+index 9dfdc4a..7657ff5 100644
+--- a/crates/client/src/main.rs
++++ b/crates/client/src/main.rs
+@@ -429,8 +429,9 @@ impl App {
+         // ADR-0002), any failure takes the null arm silently, and either
+         // way one honest startup line says which (the machine cannot hear:
+         // under Xvfb/CI the probe finds nothing and the run exercises the
+-        // fallback).
+-        let audio = sound::Sound::new(settings.master_volume);
++        // fallback). The settings' volume and mute ride in (Phase 4 made
++        // them live rows).
++        let audio = sound::Sound::new(settings.master_volume, settings.muted);
+         Ok(Self {
+             tree,
+             screen: AppState::at_main_menu(),
+@@ -720,10 +721,10 @@ impl App {
+     /// has been wired since Phase 1), the zoom limits re-clamp the camera
+     /// now, the debug overlay follows (it is also the match-start default),
+     /// fullscreen toggles the window, and pan speed is read live from the
+-    /// struct already. M10.2 Phase 4: master volume now goes straight to
+-    /// the sink (every later voice uses it — DEBT-011's repayment made the
+-    /// row real; the volume semantics are A-115's: live now, Done saves,
+-    /// Esc leaves this run's value unsaved).
++    /// struct already. M10.2 Phase 4 (DEBT-011 repaid): master volume now
++    /// goes straight to the sink (every later voice uses it) and the new
++    /// mute row beats it — A-115's semantics: live now, Done saves, Esc
++    /// leaves this run's value unsaved.
+     fn adjust_setting(&mut self, row: usize, dir: i32) {
+         self.settings = config::adjust_setting(self.settings, row, dir);
+         match row {
+@@ -732,8 +733,9 @@ impl App {
+                 .camera
+                 .clamp_distance_to(self.settings.zoom_min, self.settings.zoom_max),
+             4 => self.audio.set_volume(self.settings.master_volume),
++            5 => self.audio.set_muted(self.settings.muted),
+             6 => self.debug_overlay = self.settings.debug_overlay,
+-            5 => self.apply_fullscreen(),
++            7 => self.apply_fullscreen(),
+             _ => {}
+         }
+     }
+@@ -2845,7 +2847,8 @@ fn headless_smoke(bundle: &ContentBundle) -> anyhow::Result<()> {
+     // Xvfb/CI; the probe's one honest line prints above), and the counters
+     // below are the audio evidence. Whatever arm this machine's probe
+     // found, the smoke asserts counting, never audible sound.
+-    let mut audio = sound::Sound::new(config::load().master_volume);
++    let smoke_settings = config::load();
++    let mut audio = sound::Sound::new(smoke_settings.master_volume, smoke_settings.muted);
+     let mut feedback = FeedbackState::default();
+     // M9.1: the smoke also exercises the refusal wiring — one deliberately
+     // invalid order (a Move naming a unit that does not exist) must come
+@@ -2972,7 +2975,7 @@ mod audio_wiring {
+         let mut app = App::new(tree, bundle, Some(7), None).expect("the app constructs");
+         // The forced null arm: what the no-device constructor yields, so
+         // the oracle counter exists whatever this machine can hear.
+-        app.audio = sound::Sound::without_device(1.0);
++        app.audio = sound::Sound::without_device(1.0, false);
+         app
+     }
+ 
+diff --git a/crates/client/src/screens.rs b/crates/client/src/screens.rs
+index 26cec12..3c488b7 100644
+--- a/crates/client/src/screens.rs
++++ b/crates/client/src/screens.rs
+@@ -156,7 +156,7 @@ pub enum Screen {
+     MainMenu,
+     /// Mode / seed / map / Start.
+     NewMatch(NewMatchState),
+-    /// The seven settings rows + Done. The *values* live in the app's
++    /// The eight settings rows + Done. The *values* live in the app's
+     /// [`crate::config::Settings`]; the machine only navigates.
+     Settings {
+         /// Which screen Settings was opened from.
+@@ -336,7 +336,7 @@ impl AppState {
+             (Screen::NewMatch(_), 3) => ButtonId::Start,
+             (Screen::NewMatch(_), 4) => ButtonId::Back,
+             (Screen::Settings { .. }, index) => {
+-                const SETTINGS_ROWS: usize = 7; // the seven keys + Done
++                const SETTINGS_ROWS: usize = 8; // the eight keys + Done
+                 if index < SETTINGS_ROWS {
+                     ButtonId::Setting(index)
+                 } else if index == SETTINGS_ROWS {
+@@ -361,7 +361,7 @@ impl AppState {
+         match self.screen {
+             Screen::MainMenu => 3,
+             Screen::NewMatch(_) => 5,
+-            Screen::Settings { .. } => 8, // 7 settings rows + Done
++            Screen::Settings { .. } => 9, // 8 settings rows + Done
+             Screen::InMatch => 0,
+             Screen::PauseMenu => 4,
+             Screen::EndScreen => 2,
+@@ -761,14 +761,14 @@ mod tests {
+         let settings = at(Screen::Settings {
+             return_to: SettingsReturn::MainMenu,
+         });
+-        let (next, effect) = settings.activate_index(7, &ctx()); // Done
++        let (next, effect) = settings.activate_index(8, &ctx()); // Done
+         assert_eq!(effect, Effect::SaveSettings);
+         assert_eq!(next.screen, Screen::MainMenu);
+         // From the pause menu (the awkward edge: settings must remember).
+         let settings = at(Screen::Settings {
+             return_to: SettingsReturn::PauseMenu,
+         });
+-        let (next, effect) = settings.activate_index(7, &ctx());
++        let (next, effect) = settings.activate_index(8, &ctx());
+         assert_eq!(effect, Effect::SaveSettings);
+         assert_eq!(next.screen, Screen::PauseMenu);
+     }
+@@ -1083,26 +1083,35 @@ mod tests {
+         let mut done = at(Screen::Settings {
+             return_to: SettingsReturn::MainMenu,
+         });
+-        done.focus_index(7);
++        done.focus_index(8);
+         let (_, effect) = done.on_key(NavKey::Left, &ctx());
+         assert_eq!(effect, Effect::None);
+     }
+ 
+     #[test]
+-    fn the_settings_screen_lists_seven_rows_plus_done() {
++    fn the_settings_screen_lists_eight_rows_plus_done() {
+         let settings = at(Screen::Settings {
+             return_to: SettingsReturn::MainMenu,
+         });
+-        assert_eq!(settings.button_count(), 8);
+-        for row in 0..7 {
++        assert_eq!(settings.button_count(), 9);
++        for row in 0..8 {
+             assert_eq!(
+                 settings.button_at(row),
+                 Some(ButtonId::Setting(row)),
+                 "row {row}"
+             );
+         }
+-        assert_eq!(settings.button_at(7), Some(ButtonId::Done));
+-        assert_eq!(settings.button_at(8), None);
++        assert_eq!(settings.button_at(8), Some(ButtonId::Done));
++        assert_eq!(settings.button_at(9), None);
++        // Focus walks the whole ladder (keyboard reaches the new row —
++        // M10.2 Phase 4's mute row is row 5, between volume and
++        // fullscreen).
++        let mut walking = settings.clone();
++        for expected in 0..9 {
++            assert_eq!(walking.focus, expected);
++            walking.focus_next();
++        }
++        assert_eq!(walking.focus, 0, "wraps after Done");
+     }
+ 
+     // ---- mode semantics ----------------------------------------------------
+diff --git a/crates/client/src/sound.rs b/crates/client/src/sound.rs
+index e8d4e18..e462031 100644
+--- a/crates/client/src/sound.rs
++++ b/crates/client/src/sound.rs
+@@ -326,6 +326,10 @@ pub struct Sound {
+     /// changes apply immediately; Done persists, Esc leaves the run's
+     /// value unsaved).
+     volume: f32,
++    /// Mute — beats the volume (PLAN §4.4: a muted non-zero volume is
++    /// silent; unmuting restores the volume untouched). The cue
++    /// counters keep counting: muting silences output, not evidence.
++    muted: bool,
+     /// The evidence counters, reset per match like the other match-scoped
+     /// counters (the `--frames` summary reports the live segment).
+     events_fed: usize,
+@@ -343,7 +347,9 @@ impl Sound {
+     /// line; ANY failure — no device, Xvfb, CI, a probe error — means the
+     /// null arm, silently: no panic, no stderr spam, one honest line.
+     /// Never blocks the render loop (the probe runs before it exists).
+-    pub fn new(volume: f32) -> Self {
++    /// The volume and mute come from the loaded settings (Phase 4 made
++    /// them live rows).
++    pub fn new(volume: f32, muted: bool) -> Self {
+         match probe_device() {
+             Some((sink, degraded)) => {
+                 println!(
+@@ -359,6 +365,7 @@ impl Sound {
+                     })),
+                     limiter: RateLimiter::new(CUE_COOLDOWN),
+                     volume: volume.clamp(0.0, 1.0),
++                    muted,
+                     events_fed: 0,
+                     cues_fed: 0,
+                     cues_voiced: 0,
+@@ -366,14 +373,14 @@ impl Sound {
+                     client_cues: 0,
+                 }
+             }
+-            None => Self::without_device(volume),
++            None => Self::without_device(volume, muted),
+         }
+     }
+ 
+     /// The constructor's other arm, built directly — the no-device
+     /// fallback (tests pin this path; the machine pass exercises it under
+     /// Xvfb and CI, where the probe finds nothing).
+-    pub fn without_device(volume: f32) -> Self {
++    pub fn without_device(volume: f32, muted: bool) -> Self {
+         println!(
+             "pandemonium client — audio: no device — null fallback (cues counted, never voiced)"
+         );
+@@ -381,6 +388,7 @@ impl Sound {
+             arm: Arm::Null(NullAudioSink::new()),
+             limiter: RateLimiter::new(CUE_COOLDOWN),
+             volume: volume.clamp(0.0, 1.0),
++            muted,
+             events_fed: 0,
+             cues_fed: 0,
+             cues_voiced: 0,
+@@ -391,13 +399,27 @@ impl Sound {
+ 
+     /// The live master volume (A-115): every later voice uses it. Saved by
+     /// Done, left unsaved-but-live by Esc — the settings screen's own law.
++    /// Muting never touches the stored volume (mute beats it, it does not
++    /// zero it — unmuting restores the loudness the player set).
+     pub fn set_volume(&mut self, volume: f32) {
+         self.volume = volume.clamp(0.0, 1.0);
+     }
+ 
+-    /// The effective output gain: the master volume as played.
++    /// The live mute toggle (PLAN §4.4): beats the volume — the effective
++    /// gain is zero while muted, whatever the volume says. Counters keep
++    /// counting (the evidence is the wiring, not the loudness).
++    pub fn set_muted(&mut self, muted: bool) {
++        self.muted = muted;
++    }
++
++    /// The effective output gain: zero when muted (mute beats volume),
++    /// else the master volume.
+     pub fn gain(&self) -> f32 {
+-        self.volume
++        if self.muted {
++            0.0
++        } else {
++            self.volume
++        }
+     }
+ 
+     /// Whether the device arm is live (the evidence line's
+@@ -442,9 +464,10 @@ impl Sound {
+         } else {
+             "null fallback (no device)".to_string()
+         };
++        let mute = if self.muted { " [muted]" } else { "" };
+         let client_side = self.client_cues();
+         format!(
+-            "{arm}, cues fed/voiced/dropped {}/{}/{} ({client_side} client-side)",
++            "{arm}{mute}, cues fed/voiced/dropped {}/{}/{} ({client_side} client-side)",
+             self.cues_fed, self.cues_voiced, self.cues_dropped
+         )
+     }
+@@ -676,7 +699,7 @@ mod tests {
+         // counts events and cues, is not "active", and never panics. The
+         // machine's own probe result is not a test input — this arm is
+         // built explicitly (the CI/Xvfb path's result).
+-        let mut sink = Sound::without_device(1.0);
++        let mut sink = Sound::without_device(1.0, false);
+         assert!(!sink.is_active(), "no device means the null arm");
+         assert_eq!(sink.events_fed(), 0);
+         sink.on_events(&[Event::Died {
+@@ -688,7 +711,7 @@ mod tests {
+         // The real constructor must not panic either, whatever this
+         // machine's probe finds (its arm is the machine's fact, printed
+         // honestly at startup, never asserted here).
+-        let _ = Sound::new(1.0);
++        let _ = Sound::new(1.0, false);
+     }
+ 
+     #[test]
+@@ -696,7 +719,7 @@ mod tests {
+         // The wiring oracle: on the null arm, the engine's NullAudioSink
+         // counts what reached the direct path (post-limiter — the limiter
+         // sits between the cue source and the sink by design).
+-        let mut sink = Sound::without_device(1.0);
++        let mut sink = Sound::without_device(1.0, false);
+         assert_eq!(sink.null_client_cues(), 0);
+         sink.on_cue(AudioCue::CommandAck);
+         assert_eq!(sink.null_client_cues(), 1);
+@@ -718,7 +741,7 @@ mod tests {
+         // PLAN §4.4: the limiter sits between the cue source and the sink,
+         // whichever source — an event storm and a UI click of the same
+         // cue kind share that cue's window.
+-        let mut sink = Sound::without_device(1.0);
++        let mut sink = Sound::without_device(1.0, false);
+         sink.on_cue(AudioCue::AttackLanded);
+         assert_eq!(sink.cues_voiced, 1);
+         sink.on_events(&[Event::AttackHit {
+@@ -733,7 +756,7 @@ mod tests {
+ 
+     #[test]
+     fn the_match_reset_clears_counters_and_windows_but_not_the_volume() {
+-        let mut sink = Sound::without_device(0.25);
++        let mut sink = Sound::without_device(0.25, false);
+         sink.on_cue(AudioCue::UiClick);
+         sink.set_volume(0.5);
+         sink.reset();
+@@ -755,7 +778,7 @@ mod tests {
+ 
+     #[test]
+     fn the_volume_is_clamped_into_its_range_and_applied_live() {
+-        let mut sink = Sound::without_device(2.0);
++        let mut sink = Sound::without_device(2.0, false);
+         assert_eq!(sink.gain(), 1.0, "construction clamps");
+         sink.set_volume(-0.5);
+         assert_eq!(sink.gain(), 0.0, "and so does every live change");
+@@ -764,8 +787,26 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn the_evidence_line_names_the_arm_and_the_three_fates() {
+-        let mut sink = Sound::without_device(1.0);
++    fn mute_beats_volume_and_never_zeros_it() {
++        // PLAN §4.4's precedence: a muted non-zero volume is silent, and
++        // unmuting restores the loudness the player set (the mute toggle
++        // never writes the volume field).
++        let mut sink = Sound::without_device(0.7, true);
++        assert_eq!(sink.gain(), 0.0, "muted construction is silent");
++        sink.set_volume(0.4);
++        assert_eq!(sink.gain(), 0.0, "volume changes while muted stay silent");
++        sink.set_muted(false);
++        assert_eq!(sink.gain(), 0.4, "unmuting restores the set volume");
++        sink.set_muted(true);
++        assert_eq!(sink.gain(), 0.0);
++        // Muting silences output, not evidence: the counters still count.
++        sink.on_cue(AudioCue::UiClick);
++        assert_eq!((sink.cues_fed, sink.cues_voiced), (1, 1));
++    }
++
++    #[test]
++    fn the_evidence_line_names_the_arm_the_mute_and_the_three_fates() {
++        let mut sink = Sound::without_device(1.0, false);
+         sink.on_cue(AudioCue::UiClick);
+         sink.on_cue(AudioCue::UiClick);
+         let line = sink.evidence_line();
+@@ -778,5 +819,14 @@ mod tests {
+             line.contains("2 client-side"),
+             "the wiring count is pre-limiter: {line}"
+         );
++        assert!(
++            !line.contains("muted"),
++            "an unmuted line does not claim mute"
++        );
++        sink.set_muted(true);
++        assert!(
++            sink.evidence_line().contains("[muted]"),
++            "the mute is named"
++        );
+     }
+ }
+diff --git a/crates/client/src/ui.rs b/crates/client/src/ui.rs
+index cace3fc..947a522 100644
+--- a/crates/client/src/ui.rs
++++ b/crates/client/src/ui.rs
+@@ -709,8 +709,9 @@ fn screen_rows(input: &MenuInput<'_>) -> Vec<Row> {
+             2 => format!("{:.0}", settings.zoom_min),
+             3 => format!("{:.0}", settings.zoom_max),
+             4 => format!("{}%", (settings.master_volume * 100.0).round() as i32),
+-            5 => on_off(settings.fullscreen),
+-            6 => on_off(settings.debug_overlay),
++            5 => on_off(settings.muted),
++            6 => on_off(settings.fullscreen),
++            7 => on_off(settings.debug_overlay),
+             _ => String::new(),
+         }
+     };
+@@ -755,7 +756,8 @@ fn screen_rows(input: &MenuInput<'_>) -> Vec<Row> {
+                 "Pan speed",
+                 "Zoom min",
+                 "Zoom max",
+-                "Master volume (audio: Phase 4)",
++                "Master volume",
++                "Mute",
+                 "Fullscreen",
+                 "Debug overlay",
+             ];
+@@ -771,7 +773,7 @@ fn screen_rows(input: &MenuInput<'_>) -> Vec<Row> {
+                     )
+                 })
+                 .collect();
+-            rows.push(row(7, ButtonId::Done, "Done (save)", String::new()));
++            rows.push(row(8, ButtonId::Done, "Done (save)", String::new()));
+             rows
+         }
+         Screen::PauseMenu => vec![
+@@ -1409,7 +1411,7 @@ mod tests {
+             end_lines: None,
+             backdrop: [0.0, 0.0, 0.0, 0.5],
+         });
+-        assert_eq!(built.buttons.len(), 8);
++        assert_eq!(built.buttons.len(), 9);
+         for button in &built.buttons {
+             assert!(button.w > 0.0 && button.h > 0.0, "a real rect");
+             // Inside the viewport, and the center is inside the rect.
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 8706c85..054b9bb 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -1083,3 +1083,14 @@ confirms or rejects it.
+   panic); a device that dies without an error callback firing stays
+   "active" but silent — inherent to the backend, and honest because
+   the evidence line claims the arm, never audible sound.
++
++- **A-125 (PLAN-M10.2 §4.4, M10.2 Phase 4).** Mute beats volume and never
++  zeros it: the mute row flips a flag the sink reads as gain 0 whatever
++  the master volume says, and unmuting restores the loudness the player
++  set (the toggle never writes the volume field — the two rows stay
++  independent). Both rows are live per A-115 (apply immediately, Done
++  persists, Esc leaves this run's values unsaved-but-live), and muting
++  silences output only — the cue counters keep counting, because the
++  evidence is the wiring, not the loudness. A Phase 3 settings file
++  (seven keys, no `muted`) parses cleanly with mute off: the eighth key
++  is purely additive.
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index 5e23d55..dd82da5 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -19,10 +19,10 @@ repay-when trigger | status |`
+ | DEBT-008 | The windowed client's *machine* verification is green through M9.1 and the M10 visual pass; its *human* half ran at M9.1 and remains the closing act for every visual change since. History: on Xvfb + Mesa llvmpipe (EGL, GL backend) the windowed client presents 900 frames, XTEST-injected drag-box selection selects the 5 start entities, right-click Move orders submit and produce visible motion; M8 narrowed the scope to the full vs-AI loop (hosted AI, end screen, restart, control groups, hotkeys); M9 machine-ran the full windowed vs-AI loop to natural resolution (`--frames 40000`, "match ended, player 1 wins (tick 5250)") and landed the feel pass (flashes, health bars, pings). **M9 — the human pass**: the project owner played the windowed build on a real display and reported the input layer was mirrored and half-missing ("nothing is moving, the control is bad, D goes left and A goes right, I can't move with the mouse, I can't order my army to move or attack, nothing appears") — every symptom real, every root cause client-side (the camera's screen-right axis negated since M3; no mouse camera control — §11.3's edge pan and zoom-toward-cursor unimplemented, wheel inverted; no attack-order path — right-click context resolution unimplemented; 'A' firing attack-move on key-down and key repeats while doubling as a pan key; silent rejections; the 58-tile map-center opening zoom; M9's cues never expiring because the feedback clock only advanced in `--frames` mode). **M9.1** fixed all of it (direction-pinned camera tests, context-resolution tests, refusal-cue tests, the smoke's invalid-order pin, and the extended Xvfb+XTEST input verification: 900 frames, 5-entity drag selection, context Move + armed attack-move submitted). **M10** added the command card (train/build/queue-cancel/rally), fog rendering, the minimap, lighting, silhouettes, and death fades — the human pass now also judges those | verification | the environment has no desktop GPU/display; the automated half is reproducibly green (`pandemonium-client --frames N` evidence summary; env: Xvfb with a screen at least as large as the 800x600 default window — e.g. 1280x800 — userland libEGL/libGLESv2 + a glvnd `__EGL_VENDOR_LIBRARY_DIRS` + `WGPU_BACKEND=gl`, XTEST via userland libXtst, keyboard focus via `xdotool windowfocus`; no window manager — a WM breaks wgpu's GL surface here) | run `cargo run -p pandemonium-client` on a desktop display, play a full vs-AI match to resolution with the M10 controls (command card: train from the CC/barracks, place structures with the ghost, cancel queue items, set rallies with a right-click; minimap: click-to-move, right-click orders; fog, silhouettes, death fades), confirm the loop is playable end to end and the visuals read, then close | a human pass on the M10.2 Phase 1 build (the owner re-test of the Generals ZH controls card — the machine half is re-verified by this pass on Xvfb+XTEST) | open (the M10.2 Phase 1 owner re-test is the next human pass) |
+ | DEBT-009 | ~~M3's minimal HUD and debug overlays (plan §11.6) are not implemented~~ repaid: the HUD slice landed — fontdue text atlas (embedded "Pandemonium Sans" subset), screen-space UI pass, resource/population HUD, F3 debug overlay (tick, state hash, entity/selection counts), P pause, `.` single-step | simplification | repaid as the second M3 sub-slice | — | — | repaid (M3) |
+ | DEBT-010 | ~~The A12 `population <= cap` invariant is asserted strictly, with no allowance for the over-cap window classic RTS rules allow when population-providing structures are destroyed while units live~~ decided (M6, A-053): the strict invariant is **relaxed to "spawn-blocking"** — usage may exceed cap when combat destroys population-providing structures, and new spawns are blocked at the spawn gate (already the M5 production behavior — completed items hold at the queue front until headroom returns, A-042); no units die or decay from over-cap. The decision touches A12 only, not §9.4's reading (production/construction semantics are unchanged) | verification | decided as M6's first work item (the brief calls this out as blocking honest combat) | — | M6 combat exit (this row) | retired (M6) |
+-| DEBT-011 | Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence) | simplification | plan §11.5's Alpha scope is the seam ("optionally a few placeholder cues"); a real backend needs a dependency + device decision that buys the Alpha nothing (the machine check is the cue flow, which the smoke run prints) | implement a mixer sink behind the same `AudioSink` trait (the client swaps the sink; nothing above the boundary moves), probably `cpal` + a small PCM cue bank, with an external-crate allow-list amendment | the post-Alpha audio pass (plan §19: renderer, UI skin, audio are rewritten on purpose over time) — or PLAYTEST.md's audio probe ("did the absence of sound hurt your read of the game?", section 5) reporting a yes: that is the debt's declared trigger with its evidence channel | open (M9) |
++| DEBT-011 | ~~Audio produces no sound: the M9 pass landed the seam (the `AudioSink` trait, the pure event → cue mapping, the null counter sink — plan §11.5's letter) and the client feeds it every frame, but no audible backend exists (no mixer, no device output; the null sink counts cues as its evidence)~~ repaid (M10.2 Phase 4): `client/src/sound.rs` lands the audible backend the debt's replacement plan sketched — rodio 0.22.2 (ADR-0002, the owner's pre-choice A-100) behind the *same* `AudioSink` seam, nothing above the boundary moved (sim untouched, goldens bit-identical). The pass adds what the sketch promised and one thing it did not: nine *synthesized* PCM cues (no asset licensing, PLAN §4.2's letter — not a decoded-file cue bank), a per-cue 80 ms rate limiter (PLAN §4.4's noise rule), the silent no-device fallback to the engine's `NullAudioSink` (CI/Xvfb — the machine pass exercises exactly that arm), live master volume + a mute row that beats it (A-125), and the three client-side cues (command ack, selection, UI click) through a new `on_cue` on the trait. The declared trigger — PLAYTEST.md's "did the absence of sound hurt your read of the game?" probe — fires the owner's re-test, which is now the only open half: the machine proved wiring, distinctness by construction, and counting; it cannot hear | simplification | repaid as the M10.2 Phase 4 pass (PLAN-M10.2 §4 — the milestone's own scope) | — | the owner's Phase 4 re-test on real hardware (the human half of every DEBT-008-class verification) | repaid (M10.2 Phase 4) |
+ | DEBT-012 | The client's placement-legality preview and train-button requirement check are approximations (A-083/A-084): the preview ignores movers standing in the footprint, and a requirement satisfied by a still-under-construction structure passes the button check | simplification | the command gate is the authority and a wrong guess surfaces through the existing refusal cue; exact client-side checks would duplicate sim state (lifecycle, mover positions) above the boundary | if a human pass reports a confusing refusal, mirror the exact checks into a boundary view (e.g. expose placement verdicts through a PlayerView extension) instead of duplicating sim logic client-side | PLAYTEST.md's placement-guess probe ("did any build-placement preview say legal when the order was refused, or illegal when it should have succeeded?", section 5) reporting a wrong green/red guess — the debt's declared trigger with its evidence channel | open (M10) |
+ | DEBT-013 | The client's two monolith files: `crates/client/src/render.rs` (2473 lines) and `crates/client/src/main.rs` (1782 lines pre-M10.1) concentrate the whole presentation — renderer, input handling, app state, HUD assembly, and now the F8/`--record` wiring — in two compilation units | code organization | pre-declaration freeze: the split serves no acceptance criterion, and plan §0's scope law forbids refactoring no test requires; plan §19 schedules the presentation rewrite anyway, so splitting now would be work the rewrite discards | split render.rs into pipeline/terrain/entities/overlay/minimap and main.rs into input/app/screens at the post-alpha presentation pass; the intended boundaries are recorded in `docs/ARCHITECTURE.md`'s post-alpha refactor map (guidance only — this row owns the work) | the post-Alpha renderer/UI rewrite (plan §19) | open (M10.1) |
+ | DEBT-014 | ~~The edge-scroll **toggle** does not exist yet~~ repaid (M10.2 Phase 3): PLAN-M10.2 §3.4's settings screen landed — the toggle is the `edge_scroll` row (and the persisted `edge_scroll` key, default on). The flag the Phase 1 band already read now loads from the settings file at startup and the screen flips it live through `input::edge_pan_contribution` (the focus/menu guards and the toggle live in that one pure function, pinned by tests) | simplification | repaid as the Phase 3 settings screen's first wired row | — | — | repaid (M10.2 Phase 3) |
+-| DEBT-015 | ~~PLAN-M10.2's Phases 2–4 are deferred~~ narrowed by Phases 1–3 (each delivered, each re-tested before the next): Phase 2 (visual legibility) and Phase 3 (menu and settings) are built; **Phase 4 (audio) is the remaining scope** — the A14 declaration stays blocked on it plus the Phase 3 owner re-test | scope deferral | the owner's re-test gates each phase (A-101, A-107) | run Phase 4 as its own pass on the standing plan; the audio backend choice is pre-made (rodio, A-100) with its allow-list amendment + ADR due then | the owner confirms the Phase 3 menus/settings feel right (the re-test row) | open (M10.2 — Phase 4 only) |
++| DEBT-015 | ~~PLAN-M10.2's Phases 2–4 are deferred~~ closed (M10.2 Phase 4): Phase 2 (visual legibility), Phase 3 (menu and settings), and Phase 4 (audio — DEBT-011's repayment, rodio behind the seam, volume/mute live) are all built, each delivered on the standing plan with its owner re-test in the chain. What remains of this row is not milestone scope but the A14 declaration gate itself: the owner's Phase 4 re-test (sounds play, distinct, volume/mute live and persist) and then the full A14 >=5-tester playtest — the declaration's own bar, outside any phase's deliverables | scope deferral | every phase's re-test gated the next (A-101, A-107, A-119); Phase 4 was the last deferred scope | — | the owner's Phase 4 re-test on real hardware, then the A14 >=5-tester pass | closed (M10.2 — the A14 playtest gate is the owner's, not a debt) |
+ | DEBT-016 | The nine hand-tuned silhouettes (`client/src/silhouette.rs`) hardcode part sizes matched to the *authored* footprints (Command Center 4×4, Barracks 3×3, Depot/Turret 2×2) and the name table lists exactly the nine authored kind ids; a content change to a footprint or a kind id leaves the named spec stale (the capability fallback still renders it, just not hand-tuned) | simplification | Phase 2's bar is legibility of the shipped nine kinds, not a general auto-art system; the client owns presentation data (A-103) and content files stay untouched | when a footprint or kind id changes in `content/entities/`, re-tune (or drop to the fallback for) the matching `silhouette::named` entry in the same commit; the fallback paths are tested | any content footprint/kind-id edit (the content hash moving is the tripwire) | open (M10.2 Phase 2) |
+ | DEBT-017 | The renderer's terrain mesh (and the camera's map bounds) is built once at window creation from the content tree's **first** map — a match started on any *other* map would render the wrong terrain (the Alpha ships exactly one authored map, Crossroads, so the case is unreachable today) | simplification | the New Match screen lists the tree's maps generically (PLAN §3.3: "supports more maps later"), but the wgpu renderer has no terrain-mesh update path and rebuilding the whole renderer per match is riskier than the debt | add a `WgpuRenderer::update_terrain(&TerrainMesh)` (or rebuild the renderer) when a second map lands, and re-derive the camera's map bounds per match | a second map file in `content/maps/` (the map list rendering more than one row is the tripwire) | open (M10.2 Phase 3) |
+-- 
+2.47.3
+
+
+From d18b5caaed5acdcd6ee203dd7facfbc43b4b31fb Mon Sep 17 00:00:00 2001
+From: elieaazzam-art <elieaazzam-art@users.noreply.github.com>
+Date: Thu, 8 Oct 2026 11:31:34 +0000
+Subject: [PATCH 5/5] docs: the M10.2 Phase 4 closeout - AI-Handoff (snapshot,
+ counts, board, inventory, gotchas), CHANGELOG, README, PLAYTEST
+
+The handoff's snapshot names the final gate (the owner's Phase 4
+re-test on real hardware, then the A14 >=5-tester playtest), the test
+counts (546 dev / 541 release expected), the status board flips to
+all-four-phases complete, the workspace inventory gains sound.rs and
+the seam's on_cue, and the gotchas record the Phase 4 lessons: the
+rodio stream owner's lifetime (MixerDeviceSink is 0.22's OutputStream;
+boxed in the arm; reset never re-probes; log_on_drop(false) is
+load-bearing), the client-side cue path (on_cue not cue_for; the
+limiter sits between the wiring and the arm; the null sink's counter
+is the post-limiter oracle), the rate limiter's per-cue window, and
+the cannot-hear rule (the /dev/snd pre-check keeps the fallback
+silent; evidence lines claim counting, never sound).
+
+The CHANGELOG carries the phase entry (scope, the exit bar, the
+verification record). The README's badge flips to M10.2 done and the
+status + client/engine bullets describe the audio pass. PLAYTEST
+gains the Phase 3 re-test row (the owner's go, A-119) and the Phase 4
+delivery note: the re-test is entirely about ears - the machine proved
+wiring and counting; distinct, pleasant sound is the owner's call.
+---
+ AI-Handoff.md    | 72 ++++++++++++++++++++++++-------------------
+ CHANGELOG.md     | 79 ++++++++++++++++++++++++++++++++++++++++++++++++
+ README.md        | 28 +++++++++++++++--
+ docs/PLAYTEST.md | 34 +++++++++++++++++++--
+ 4 files changed, 177 insertions(+), 36 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index fec6652..87a3409 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -31,7 +31,7 @@
+ | Repo | `github.com/E-VEx/pandemonium-bd` (git, branch `master`; local clone at `/home/z/my-project/bd` — the M9.1 session's path; wherever it lives, `git status` must be clean before work begins) |
+ | Toolchain | Rust 1.98.1, edition 2021, pinned by `rust-toolchain.toml` |
+ | Presentation | **3D perspective over the 2D logical ground plane** — the simulation stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md), 2026-10-01) |
+-| Status | **M10.2 (playtest-1 findings) — PHASES 1-3 COMPLETE; Phase 4 (audio) awaits the Phase 3 owner re-test (A-107, DEBT-015).** The owner's first human playtest found four issues in priority order — controls, visual legibility, menus/settings, audio; `docs/PLAN-M10.2.md` is the spec. Phase 1 (the Generals ZH controls) re-tested **pass, with notes** (A-101). Phase 2 (visual legibility) re-tested **pass** — the owner's go-ahead for Phase 3 is A-107. Phase 3 (menu and settings, branch `m10.2-phase3`, delivered as one `git format-patch` series): (1) the pure application state machine `client/src/screens.rs` (MainMenu -> Settings/NewMatch -> InMatch -> PauseMenu/EndScreen -> MainMenu, effects + wrapping focus, the three match modes' setup/controller mapping — sandbox keeps P2 present but controller-less); (2) the deferred host construction — the game starts at the main menu and `begin_match` builds the host on Start (A15 discipline, determinism unchanged; spectate silences human orders at the orders layer); (3) `client/src/config.rs` — the seven-key hand-written `key=value` settings file (no serde, no new crates; per-key salvage, range clamps, the std-env config dir with the no-HOME fallback), DEBT-014 repaid (the edge-scroll toggle), user zoom limits via the engine's now-public `DISTANCE_RANGE` + `clamp_distance_to`; (4) the pause menu through the existing MatchHost pause (Esc's exhausted rung opens it instead of quitting — the earlier rungs unchanged) and the end screen promoted into the machine with Rematch/Main Menu; (5) the menu pass over the existing fontdue overlay (keyboard AND mouse navigable; menus swallow world input; a menu-only session records nothing). Registers: A-107..A-118, DEBT-014 repaid, DEBT-015 narrowed to Phase 4, DEBT-017 (the one-map terrain-mesh renderer note). 523 dev tests green; all three goldens bit-identical (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`). Machine-verified on Xvfb + XTEST: keyboard-only and mouse-only navigation both start matches; all three modes run; pause open/resume/restart/quit; settings save and reload across runs; spectate seed 7 resolved naturally (tick 10446, matching the tools' reference) and R rematched. **Next: the owner re-tests Phase 3 (the game opens at a menu; matches start in each mode; settings persist; Esc opens the pause menu; the end screen offers menu and rematch; keyboard- and mouse-only reach everything); on their go, Phase 4 (audio; rodio is the pre-chosen backend, A-100), then the A14 playtest** |
++| Status | **M10.2 (playtest-1 findings) — ALL FOUR PHASES COMPLETE (branch `m10.2-phase4`, delivered as one `git format-patch` series); the A14 playtest is the owner's.** The owner's first human playtest found four issues in priority order — controls, visual legibility, menus/settings, audio; `docs/PLAN-M10.2.md` is the spec. Phases 1-3 (controls, legibility, menus/settings) each delivered and re-tested (A-101, A-107, and the Phase 3 go recorded as A-119). Phase 4 (audio, DEBT-011 repaid): (1) rodio 0.22.2 joins the client as its only new external crate (`default-features = false, features = ["playback"]` — no decoders, no rand; ADR-0002, the owner's pre-choice A-100, allow-list amended); (2) `client/src/sound.rs` — the two-arm sink behind the engine's existing `AudioSink` seam: the constructor probes the device once (a `/dev/snd` pre-check keeps the no-device path silent — libasound's config parser is chatty on card-less machines), a live device takes the rodio arm whose stream owner (`MixerDeviceSink`, 0.22's `OutputStream` successor) lives for the App's whole lifetime, ANY failure or a mid-session device loss takes the null arm (the engine's `NullAudioSink` counting — never a panic, never a block, one honest startup line); (3) the nine cues, ALL synthesized at startup (mono 44100 Hz PCM, deterministic, every buffer under a second, pairwise distinct, soft-limited into the rail — no asset files), six from the existing `cue_for` mapping plus three client-side moments (CommandAck, SelectionClick, UiClick) that arrive through a new `AudioSink::on_cue` on the trait (the null sink counts them — the wiring oracle); (4) the per-cue 80 ms rate limiter between the cue source and the arm (a big fight stays a heartbeat, not noise); (5) live master volume AND a new `muted` eighth settings key (row 5, right after volume; fullscreen/debug shift to 6/7, Done to 8; mute beats volume and never zeros it — A-125; a Phase 3 seven-key file parses with mute off). Registers: A-119..A-125, DEBT-011 repaid, DEBT-015 closed (A14's ≥5-tester gate is the owner's, not milestone scope). 546 dev tests green; all three goldens bit-identical (demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`). Machine-verified on Xvfb (the machine cannot hear — every run exercised the null fallback, and the `--frames`/smoke evidence lines say exactly what audio did: the arm + cues fed/voiced/dropped): a menu-only run, a 600-frame match run (event cues counted), the settings pass (volume −5% + mute ON + Done → the file round-trips `master_volume=0.95`/`muted=true`), a relaunch that loads it and reports `[muted]`, and an Esc-discard run that writes nothing. **Next: the owner re-tests Phase 4 on real hardware (sounds play; the nine moments sound distinct; volume changes loudness live, mute silences, both persist; a big fight is not noise), then the A14 ≥5-tester playtest** |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires. |
+ 
+ ## 3. Non-negotiable working rules (digest of plan §0)
+@@ -65,29 +65,26 @@ cargo run -p pandemonium-client -- --seed 42 --record run.pdrp   # named seed +
+ cargo run -p pandemonium-tools -- replay-verify run.pdrp         # the record re-verifies (A2)
+ ```
+ 
+-Expected at this handoff: all commands succeed; 523 tests pass in dev
+-(518 in release — the 5 should-panic invariant-checker tests are
++Expected at this handoff: all commands succeed; 546 tests pass in dev
++(541 in release — the 5 should-panic invariant-checker tests are
+ debug-only by nature — `debug_assert` compiles out in release): 47 fx
+ unit tests (40 + M10.1's seven xxHash64 tests: the reference golden
+ vectors, every-split and chunked incremental equality, LE integer
+ writes, seed sensitivity), 20 fx property tests (19 + M10.1's
+ xxHash64 chunking-invariance property), 16 ai unit tests, 108 sim unit
+-tests, 4 sim_api unit tests, 8 replay codec tests, 56 engine tests (54
+-+ M10.2 Phase 3's two `clamp_distance_to` tests), 162 client tests
+-(105 + M10.2 Phase 1's twenty-six + Phase 2's twenty-four + Phase 3's
+-fifty-seven: `config.rs`'s fifteen — defaults, round trips, missing and
+-malformed files, per-key salvage, unknown keys, range clamps, the
+-min/max ordering, the bool spellings, the config-dir resolution, the
+-deterministic ASCII form — `screens.rs`'s thirty-three — every diagram
+-edge, the settings return-memory, focus wrapping, the seed field's
+-typing/randomizing/cap, the mode cycling and mapping, spectate's order
+-silence, the end screen's explicit-choice rule, the focus reset on
+-entering a screen — `ui.rs`'s three menu-pass tests — the button ids
+-match the machine's focus indices on every screen, the hit rects are
+-real and disjoint, the field rows — `input.rs`'s edge-scroll toggle
+-test, `main.rs`'s two in-match mode pins (sandbox constructs/ticks with
+-P2 standing; same-seed spectate hosts A15-identical, modes differ in
+-setup) and the six parser/entropy tests), 17 tools tests, 33
++tests, 4 sim_api unit tests, 8 replay codec tests, 59 engine tests (56
+++ M10.2 Phase 4's three: the null sink's client-cue counter, the cue
++enum's ALL/index/name layout, and the no-event-maps-to-client-side-cue
++property), 181 client tests (162 + Phase 4's nineteen: `sound.rs`'s
++twelve — the bank's short/in-range buffers, pairwise distinctness,
++determinism, the limiter's window/independence/reset, the forced null
++arm without panic, the oracle counter, the shared limiter across cue
++sources, the match reset, the volume clamp, the mute precedence, the
++evidence line — `main.rs`'s five audio-wiring pins — the ack, the
++spectate silence, the selection change, the redundant no-cue, the menu
++activation — and `config.rs`'s two — the pre-mute file's backward
++compatibility and the mute spellings/round-trip; the moved row indices
++re-pinned in the existing tests), 17 tools tests, 33
+ content unit tests,
+ and the acceptance suite: 9 determinism (A1/A2), 5 content-pipeline, 3 movement, 4
+ economy, 7 combat, 5 vision, 2 architecture-law, 8 M7 tests
+@@ -123,13 +120,17 @@ at M10.1 by the hasher swap; the FNV-era values were
+ had left unchanged); `cargo run -p
+ pandemonium-client` prints the no-display finding and runs the headless
+ smoke pass — which since M9 drives the windowed path's exact hosting
+-seam (the AI opponent included) and prints the feedback-wiring
+-evidence line (events fed the audio sink, cues mapped, attacks
+-flashed, and since M9.1 refused orders surfaced — the smoke submits
+-one deliberately invalid Move and pins its rejection through the
+-refusal cues); on a desktop it opens the window; with `--frames N` the
++seam (the AI opponent included) and since M10.2 Phase 4 constructs the
++real audio sink: the startup probe prints its one honest line (the null
++fallback on machines with no device), and the exit evidence says what
++the audio did — the arm (active or fallback) and the cues'
++fed/voiced/dropped fates — alongside the feedback-wiring line (attacks
++flashed, refused orders surfaced — the smoke submits one deliberately
++invalid Move and pins its rejection through the refusal cues); on a
++desktop it opens the window (and plays: the same run that is silent
++under CI is audible on real hardware); with `--frames N` the
+ windowed run exits after N frames and prints the evidence summary,
+-including whether the match ended and who won. The M9 full-windowed
++including whether the match ended, who won, and the audio line. The M9 full-windowed
+ verification: under Xvfb + llvmpipe a `--frames 40000` run hosted the
+ AI opponent through the real wgpu pipeline and the match resolved
+ naturally — "match ended, player 1 wins (tick 5250)" — recorded in
+@@ -169,9 +170,9 @@ crates/sim       DONE    Sim spine + M4 movement + M5 economy + M6 combat & visi
+ crates/content   DONE    RON schema (strict), versioned loaders + map v1->v2 migration, precise validators, ContentBundle + content hash, world() seam (all 12 capabilities mapped — Attack mapped in M6, DEBT-006 retired)
+ crates/ai        DONE    Controller trait (plan §9.6 verbatim) + ScriptedController, the scripted Alpha opponent: workers -> depot -> barracks -> mixed army, idle-worker gather management, attack waves on size + timer that RE-MARCH on the pressure cadence while alive and focus the sighted enemy CC (M9 — matches resolve), base defense, pending/build bookkeeping verified by sight (A-062) — never a rejection channel
+ crates/replay    DONE    canonical LE byte codec + checksummed replay record/validate (re-sim driver lives in sim since M7)
+-crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh (M10.2 Phase 2's calmer ground/darker rock palette), Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5): AudioSink trait, the pure event -> cue mapping, the null counter sink (*engine core)
++crates/engine    DONE*   FixedTimestep, Interpolator, MatchHost (structural FD-2) + pause/single-step, RtsCamera (glam) + picking/box-select, terrain mesh (M10.2 Phase 2's calmer ground/darker rock palette), Renderer trait + null renderer (Frame carries selection + M9's flash set), HudState on the Frame boundary, ai_host (M7): AiMatchHost — controllers on the tick boundary, ascending slot order, every fed command recorded — and the alpha plan builder (capability-shaped kind resolution, costs through the Ore seam, ring-scanned build ground clear of static claims + node doorsteps), + audio (M9, §11.5; M10.2 Phase 4): AudioSink trait (on_events + the client-side on_cue), the pure event -> cue mapping (untouched — the three client-side cues have no arm by design), the nine-cue enum with ALL/index/name, the null counter sink (now also the client-cue oracle) (*engine core)
+                    (*engine core)
+-crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) + M10.2's input.rs (the right-button state machine, the edge-scroll band + its toggle-guarded contribution fn, the selection-parity helpers, the Escape/jump/hint logic — the input layer's pure half; the M10.2 Phase 1 controls pass) + M10.2 Phase 2's silhouette.rs (the multi-part per-kind silhouettes with the blue/orange tone system) and the render-side legibility pass + M10.2 Phase 3's screens.rs (the pure application state machine, the match modes' setup/controller mapping) and config.rs (the settings file) with the menu-first app structure (the host deferred to Start; the menu pass in ui.rs; the pause menu; the end screen with buttons) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split; DEBT-017 keeps the one-map terrain-mesh renderer note)
++crates/client    DONE*   winit window + wgpu 26 3D renderer (depth buffer, terrain mesh + heightmap, instanced placeholder boxes), selection + right-click Move, fontdue text atlas + HUD/debug overlay pass, --frames windowed smoke, headless smoke fallback (drives the AI-hosting seam since M9, the real audio sink since M10.2 Phase 4), + the M9 feel pass: feedback.rs (hit flashes, health bars, command pings — pure, unit-tested geometry) wired into draw() with the audio sink, + the M10 command card/minimap/fog/visual series (ui.rs), + M10.1's report.rs (--seed/--record + the F8 §11.6 bug-report dump; pure assembly, client-seam A2 tests) + M10.2's input.rs (the right-button state machine, the edge-scroll band + its toggle-guarded contribution fn, the selection-parity helpers, the Escape/jump/hint logic — the input layer's pure half; the M10.2 Phase 1 controls pass) + M10.2 Phase 2's silhouette.rs (the multi-part per-kind silhouettes with the blue/orange tone system) and the render-side legibility pass + M10.2 Phase 3's screens.rs (the pure application state machine, the match modes' setup/controller mapping) and config.rs (the settings file, eight keys since Phase 4) with the menu-first app structure (the host deferred to Start; the menu pass in ui.rs; the pause menu; the end screen with buttons) + M10.2 Phase 4's sound.rs (the two-arm audio sink: rodio 0.22.2 behind the engine seam — ADR-0002; the synthesized nine-cue bank, the per-cue rate limiter, the silent null fallback, the live volume/mute) with the client-side cue wiring (submit_order's ack, the set_selection gate, the menu_activate core) (*DEBT-008 keeps the human visual pass; DEBT-013 logs the render.rs/main.rs monoliths for the post-alpha split; DEBT-017 keeps the one-map terrain-mesh renderer note)
+ crates/tools     DONE    headless (the M1 demo + M7's --p1/--p2 ai|idle controller slots over the real content, per-player evidence lines, --record for both), replay-verify (world resolution by content identity), content-validate (clap CLI)
+ tests/           ACTIVE  pandemonium-tests: architecture_law.rs (A13) + determinism.rs (A1/A2 + spine proofs) + content_pipeline.rs (M2/A3) + movement.rs (M4/P1) + economy.rs (M5/P3) + combat.rs (M6/P2) + vision.rs (M6/A10) + ai.rs (M7: A5 + A11 + AI-vs-AI completion/determinism/golden/log-alone replay)
+ content/         DONE    rules/, entities/ (9 kinds), factions/ (Legion), maps/ (Crossroads 64x64, symmetric, heightmap)
+@@ -202,7 +203,7 @@ reads, and floating-point type names. Breaking the architecture fails CI.
+ | M9.1 | Input hotfix (the DEBT-008 human pass findings) | ✅ **complete** | The first human playtest of the windowed client (the project owner, on a real display) reported every input-layer defect the machine pass could not see: mirrored WASD/pan axes (the camera's screen-right vector negated since M3), W/S inverted, no mouse camera control (plan §11.3's edge pan + zoom-toward-cursor never implemented; wheel direction inverted), no attack order path (right-click context resolution unimplemented), 'A' firing attack-move on key-down *and key repeats* while doubling as a pan key, silent rejections, an illegible 58-tile opening zoom, and M9's cues never expiring (the feedback clock only advanced in `--frames` mode). All fixed, all pinned: 7 camera direction/API tests, 8 context-resolution tests, 4 refusal/bracket tests; the smoke run pins the refusal wiring with a deliberately invalid order; Xvfb + XTEST injection re-verified the windowed loop (900 frames, 5-entity drag selection, context Move + armed attack-move submitted). Zero golden movement — presentation/input only. DEBT-008 narrowed to the human re-verification of *this* build |
+ | M10 | Stabilization & declaration | ✅ **complete** | The A1–A15 sweep is recorded with evidence in `docs/ALPHA_DECLARATION.md`: 13 criteria pass with automated evidence (M10 verified them bit-identical at their then-FNV values; M10.1's hasher swap re-pinned them: demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262); A14 is recorded as an honest finding (a human playtest needs humans). The soak evidence run: 32/32 resolved, 0 crashed, avg end tick 11877 / max 23265 at the plan's real stuck threshold (A-086). Bench baselines (release): 0.25 ms avg, 2.22 ms p99, 4060 t/s — all §15 budgets met. The nightly workflow runs the 1000-match A7 tier and the bench. The M10-prep review pass also landed the playability/visual series (command card + train/build/queue-cancel/rally, fog rendering, minimap, lighting, silhouettes, shadows, death fades) with zero golden movement |
+ | M10.1 | Pre-declaration hardening & A14 enablement | ✅ **complete** | DEBT-001 repaid: xxHash64 is the canonical hasher (one hash-moving commit; every golden re-pinned with its written reason — demo 0xb6fff6659cfb7709, flagship 0x6e9a18bd7c5f699f, content 0x9bc18c521107b262; encodings and format versions unchanged, A-087). The client joined the reproducibility promise: `--seed`, `--record` (match end / clean exit, `replay-verify`-accepted), and the §11.6 F8 bug-report dump (replay + deterministic sidecar; pure assembly in `client/src/report.rs`, re-sim-verified at the client seam, pause-safe, windowed-verified under Xvfb+XTEST — same-tick `.pdrp` byte-identical). `docs/PLAYTEST.md` written (all eight sections — the A14 instrument). The nightly soak sharded 10×100 (disjoint seeds proven in comments), timeouts on every job, per-shard evidence artifacts + an aggregate crashed-gate. Registers closed: DEBT-013 logged, DEBT-011/012 triggers sharpened to their PLAYTEST.md probes, A-087..A-090, CHANGELOG carries M10.1. 414 dev / 409 release green (20 new tests). Zero golden movement outside Task 1's single swap commit |
+-| M10.2 | Playtest-1 findings — Phases 1-3 (controls; visual legibility; menus/settings) | ✅ **complete (Phases 1-3)** | Phase 1 (PLAN-M10.2 §1): the right-button command/drag state machine, middle-drag rotate, the 14 px depth-scaled edge band, selection parity, the Escape ladder, Space jump, the cursor order marker. Phase 2 (PLAN-M10.2 §2): the multi-part silhouette system, the blue/orange team palette, the bigger selected health bar, the hover name tooltip, the info-panel queue summary, distinct minimap markers, the calmer-ground palette. Phase 3 (PLAN-M10.2 §3): the pure state machine (`client/src/screens.rs`) + the deferred host construction (the game starts at the menu) + the New Match screen (mode/seed/map — spectate and sandbox included) + the settings file (`client/src/config.rs`, seven keys, no serde) with DEBT-014 repaid + the pause menu (Esc's exhausted rung) + the end screen promoted with Rematch/Main Menu + the menu pass over the existing overlay. 57 new tests; 523 dev green; zero golden movement; Xvfb+XTEST machine-verified end to end (keyboard- and mouse-only navigation, all three modes, pause/resume/restart/quit, settings persistence across runs, spectate resolving naturally at the tools' reference tick); the owner re-tests Phase 3 before Phase 4 starts |
++| M10.2 | Playtest-1 findings — all four phases (controls; visual legibility; menus/settings; audio) | ✅ **complete** | Phase 1 (PLAN-M10.2 §1): the right-button command/drag state machine, middle-drag rotate, the 14 px depth-scaled edge band, selection parity, the Escape ladder, Space jump, the cursor order marker. Phase 2 (PLAN-M10.2 §2): the multi-part silhouette system, the blue/orange team palette, the bigger selected health bar, the hover name tooltip, the info-panel queue summary, distinct minimap markers, the calmer-ground palette. Phase 3 (PLAN-M10.2 §3): the pure state machine (`client/src/screens.rs`) + the deferred host construction (the game starts at the menu) + the New Match screen (mode/seed/map — spectate and sandbox included) + the settings file (`client/src/config.rs`) with DEBT-014 repaid + the pause menu (Esc's exhausted rung) + the end screen promoted with Rematch/Main Menu + the menu pass over the existing overlay. Phase 4 (PLAN-M10.2 §4, DEBT-011 repaid): rodio 0.22.2 behind the `AudioSink` seam (ADR-0002, A-100), the nine synthesized cues + the three client-side ones through `on_cue`, the per-cue 80 ms limiter, the silent null fallback, live volume + the `muted` eighth key (A-125). 57 + 23 new tests; 546 dev green; zero golden movement; Xvfb+XTEST machine-verified (Phases 1-3 end to end — keyboard- and mouse-only navigation, all three modes, pause/resume/restart/quit, settings persistence, spectate resolving naturally; Phase 4's machine pass exercised the null fallback and counted cues: a menu-only run, a 600-frame match, the volume/mute save + relaunch + Esc-discard runs — the machine cannot hear, so it claims counting, never sound); the owner re-tests Phase 4 on real hardware, then A14 |
+ 
+ **The plan was broken into parts along these milestones.** Parts 1–8 (M0–M3,
+ M4 movement, M5 economy/production/construction, M6 combat & vision, M7
+@@ -650,12 +651,15 @@ hotkeys, and the A15 restart cleanliness proof). What remains, in order:
+    unaided-loop checklist, spectator legibility, the debt-arming probes,
+    the F8 procedure, the results table) and the evidence channel exists
+    (F8's replay + sidecar, `--record`, `--seed`). What it needs: the
+-   owner distributes the post-M10.1 build, ≥ 5 testers run the loop
++   owner distributes the post-M10.2 build, ≥ 5 testers run the loop
+    unaided, the results table fills honestly — a failed tester is a
+    finding, never a wave-through. The same sessions close DEBT-008's
+    human re-verification (play the full vs-AI match to resolution and
+-   judge the controls *feel* right) and arm the DEBT-011/DEBT-012
+-   triggers through PLAYTEST.md's probes.
++   judge the controls *feel* right) and arm the DEBT-012 trigger through
++   PLAYTEST.md's probes; DEBT-011's audio half is now the owner's Phase 4
++   re-test first (sounds play, distinct, volume/mute live and persist,
++   a big fight is not noise) — the machine proved the wiring and the
++   counting, only ears can prove the sound.
+ 2. **Declare the Alpha (or file the findings).** Flip A14 in
+    `docs/ALPHA_DECLARATION.md` citing PLAYTEST.md, flip the README stage
+    badge, update this file's §2 "Next:", decide the LICENSE (flagged:
+@@ -1011,6 +1015,12 @@ existing `ai_host` seam.
+ 
+ - **M10.2 Phase 3: XTEST driver discipline.** Keys sent faster than ~0.3 s apart can be processed against stale screen state under llvmpipe load (the first settings-persistence run "failed" because of a too-tight key cadence and a driver arg-order bug — the app was fine). Use ≥0.25–0.4 s per key, pass mode-specific CLI args BEFORE `Popen`, and verify the seed in the evidence lines (the smoke summary and the live match-ended line both print it). The graceful close (WM_DELETE_WINDOW ClientMessage, 32-bit data) exits the app cleanly with its exit-state line.
+ 
++- **M10.2 Phase 4: the rodio stream owner lives in the sink — dropping it silences everything.** `Sound`'s device arm owns `MixerDeviceSink` (rodio 0.22's stream owner — the `OutputStream` of older rodio docs is gone; the task vocabulary and the ADR both note the rename). It is boxed inside the arm enum (clippy's large-variant lint), constructed ONCE per run (the probe is startup-only, never per match), and dropped only when the App drops — `reset_match_state` calls `Sound::reset()` (counters + limiter windows), NEVER a fresh `Sound`. Its `log_on_drop(false)` is load-bearing: rodio's default drop notice prints to stderr, which the pass's no-spam rule forbids.
++
++- **M10.2 Phase 4: the client-side cues arrive through `on_cue`, NOT `cue_for` — and the limiter sits between the wiring and the arm.** CommandAck (fired in `submit_order` AFTER `host.submit`, meaning submitted-not-non-rejected — A-120; behind the spectate gate), SelectionClick (one `set_selection` gate every user-driven change funnels through — membership change only, A-122; the match reset bypasses it), and UiClick (one `menu_activate` core wrapping the machine's `activate_index` — Enter, mouse click, and the end-screen R shortcut all share it, A-121). The null arm's `NullAudioSink::client_cues` is the wiring oracle — it counts POST-limiter (the limiter sits between source and arm by design), so rapid-fire wiring tests use one call per fresh app, or the pre-limiter `Sound::client_cues` counter.
++
++- **M10.2 Phase 4: the machine cannot hear — evidence lines claim counting, never sound.** Under Xvfb/CI there is no audio device: `device_plausible()`'s `/dev/snd` pre-check short-circuits the probe BEFORE libasound wakes (its config parser chatters a stderr burst on card-less machines — A-124), the null arm counts, and every evidence line says the arm first ("active (rodio, 44100 Hz)" / "null fallback (no device)" [+ " [muted]"]) then the cues' fates (fed/voiced/dropped + client-side). "Sounds good" is only ever the owner's re-test claim. The rate limiter is 80 ms PER CUE (a fight's AttackLanded storm does not silence UnitLost), and the per-voice work after the limiter is one Vec clone + one channel send — the drop path is one array lookup.
++
+ ## 10. Maintenance protocol — every future agent, every milestone
+ 
+ 1. Read plan.md §0 + §14, this file, `docs/DEBT.md`, `docs/ASSUMPTIONS.md`.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index e9e2740..b4ed84e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,85 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
+ does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
+ its milestone tag.
+ 
++## [M10.2 Phase 4] — playtest-1 findings: audio
++
++The last of the owner's four playtest-1 findings ("simple sounds that make
++events feel real"), delivered as its own patch series on branch
++`m10.2-phase4` from `1210cbd` (Phase 3's re-test came back a go — the
++owner's Phase 4 direction is registered as A-119; DEBT-015's last deferred
++scope is spent). Scope: **Phase 4 (audio) only**. The plan's exit bar:
++one backend implementing `AudioSink` behind the existing seam, synthesized
++sounds (no assets), the silent no-device fallback, master volume + mute in
++settings, rate-limited cues, and the tests for all of it. Presentation-only
++(`crates/client` + `crates/engine/src/audio.rs`); zero golden movement
++(demo `0xb6fff6659cfb7709`, flagship `0x6e9a18bd7c5f699f`, content
++`0x9bc18c521107b262` all bit-identical); 546 dev / 541 release tests green.
++
++- **client (PLAN §4.1, ADR-0002, DEBT-011 repaid)**: rodio 0.22.2 joins
++  the client as its only new external crate — `default-features = false,
++  features = ["playback"]` (the decoder features and the noise/rand
++  machinery stay off; every sound this pass makes is synthesized PCM).
++  The allow-list amendment and the ADR (the owner's pre-choice A-100, the
++  resolved version, the feature trim, the alternatives) landed with it.
++- **client (PLAN §4.2, the sound module)**: `client/src/sound.rs` — the
++  `CueBank` (the nine cues' mono 44100 Hz PCM, synthesized at startup by
++  pure functions: deterministic, every buffer under a second, pairwise
++  distinct by construction, soft-limited into the rail; no asset files),
++  the `RateLimiter` (a per-cue 80 ms window — the first cue of a kind
++  voices, repeats inside the window drop, each cue independent), and
++  `Sound`, the two-arm sink behind the engine's `AudioSink` trait: the
++  constructor probes the device once (a Linux `/dev/snd` pre-check keeps
++  the no-device path from waking libasound's chatty config parser — the
++  fallback is silent, A-124), a live device takes the rodio arm whose
++  stream owner (`MixerDeviceSink`, 0.22's `OutputStream` successor) is
++  boxed in the arm and lives for the App's whole lifetime (dropping it
++  silences everything), and ANY failure — no device, Xvfb, CI — or a
++  device lost mid-session (the stream's error callback flags it; one
++  line, one degrade, never a panic, never a block) takes the null arm:
++  the engine's `NullAudioSink` counting what would have played.
++- **engine (PLAN §4.2, the seam's other half)**: `AudioCue` gains the
++  three client-side cues — CommandAck, SelectionClick, UiClick — with
++  `ALL`/`index`/`name` (the cue bank's layout), and `AudioSink` gains
++  `on_cue` (the direct path). The three have no `cue_for` arm BY DESIGN
++  (no sim event exists for them — the mapping is untouched); the null
++  sink counts them on their own counter (the wiring oracle).
++- **client (the wiring, thin and in `main.rs`)**: the step's events still
++  feed the sink after the step (FD-9's order kept); a submitted order
++  acknowledges on the direct path (A-120: submitted, not non-rejected —
++  the sim's verdict surfaces separately through the refusal feedback;
++  spectate's silence carries over); every user-driven selection change
++  funnels through one `set_selection` gate that cues the membership
++  change (A-122); every menu row activation — Enter, click, or the
++  end-screen R shortcut — funnels through one `menu_activate` core that
++  cues the UI click (A-121).
++- **client + config (PLAN §4.4, the controls)**: master volume is live
++  (the settings row drives the sink per A-115: changes apply immediately,
++  Done persists, Esc leaves the run's value unsaved), and `muted` joins
++  as the eighth key right after it (row 5; fullscreen/debug shift to
++  rows 6/7, Done to 8; keyboard and mouse both reach it — the focus map
++  and the ui.rs button-id tests pin the nine-row layout). Mute beats
++  volume and never zeros it (A-125: unmuting restores the set loudness);
++  a Phase 3 seven-key file parses with mute off (backward compatible).
++- **honesty**: the machine cannot hear. Every machine run (CI, Xvfb) takes
++  the null arm, and the evidence lines say exactly what audio did — the
++  arm (active/fallback, `[muted]` when muted) and the cues' three fates
++  (fed/voiced/dropped, plus the client-side count) — in the `--frames`
++  summary and the headless smoke. "The sounds are good" is a claim only
++  the owner's re-test can make.
++- **verification**: 23 new tests (the bank's shape/distinctness/
++  determinism, the limiter's window/independence/reset, the forced null
++  arm + the oracle counter, the shared limiter across cue sources, the
++  match reset, volume/mute precedence, the evidence line, the three
++  wiring pins through a real `App`, the config backward compatibility and
++  the shifted rows). Full gate in dev AND release; all three goldens
++  bit-identical; the headless smoke constructs the real sink (the null
++  arm's evidence under CI); the Xvfb machine pass ran a menu-only session,
++  a 600-frame match (event cues counted), the volume/mute rows adjusted
++  and persisted through Done + relaunch (`master_volume=0.95`,
++  `muted=true`, the relaunch loads and reports `[muted]`), and an
++  Esc-discard run that writes nothing. Registers: A-119..A-125, DEBT-011
++  repaid, DEBT-015 closed (A14's ≥5-tester playtest gate is the owner's).
++
+ ## [M10.2 Phase 3] — playtest-1 findings: menu and settings
+ 
+ The third of the owner's four playtest-1 findings, delivered as its own
+diff --git a/README.md b/README.md
+index 1473940..fce27ee 100644
+--- a/README.md
++++ b/README.md
+@@ -12,7 +12,7 @@ checksum must match, tick for tick. Units may scatter. The simulation does not.
+ 
+ [![CI](https://github.com/E-Vex/pandemonium-bd/actions/workflows/ci.yml/badge.svg)](https://github.com/E-Vex/pandemonium-bd/actions/workflows/ci.yml)
+ ![toolchain](https://img.shields.io/badge/toolchain-1.98.1_pinned-9E6A03?labelColor=21262D)
+-![stage](https://img.shields.io/badge/stage-M10_alpha_declared_(A14_playtest_pending)-9E6A03?labelColor=21262D)
++![stage](https://img.shields.io/badge/stage-M10.2_playtest_fixes_done_(A14_playtest_pending)-9E6A03?labelColor=21262D)
+ ![sim floats](https://img.shields.io/badge/sim_floats-0_%28enforced%29-9E6A03?labelColor=21262D)
+ 
+ <picture>
+@@ -169,7 +169,18 @@ points), fog-of-war rendering through the player's own view, a minimap with
+ fog, entity dots, a viewport indicator, click-to-move-camera and orders,
+ directional lighting, shaded terrain, per-kind silhouettes, blob shadows,
+ ground selection rings, and death fades. All of it is client/engine
+-presentation: the simulation's golden hashes never moved. The live status
++presentation: the simulation's golden hashes never moved.
++
++M10.2 then worked the playtest's four findings in order — controls (the
++Generals ZH card: right-click orders, right-drag scroll, selection parity,
++the Escape ladder), visual legibility (multi-part silhouettes, team colors,
++tooltips, the minimap), menus/settings (the game starts at a menu; matches
++start in three modes; settings persist), and finally **audio**: nine
++synthesized cues (combat, losses, production, construction, deliveries,
++the match end, plus command acks, selection and UI clicks) through the
++`AudioSink` seam on rodio, rate-limited per cue, with a silent null
++fallback where no device exists and live volume + mute in settings. The
++same rule as ever: presentation only, goldens untouched. The live status
+ board is [`AI-Handoff.md`](AI-Handoff.md); an out-of-date handoff is treated
+ as a bug.
+ 
+@@ -205,6 +216,8 @@ Built and verified through M9:
+   (perspective orbit, ground picking, box select), terrain mesh, `Renderer`
+   trait + `NullRenderer`. **M9**: the `AudioSink` seam — a pure event → cue
+   mapping, a null counter sink, the placeholder cue set (plan §11.5).
++  **M10.2 Phase 4**: `on_cue` (the client-side direct path) and the
++  three UI cues on the enum — the seam itself, unchanged otherwise.
+ - **`client`** — winit 0.30 + wgpu 26 windowed 3D renderer (depth buffer, terrain
+   mesh with heightmap displacement, instanced placeholder entity boxes), selection
+   + right-click context orders, fontdue text atlas + HUD/debug overlay, `--frames N`
+@@ -222,6 +235,17 @@ Built and verified through M9:
+   attack/gather/move from what is under the cursor, 'A' arms attack-move for
+   the next click, refused orders flash red with their reason, selection draws
+   corner brackets, and the match opens framed on the player's base.
++  **M10.2 Phase 4 (audio)**: `sound.rs` — the two-arm sink behind the
++  seam. A startup probe picks the arm: a live device gets rodio 0.22.2
++  (ADR-0002) with the stream living for the app's whole run; no device
++  (CI, Xvfb) silently falls back to the counting null sink — one honest
++  line either way. The nine cues are synthesized PCM at startup (mono
++  44100 Hz, all under a second, pairwise distinct — no asset files);
++  each cue is rate-limited to one voice per 80 ms so a big fight stays
++  a heartbeat; the settings screen's volume and mute rows drive it live
++  (mute wins); order acks, selection clicks, and menu clicks round out
++  the six event moments. Machine runs claim counting, never sound —
++  "sounds good" is the owner's re-test to make.
+ - **`tools`** — headless runner (demo + `--p1/--p2 ai` controller matches; M8
+   adds a `match ended:` line printing the winner), `replay-verify`,
+   `content-validate` subcommands.
+diff --git a/docs/PLAYTEST.md b/docs/PLAYTEST.md
+index 6d072aa..35c54f6 100644
+--- a/docs/PLAYTEST.md
++++ b/docs/PLAYTEST.md
+@@ -166,9 +166,14 @@ tester.
+ 1. **Placement guess (DEBT-012):** did any build-placement preview say **legal**
+    when the order was then refused, or **illegal** when it should have
+    succeeded? (yes/no; if yes — seed + tick, or an F8 dump)
+-2. **Audio absence (DEBT-011):** did the absence of sound hurt your read of the
+-   game? (yes/no — this is the debt's declared trigger: a "yes" argues for
+-   pulling the audible backend forward)
++2. **Audio (DEBT-011, repaid in M10.2 Phase 4 — the probe lives on as
++   the re-test's sound check):** do the nine cues fire at their moments
++   and sound distinct from each other? Does a big fight read as a
++   heartbeat rather than noise (the per-cue rate limiter)? Does volume
++   change loudness live, does mute silence everything, and do both
++   survive a restart? A muddled cue, a noise-fight, or a dead volume row
++   is a finding — the machine proved the wiring and the counting; only
++   ears can prove the sound.
+ 3. **Feel (A8):** did orders feel instant? Any input that felt dead?
+ 
+ ## 6. Bug-report procedure
+@@ -192,6 +197,7 @@ tester.
+ | owner (playtest-1) | 2026-10 (post-M10.1) | desktop, real display | bdf1266 | **no** — controls unusable (finding #1, detail below) | not reached | feel: the four findings below | none filed (findings went to `docs/PLAN-M10.2.md` instead) |
+ | owner (re-test) | 2026-10 (post-M10.2 Phase 1) | desktop, real display | d84203e | **pass, with notes** — the loop is playable with the new controls card; the notes arrive after the Phase 2 delivery (A-101: the owner re-tests on their machine and reports any issue with its exact location; a reported issue becomes a finding row here) | not reached | feel: pending specifics | none filed yet |
+ | owner (re-test 2) | 2026-10-08 (post-M10.2 Phase 2) | desktop, real display | 404e906 | **pass** — the Phase 2 visual pass cleared the way for Phase 3 (the owner's go-ahead: "Great now write the task P3 to the next AI agent"; A-107); any residual visual notes fold into the next re-test | not reached | feel: unchanged from the Phase 1 notes | none filed |
++| owner (re-test 3) | 2026-10-08 (post-M10.2 Phase 3) | desktop, real display | 1210cbd | **pass** — the Phase 3 menus/settings re-test cleared the way for Phase 4 (the owner's go registered as A-119); the menu-first flow, the three modes, and settings persistence judged right | not reached | feel: carried into the Phase 4 re-test | none filed |
+ | | | | | | | | |
+ | | | | | | | | |
+ | | | | | | | | |
+@@ -284,3 +290,25 @@ command center, a worker, and a tank on sight, without a legend? Can you
+ tell the sides apart at a glance? Can you read the minimap and the health
+ state?** Report anything that does not read — a failed read is a finding,
+ not a wave-through.
++
++### Phase 4 delivery note (audio — the re-test's fourth target)
++
++M10.2 Phase 4 landed the audio pass (DEBT-011 repaid): nine synthesized
++cues behind the engine's `AudioSink` seam on rodio (ADR-0002) — attack
++landed (a low thud), unit lost (a descending two-step), unit ready (a
++rising chirp), structure done (a low chord), delivery (a bright ding),
++match ended (a three-tone fanfare), command ack / selection click / UI
++click (three distinct short blips) — each rate-limited to one voice per
++80 ms, with live volume and mute in settings (row 4 and row 5) and a
++silent null fallback where no device exists. The machine pass (Xvfb)
++proved the wiring and the counting only: this environment cannot hear,
++and its evidence lines say "null fallback" and count cues — they never
++claim sound. **The re-test for this row is therefore entirely about
++ears:** on real hardware, play a match and confirm each of the nine
++moments makes its distinct sound, the volume row changes loudness live,
++mute silences everything, both survive a restart (Done saves, Esc
++discards), and a big fight reads as a heartbeat rather than noise. Any
++cue that muddles with another, any moment that stays silent, or a fight
++that turns into mush is a finding for the results table above — the
++per-cue recipes in `crates/client/src/sound.rs` are one match arm each
++and re-tunable in isolation.
+-- 
+2.47.3
+
