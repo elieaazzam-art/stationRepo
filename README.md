@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Animated banner: a packet travels along the chain of Pandemonium patches 001 to 015, lighting each one in order" width="100%">
+  <img src="assets/banner.svg" alt="Animated inferno banner: a glowing ember travels along the chain of Pandemonium patches 001 to 016, igniting each one in order" width="100%">
 </p>
 
 <p align="center">
@@ -11,7 +11,7 @@
 <br>
 
 <p align="center">
-  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&pause=1000&color=3B82F6&background=0B1220&center=true&vCenter=true&width=435&lines=dark+theme;classic+RTS+%E2%80%A2+built+in+Rust;15+patches+%E2%80%A2+111+commits" alt="Typing SVG: dark theme; classic RTS, built in Rust; 15 patches, 111 commits" />
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&pause=1000&color=FF3EA5&background=150A1E&center=true&vCenter=true&width=435&lines=inferno+theme;classic+RTS+%E2%80%A2+built+in+Rust;15+patches+%E2%80%A2+111+commits" alt="Typing SVG: inferno theme; classic RTS, built in Rust; 15 patches, 111 commits" />
 </p>
 
 This is the delivery archive for **Pandemonium**, a classic real-time
@@ -22,10 +22,12 @@ output of `git format-patch`, containing that milestone's commits in
 order and with their original messages. The patches are a record of what
 was delivered — kept for reference and history, not meant to be applied.
 
-> **Theme:** this README is styled for a **dark** look — deep-navy animated
-> banner, tagline and chart (see [`assets/`](assets)), bright blue accents
-> and light text, so it reads cleanly on GitHub's dark mode and any dark
-> Markdown viewer.
+> **Theme: 🔥 Inferno.** This README is styled for a dark, volcanic look — an
+> eggplant-black canvas (`#150A1E`) with hot magenta (`#FF3EA5`), ember orange
+> (`#FF8C00` / `#FFB020`) and gold (`#FFD166`) accents, lit by a purple-to-flame
+> gradient (`#BD00FF → #FF8C00`). It fits the game's name: patches glow like
+> embers along the chain. Best viewed in GitHub dark mode (see
+> [`assets/`](assets) for the animated banner, tagline and chart).
 
 ## Layout
 
@@ -44,7 +46,7 @@ column is the source-repo commit each patch was generated against, as
 recorded when it was delivered (`—` where no base was recorded).
 
 <p align="center">
-  <img src="assets/commits.svg" alt="Animated bar chart: one bar per patch showing its commit count, from 12 commits in patch 001 up to 16 in patch 015, with a running total that ends at 111 commits" width="100%">
+  <img src="assets/commits.svg" alt="Animated flame-chart: bars of ember gradient color grow one by one for each patch, from 12 commits in patch 001 up to 16 in patch 015, ending at a glowing 111-commit total" width="100%">
 </p>
 
 | #   | Milestone                         | Patch                                         | Commits | Base                                       |
@@ -74,17 +76,17 @@ every patch has one yet).
 ## Badges
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Pandemonium-patch%20archive-0B1220?style=for-the-badge&logoColor=white" alt="Pandemonium patch archive">
-  <img src="https://img.shields.io/badge/patches-15-3B82F6?style=for-the-badge" alt="15 patches">
-  <img src="https://img.shields.io/badge/commits-111-93C5FD?style=for-the-badge" alt="111 commits">
-  <img src="https://img.shields.io/badge/language-Rust-4ADE80?style=for-the-badge&logo=rust&logoColor=white" alt="Built in Rust">
-  <img src="https://img.shields.io/badge/theme-dark%20navy-1E293B?style=for-the-badge&logoColor=white" alt="Dark navy theme">
+  <img src="https://img.shields.io/badge/Pandemonium-patch%20archive-150A1E?style=for-the-badge&logoColor=white" alt="Pandemonium patch archive">
+  <img src="https://img.shields.io/badge/patches-15-FF3EA5?style=for-the-badge" alt="15 patches">
+  <img src="https://img.shields.io/badge/commits-111-FFD166?style=for-the-badge&labelColor=2D1743" alt="111 commits">
+  <img src="https://img.shields.io/badge/language-Rust-FF8C00?style=for-the-badge&logo=rust&logoColor=white" alt="Built in Rust">
+  <img src="https://img.shields.io/badge/theme-inferno-BD00FF?style=for-the-badge&logo=papermodetokens&logoColor=FFB020" alt="Inferno theme">
 </p>
 
 ---
 
 <p align="center">
-  <sub><b>Dark theme</b> — deep-navy canvas (<code>#0B1220</code>), blue accents
-  (<code>#3B82F6</code> / <code>#93C5FD</code>) and light text
-  (<code>#E2E8F0</code>) across all animated assets. Best viewed in GitHub dark mode.</sub>
+  <sub><b>🔥 Inferno theme</b> — eggplant-black canvas (<code>#150A1E</code>), ember accents
+  (<code>#FF3EA5</code> / <code>#FF8C00</code> / <code>#FFD166</code>) and lilac text
+  (<code>#F3E8FF</code>) across all animated assets. Best viewed in GitHub dark mode.</sub>
 </p>
