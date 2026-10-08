@@ -25,8 +25,8 @@
 [![Markdown][md-shield]](https://daringfireball.net/projects/markdown/)
 [![Shields.io][shieldsshield]](https://shields.io)
 [![GitHub][gh-shield]](https://docs.github.com)
-[![Clippy][clippy-shield]](#key-features)
-[![Golden tests][golden-shield]](#key-features)
+[![Clippy][clippy-shield]](https://github.com/rust-lang/rust-clippy)
+[![Golden tests][golden-shield]](NOTES.md)
 
 </div>
 
