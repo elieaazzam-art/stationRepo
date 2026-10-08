@@ -409,3 +409,109 @@ Scope: Phase 2 (Visual legibility) only, per the owner's kickoff answers
 docs/PLAN-M10.2.md and wait on the owner's re-test verdict. The Phase 4
 audio backend is pre-chosen as rodio (A-100); its architecture-law
 allow-list amendment + ADR land with that phase.
+
+## M10.2 Phase 3 note (menus and settings)
+
+`patches/015-m10.2-phase3-menus-settings.patch` — 16 commits, base
+`404e9066543c0ad89b1dffa966e2775e752abefc` (master of E-Vex/pandemonium-bd
+at the time of the pass — the Phase 2 delivery HEAD; the patch applies
+directly on top of it).
+
+Scope: PLAN-M10.2 §3 (menu and settings) only, per the owner's go-ahead
+(A-107: the Phase 2 re-test verdict was a pass). What landed:
+
+- **§3.1 the state machine** — the new pure `crates/client/src/screens.rs`:
+  `MainMenu -> (Settings | NewMatch) -> InMatch -> (PauseMenu | EndScreen)
+  -> MainMenu` as (state, effect) transitions, a wrapping focus model shared
+  by keyboard and mouse, and the three match modes' setup/controller mapping
+  (Player vs AI = today's wiring; AI vs AI spectate = both slots driven;
+  Sandbox = P2 present in the setup but controller-less, its force idles —
+  A-112). 33 unit tests: every diagram edge, back-navigation, the settings
+  return-memory, focus movement, seed editing.
+- **§3.2/§3.3 the start flow** — the host construction is deferred: the game
+  starts at the main menu and `begin_match` builds the host when Start is
+  pressed (the A15 drop + reconstruct discipline — determinism unchanged,
+  same-seed restarts still reproduce bit-for-bit). The New Match screen
+  carries the mode, the seed (random by default from std's OS-entropy
+  source, never the sim's RNG — A-111; `--seed N` pre-fills it), and the
+  map from the content tree. Spectate silences the human order path at the
+  orders layer (A-113). A latent wgpu bug the menu-first world exposed is
+  fixed (the entity draw re-binds the camera group when no decals exist).
+- **§3.4 settings** — the new `crates/client/src/config.rs`: a
+  hand-written `key=value` file (no serde, no new crates — the allow-list is
+  untouched), seven keys (edge_scroll, pan_speed, zoom_min, zoom_max,
+  master_volume [stored/shown, audible in Phase 4], fullscreen,
+  debug_overlay), per-key salvage on malformed values, range clamping, and
+  the std-env config-dir resolution with the no-HOME/APPDATA fallback
+  (persistence silently disabled, never a panic — A-108/A-109). DEBT-014
+  repaid: the edge-scroll toggle is a settings row and the Phase 1 flag
+  loads from the file. The engine's `DISTANCE_RANGE` is public and
+  `RtsCamera::clamp_distance_to` applies user zoom limits (intersected with
+  the engine's own range).
+- **§3.5 the pause menu** — Esc's exhausted rung opens the pause menu
+  instead of quitting the application (the earlier rungs — cancel armed,
+  cancel placement, clear selection — are exactly as Phase 1 re-tested
+  them; the rung test + both control cards carry the change in the same
+  commit). Resume / Settings / Restart / Quit to Menu over the paused
+  match; opening force-pauses through the existing MatchHost pause (A-114);
+  P stays a direct toggle. The end screen promotes from InMatch when the
+  host reports an outcome and offers Rematch / Main Menu (R remains).
+- **§3.6 the menu UI** — `ui::build_menu` renders every screen through the
+  existing fontdue overlay pass: solid panels, label/value rows, the
+  focused row brightened with the Phase 2 blue/orange accents, hit rects
+  in focus-index order. Every screen is keyboard AND mouse navigable;
+  menus own the input (the world's clicks/keys/wheel/edge-scroll are dead
+  while a menu is up, and held keys clear — A-116); nothing in a menu
+  sends a sim command or touches a replay (a menu-only session records
+  nothing).
+
+Verification already performed on the delivery tree and re-performed on a
+fresh clone + `git am`:
+
+- cargo fmt --all -- --check                          PASS
+- cargo clippy --workspace --all-targets -- -D warnings  PASS
+- cargo test --workspace (dev, 523 tests)             PASS
+- cargo test --workspace --release (518 tests)        PASS
+- golden hashes bit-identical to M10.1/Phases 1-2:
+    demo     0xb6fff6659cfb7709  (seed 7, 300 ticks)
+    flagship 0x6e9a18bd7c5f699f  (seed 7, 7200 ticks, AI vs AI)
+    content  0x9bc18c521107b262  (map id 0xd38136401ab02ff1)
+- Xvfb + llvmpipe + XTEST (the machine half of the phase exit, DEBT-008
+  recipe): keyboard alone navigates menu -> New Match -> Start (a match
+  runs, tick 216); mouse alone does the same by clicking the rendered
+  rows (tick 217); spectate and Sandbox both start and run; the pause
+  menu opens by Esc, resumes (the sim tick froze for exactly the paused
+  window: 80 ticks over 3 s), restarts (tick reset), and quits to menu;
+  settings toggle, Done saves to the config file, and a fresh run reports
+  "loaded the file" with the persisted value; a spectate match at seed 7
+  resolved naturally through the real wgpu GL path — "player 0 wins
+  (tick 10446, seed 7)" — matching the tools' headless reference for the
+  same seed (resolved in (10400, 10500] by bisection), the end screen took
+  the input, and R rematched (the exit line shows the fresh match at
+  tick 99).
+- The pass caught and fixed two live bugs the pure tests could not see:
+  the zero-entity bind-group error (first menu frame) and the focus carry
+  into an entered screen (the settings persistence run).
+
+What to re-test (the human half):
+
+- the game opens at a menu, not in a match;
+- a match starts in each of the three modes and plays (spectate: the
+  camera and selection stay live but your clicks order nothing — that is
+  deliberate; sandbox: the enemy base just stands there);
+- settings persist across runs (toggle edge scroll off, Done, relaunch,
+  then back on — the startup line says where the settings came from);
+- Esc opens the pause menu after the familiar cancel rungs; Resume,
+  Restart, Quit to Menu all behave; P still pauses directly;
+- the end screen offers Rematch and Main Menu (R still works);
+- fullscreen toggles and the window comes back sane (Xvfb has no window
+  manager, so the machine pass cannot prove this one — A-118);
+- everything is reachable by keyboard alone and by mouse alone;
+- nothing from the Phase 1 controls card or the Phase 2 visual pass
+  regressed.
+
+Registers: ASSUMPTIONS A-107..A-118, DEBT-014 repaid, DEBT-015 narrowed to
+Phase 4 (audio) only, DEBT-017 added (the one-map terrain-mesh renderer
+note). Scope: Phase 3 only. Phase 4 remains specified in
+docs/PLAN-M10.2.md; the audio backend is pre-chosen (rodio, A-100), its
+allow-list amendment + ADR due then.
