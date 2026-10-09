@@ -648,3 +648,41 @@ the direct-path cues), DEBT-015 closed (all four playtest-1 phases
 delivered; the A14 >=5-tester playtest gate is the owner's, not a
 debt). Scope: Phase 4 only — the milestone's last. Next: the owner's
 Phase 4 re-test, then the A14 playtest.
+## M10.2 Phase 4 patch note - v2 (the rebase)
+
+`patches/016-m10.2-phase4-audio-v2.patch` replaces 016 when applying on the
+current `master`. Two commits landed upstream after 016 was cut on the
+Phase 3 HEAD (1210cbd): 896c7c5 slimmed AI-Handoff.md (same section
+numbers, about a thousand lines removed) and 08748d9 fixed a CI step name.
+No code changed, so 016's first four commits still applied - but the docs
+commit (0005) was written against the fat handoff, and `git am` rejected it
+at AI-Handoff.md:31.
+
+The v2 series is the same five commits (same subjects, same author) with
+the closeout re-applied onto the slim handoff: the snapshot
+(Status/Tests/Registers plus the one-paragraph), the 546 dev / 541 release
+counts, the smoke's audio-evidence wording, the workspace-map and
+inventory rows, the status board's M10.2 row (all four phases), the
+not-built-yet list (the Phase 4 owner re-test merged with Phase 5; the
+remaining items renumbered), and the three Phase 4 gotchas (the rodio
+stream owner's lifetime, the on_cue client-side path, the cannot-hear
+rule) - ported into the lean structure, not pasted over it.
+
+Apply: checkout `master` (08748d9 or later), then `git am
+patches/016-m10.2-phase4-audio-v2.patch`. If a partially-applied 016 is
+sitting in the tree (`git am` stopped at 0005), run `git am --abort`
+first - it rewinds the four already-applied commits too, so the v2 series
+applies whole.
+
+Re-verified end to end on 08748d9: fmt, clippy -D warnings, 546 dev /
+541 release tests, the three goldens bit-identical, the headless smoke
+with its audio evidence line, and the Xvfb machine pass (null fallback,
+menu-only, a 600-frame match, the settings save/relaunch/discard runs).
+One finding, pre-existing and outside the patch: the fx property test
+`checked_div_agrees_in_range` flakes roughly once per few hundred runs
+(entropy-seeded proptest finds a raw quotient that overflows i32, e.g.
+a=-458752, b=-1, where `checked_div` correctly returns None and `div`
+saturates - the test's guard only excludes b=0; fx is untouched by this
+patch: `git diff 08748d9..HEAD --stat -- crates/fx` is empty). A test-guard
+fix is a candidate for the owner's next pass; the library itself honors
+its documented contract.
