@@ -60,10 +60,11 @@ How a milestone travels from the source repo into this archive:
 | No. | Milestone | Patch | Commits | Base |
 | :-: | :--- | :--- | :-: | :--- |
 | 017 | M10.2 · Phase 5 — Verification & handoff | [`017-m10.2-phase5-closeout.patch`](patches/017-m10.2-phase5-closeout.patch) | 6 | master `652f6cf` |
+| 018 | Post-M10.2 — Soak instrument: A7 crash telemetry made real | [`018-post-m10.2-soak-instrument.patch`](patches/018-post-m10.2-soak-instrument.patch) | 3 | master `f23e7cc` |
 
 Patches are numbered in delivery order (`001` oldest → `017` newest); the full
 chain history and every per-patch note live in [`NOTES.md`](NOTES.md).
-**Total: 117 commits archived** (111 through patch 016-v2, 6 in 017).
+**Total: 120 commits archived** (111 through patch 016-v2, 6 in 017, 3 in 018).
 
 
 

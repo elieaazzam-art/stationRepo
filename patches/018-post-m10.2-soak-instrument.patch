@@ -1,0 +1,807 @@
+From f204678b133688674cb853af088102ff387f1032 Mon Sep 17 00:00:00 2001
+From: E-Vex <raiedaleve@gmail.com>
+Date: Fri, 9 Oct 2026 08:29:46 +0000
+Subject: [PATCH 1/3] feat(tools): the soak's crash telemetry is real -
+ per-match panic isolation, seed attribution, and a report that survives the
+ crash
+
+The module docs promised A7 signals the code did not deliver: 'panics
+surface as Err per match' was false (no catch_unwind anywhere - one
+panic aborted the whole run, took the report and every later match's
+telemetry with it, and the crashed counter was reachable only by
+pre-simulation load errors). Every match now runs inside
+catch_unwind (isolate_panic, with the written AssertUnwindSafe
+soundness argument): a panic becomes one crashed count attributed to
+its seed, the panic message lands in the report behind a 'panic:'
+prefix, the sweep continues, the report prints, and main still exits
+non-zero - isolation is observability, never recovery. SoakReport
+gains the crashes field (seed + reason) and print_report lists them
+(cap 10, a systematic storm cannot bury the summary). Seven new tests
+(24 total, from 17): the sweep-seam regression injects a panicking
+match and asserts it is counted, attributed, and survived - against
+the pre-fix loop that test aborts (verified locally by temporarily
+reverting the isolation); payload extraction, error-chain passthrough,
+the cap, and an end-to-end real-content soak are pinned alongside.
+---
+ crates/tools/src/soak.rs | 310 +++++++++++++++++++++++++++++++++++++--
+ 1 file changed, 294 insertions(+), 16 deletions(-)
+
+diff --git a/crates/tools/src/soak.rs b/crates/tools/src/soak.rs
+index b24da00..35170f5 100644
+--- a/crates/tools/src/soak.rs
++++ b/crates/tools/src/soak.rs
+@@ -12,12 +12,25 @@
+ //! runner drives.
+ //!
+ //! A7 (plan §13): "1000 seeded AI-vs-AI matches complete with no panics,
+-//! no stuck matches (> 20 min game time), no invariant violations". This
+-//! runner reports exactly those three signals — panics surface as `Err`
+-//! per match; stuck matches surface as "unresolved (ran the tick budget)";
+-//! invariant violations surface as the A12 debug-assert panic from inside
+-//! `Sim::step`. The caller passes `--release` for the real A7 run, since
+-//! the A12 checker is debug-only by design.
++//! no stuck matches (> 20 min game time), no invariant violations". Where
++//! each signal is actually observable:
++//!
++//! - **Panics** are isolated per match: [`run_soak`] wraps every match in
++//!   `catch_unwind`, so a panic becomes a `crashed` count carrying the seed
++//!   and the panic message instead of an abort (pre-isolation, one panic
++//!   destroyed the whole run's report and every later match's telemetry).
++//!   Isolation is observability, never recovery — the tool still exits
++//!   non-zero at the end when anything crashed (see the soundness note on
++//!   [`isolate_panic`]).
++//! - **Stuck matches** surface as "unresolved (ran the tick budget)".
++//! - **Invariant violations** are A12 debug-assert panics, and the A12
++//!   checker is debug-only by design (plan §13) — so only a *dev-profile*
++//!   soak observes them, where the isolation counts each violation as one
++//!   `crashed` match with its seed. The release nightly is the
++//!   panics/stuck/resolution/throughput tier; the nightly's dev-profile
++//!   tier is the invariant sweep. (Before the isolation existed, a dev
++//!   soak was useless at scale: the first violation aborted the run and
++//!   took the evidence with it.)
+ //!
+ //! Determinism: each match's seed is `seed_base + index`, so two soak
+ //! runs over the same range produce byte-identical checkpoints per match.
+@@ -32,7 +45,7 @@ use clap::Args;
+ use pandemonium_content::ContentBundle;
+ use pandemonium_sim_api::PlayerId;
+ 
+-use crate::ai_match::{run_ai_match, MatchSummary, Slot};
++use crate::ai_match::{run_ai_match, AiMatch, MatchSummary, Slot};
+ 
+ /// The soak subcommand's CLI shape (plan §12 `tools soak`).
+ #[derive(Args, Clone, Debug)]
+@@ -76,6 +89,11 @@ pub struct SoakReport {
+     pub unresolved: u32,
+     /// How many produced a panic or host error (A7's "crash" signal).
+     pub crashed: u32,
++    /// The crash evidence, one entry per crashed match: `(seed, reason)`
++    /// (match order = ascending seed, deterministic). Panic reasons carry
++    /// a `panic:` prefix so the report distinguishes a runtime panic or A12
++    /// violation from a load-stage anyhow error.
++    pub crashes: Vec<(u64, String)>,
+     /// Per-player wins (index 0 = player 0, etc.).
+     pub wins: Vec<u32>,
+     /// End tick of each resolved match (the tick MatchEnded fired).
+@@ -121,21 +139,38 @@ impl SoakReport {
+ }
+ 
+ /// Runs the soak: `matches` AI-vs-AI matches, seeds `seed_base + i`,
+-/// aggregated into one report. Per-match errors (panics, host failures)
+-/// are recorded in the report rather than aborting the run — A7 wants
+-/// exactly that signal.
++/// aggregated into one report. Per-match failures — host errors *and
++/// panics* — are isolated, recorded with their seed, and counted in
++/// `crashed` rather than aborting the run: A7 wants exactly that signal,
++/// and a report that survives the first crash is the evidence. `main`
++/// still exits non-zero afterwards when anything crashed.
+ pub fn run_soak(cli: &SoakCli) -> Result<SoakReport> {
+     let bundle = ContentBundle::load_dir(&cli.content)
+         .with_context(|| format!("loading content from {}", cli.content.display()))?;
++    let starts = bundle.map.starts.len();
++    let ticks = cli.ticks;
++    Ok(sweep_matches(cli, starts, |seed| {
++        run_ai_match(&bundle, seed, ticks, Slot::Ai, Slot::Ai)
++    }))
++}
++
++/// The sweep loop behind [`run_soak`], over an injectable per-seed match
++/// driver (the seam the crash-isolation tests use): every driver call is
++/// panic-isolated, a panic or error is recorded with its seed, and the
++/// loop continues to the next match.
++fn sweep_matches<F>(cli: &SoakCli, starts: usize, driver: F) -> SoakReport
++where
++    F: Fn(u64) -> Result<AiMatch>,
++{
+     let mut report = SoakReport {
+         matches: cli.matches,
+-        wins: vec![0; bundle.map.starts.len()],
++        wins: vec![0; starts],
+         ..SoakReport::default()
+     };
+     let start = Instant::now();
+     for index in 0..cli.matches {
+         let seed = cli.seed_base + index as u64;
+-        match run_ai_match(&bundle, seed, cli.ticks, Slot::Ai, Slot::Ai) {
++        match isolate_panic(|| driver(seed)) {
+             Ok(match_result) => {
+                 // The match's own end tick when it resolved; the budget when
+                 // it ran out (the runner simulates on after MatchEnded, so
+@@ -161,16 +196,52 @@ pub fn run_soak(cli: &SoakCli) -> Result<SoakReport> {
+                     );
+                 }
+             }
+-            Err(error) => {
++            Err(reason) => {
+                 report.crashed += 1;
++                report.crashes.push((seed, reason.clone()));
+                 if cli.verbose {
+-                    println!("  match {index:>4} (seed {seed:>4}): CRASH — {error:#}");
++                    println!("  match {index:>4} (seed {seed:>4}): CRASH — {reason}");
+                 }
+             }
+         }
+     }
+     report.wall_seconds = start.elapsed().as_secs_f64();
+-    Ok(report)
++    report
++}
++
++/// Runs one match driver call with panic isolation: `Ok` passes through,
++/// an anyhow error keeps its full chain (`{error:#}`), and a panic unwinds
++/// into this boundary and becomes a `panic:`-prefixed reason string
++/// instead of an aborted process.
++///
++/// Soundness (why `AssertUnwindSafe` is correct here): the driver's
++/// arguments are shared references and copies; every mutable value a match
++/// owns — host, sim, world, controllers — is constructed inside the call
++/// and dropped while unwinding, so no half-updated state survives the
++/// boundary into the next match. The catch exists to *observe* the crash
++/// (count it, attribute the seed, keep the report alive); the caller never
++/// reuses suspect state, and `main` still exits non-zero afterwards. A
++/// `panic = "abort"` profile makes this a no-op by construction — the
++/// process aborts exactly as it did before the isolation existed.
++fn isolate_panic<T>(run: impl FnOnce() -> Result<T>) -> Result<T, String> {
++    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run));
++    match caught {
++        Ok(Ok(value)) => Ok(value),
++        Ok(Err(error)) => Err(format!("{error:#}")),
++        Err(payload) => Err(format!("panic: {}", panic_reason(payload))),
++    }
++}
++
++/// The message inside a panic payload: `&'static str`, `String`, or a
++/// generic line for any other payload type.
++fn panic_reason(payload: Box<dyn std::any::Any + Send>) -> String {
++    if let Some(message) = payload.downcast_ref::<&'static str>() {
++        (*message).to_string()
++    } else if let Some(message) = payload.downcast_ref::<String>() {
++        message.clone()
++    } else {
++        "a non-string panic payload".to_string()
++    }
+ }
+ 
+ /// Records one match's outcome into the report.
+@@ -206,6 +277,26 @@ fn outcome_label(summary: &MatchSummary) -> &'static str {
+     }
+ }
+ 
++/// The per-crash evidence lines for the report: one line per crashed match
++/// (seed + reason), capped at ten with an overflow pointer — a systematic
++/// failure firing in every match must not bury the summary under a
++/// thousand identical lines (the run order is the seed order, so the
++/// dropped entries are exactly the later matches).
++fn crash_lines(report: &SoakReport) -> Vec<String> {
++    const CAP: usize = 10;
++    let mut lines: Vec<String> = report
++        .crashes
++        .iter()
++        .take(CAP)
++        .map(|(seed, reason)| format!("    seed {seed}: {reason}"))
++        .collect();
++    let overflow = report.crashes.len().saturating_sub(CAP);
++    if overflow > 0 {
++        lines.push(format!("    ... and {overflow} more crashed match(es)"));
++    }
++    lines
++}
++
+ /// Prints the soak report (the non-verbose summary line).
+ pub fn print_report(report: &SoakReport) {
+     println!("pandemonium soak — sequential AI-vs-AI run");
+@@ -222,6 +313,9 @@ pub fn print_report(report: &SoakReport) {
+         report.unresolved
+     );
+     println!("  crashed:        {} (A7 crash signal)", report.crashed);
++    for line in crash_lines(report) {
++        println!("{line}");
++    }
+     println!(
+         "  end tick:       avg {:.0}, max {} (resolved matches only)",
+         report.avg_end_tick(),
+@@ -241,7 +335,11 @@ pub fn print_report(report: &SoakReport) {
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use pandemonium_sim_api::PlayerId;
++    use std::path::Path;
++    use std::path::PathBuf;
++
++    use pandemonium_replay::{Checkpoint, ReplayFile, FORMAT_VERSION};
++    use pandemonium_sim_api::{ControllerKind, PlayerId, PlayerSetup};
+ 
+     fn summary(winner: Option<PlayerId>) -> MatchSummary {
+         MatchSummary {
+@@ -293,4 +391,184 @@ mod tests {
+         );
+         assert_eq!(outcome_label(&summary(None)), "unresolved");
+     }
++
++    // --- Panic isolation (the A7 crash telemetry) --------------------------
++    //
++    // The regression this section pins: before the isolation existed, a
++    // panic inside any match aborted the whole soak — the report, the
++    // win-rate telemetry, and every later match were lost, and the
++    // documented "crashed: N" line was unreachable for panics (only
++    // pre-simulation anyhow errors could reach it). These tests print the
++    // default panic hook's stderr lines on purpose — that output is the
++    // debugging evidence; the reason string is the report's.
++
++    /// A minimal well-formed match result for the sweep seam's tests.
++    fn canned_match(winner: PlayerId, ended_tick: u32) -> AiMatch {
++        AiMatch {
++            replay: ReplayFile {
++                format_version: FORMAT_VERSION,
++                content_hash: 0,
++                map_id: 0,
++                seed: 0,
++                player_setup: vec![
++                    PlayerSetup {
++                        player: PlayerId(0),
++                        controller: ControllerKind::Ai,
++                    },
++                    PlayerSetup {
++                        player: PlayerId(1),
++                        controller: ControllerKind::Ai,
++                    },
++                ],
++                commands: vec![],
++                checkpoints: vec![Checkpoint { tick: 0, hash: 0 }],
++                final_hash: 0,
++            },
++            summary: MatchSummary {
++                commands: 1,
++                delivered: vec![0, 0],
++                trained: vec![0, 0],
++                built: vec![0, 0],
++                attack_hits: vec![0, 0],
++                deaths: vec![0, 0],
++                winner: Some(winner),
++                ended_tick: Some(ended_tick),
++            },
++        }
++    }
++
++    fn sweep_cli(matches: u32) -> SoakCli {
++        SoakCli {
++            matches,
++            seed_base: 100,
++            ticks: 10,
++            content: PathBuf::new(),
++            verbose: false,
++        }
++    }
++
++    fn repo_content() -> PathBuf {
++        Path::new(env!("CARGO_MANIFEST_DIR"))
++            .ancestors()
++            .nth(2)
++            .unwrap()
++            .to_path_buf()
++            .join("content")
++    }
++
++    #[test]
++    fn ok_passes_through_and_errors_keep_their_chain() {
++        assert_eq!(isolate_panic(|| Ok(7)), Ok(7));
++        let reason = isolate_panic::<()>(|| {
++            Err(anyhow::anyhow!("load failed").context("the content directory"))
++        })
++        .expect_err("the error arm maps to a reason");
++        assert!(
++            reason.contains("the content directory"),
++            "chain kept: {reason}"
++        );
++        assert!(reason.contains("load failed"), "root kept: {reason}");
++        assert!(
++            !reason.contains("panic"),
++            "an error is not a panic: {reason}"
++        );
++    }
++
++    #[test]
++    fn string_panics_carry_their_message() {
++        // `panic!("literal")` payloads are `&'static str`; formatted panics
++        // are `String` — both must surface verbatim behind the `panic:` tag.
++        let literal = isolate_panic::<()>(|| panic!("A12 population: player 0 usage drifted"))
++            .expect_err("a panic is a crash reason");
++        assert_eq!(literal, "panic: A12 population: player 0 usage drifted");
++        let formatted = isolate_panic::<()>(|| panic!("beta broke at seed {}", 101))
++            .expect_err("a panic is a crash reason");
++        assert_eq!(formatted, "panic: beta broke at seed 101");
++    }
++
++    #[test]
++    fn non_string_panics_are_counted_with_a_generic_reason() {
++        let reason = isolate_panic::<()>(|| std::panic::panic_any(7usize))
++            .expect_err("any payload type is a crash reason");
++        assert_eq!(reason, "panic: a non-string panic payload");
++    }
++
++    #[test]
++    fn a_panicking_match_is_counted_and_the_sweep_continues() {
++        // THE regression: with the pre-isolation loop, this driver's panic
++        // propagated out of the sweep and aborted the run (the report and
++        // both surviving matches' telemetry were lost). Isolated, it is one
++        // crashed match attributed to its seed, and the sweep finishes.
++        let report = sweep_matches(&sweep_cli(3), 2, |seed| {
++            if seed == 101 {
++                panic!("the invariant broke in match 1");
++            }
++            Ok(canned_match(PlayerId(0), 4321))
++        });
++        assert_eq!(report.matches, 3);
++        assert_eq!(report.crashed, 1, "the panic is counted: {report:?}");
++        assert_eq!(
++            report.crashes,
++            vec![(101, "panic: the invariant broke in match 1".to_string())],
++            "the crash is attributed to its seed"
++        );
++        assert_eq!(report.resolved, 2, "the sweep continued past the crash");
++        assert_eq!(report.end_ticks, vec![4321, 4321]);
++        assert_eq!(report.wins, vec![2, 0]);
++        assert_eq!(report.total_ticks, 8_642);
++    }
++
++    #[test]
++    fn an_erroring_match_is_counted_with_its_chain() {
++        // The pre-isolation Err arm (load-stage anyhow failures) keeps its
++        // exact semantics: counted, attributed, sweep continues.
++        let report = sweep_matches(&sweep_cli(2), 2, |seed| {
++            if seed == 100 {
++                anyhow::bail!("the host refused to advance");
++            }
++            Ok(canned_match(PlayerId(1), 999))
++        });
++        assert_eq!(report.crashed, 1);
++        assert_eq!(
++            report.crashes,
++            vec![(100, "the host refused to advance".to_string())]
++        );
++        assert_eq!(report.resolved, 1);
++        assert_eq!(report.wins, vec![0, 1]);
++    }
++
++    #[test]
++    fn the_crash_list_is_capped_so_a_storm_cannot_bury_the_report() {
++        let report = SoakReport {
++            crashes: (0..12).map(|i| (i, format!("reason {i}"))).collect(),
++            ..SoakReport::default()
++        };
++        let lines = crash_lines(&report);
++        assert_eq!(lines.len(), 11, "ten seeds plus the overflow line");
++        assert!(lines[0].contains("seed 0: reason 0"));
++        assert!(lines[9].contains("seed 9: reason 9"));
++        assert!(lines[10].contains("2 more"), "overflow line: {}", lines[10]);
++    }
++
++    #[test]
++    fn run_soak_over_the_real_content_reports_zero_crashes() {
++        // The real path end-to-end, through the isolation boundary: two
++        // short real matches over the shipped content stay green and the
++        // report's crash accounting lands on zero.
++        let cli = SoakCli {
++            matches: 2,
++            seed_base: 7,
++            ticks: 60,
++            content: repo_content(),
++            verbose: false,
++        };
++        let report = run_soak(&cli).expect("the real soak runs");
++        assert_eq!(report.matches, 2);
++        assert_eq!(report.crashed, 0);
++        assert!(report.crashes.is_empty());
++        assert_eq!(
++            report.resolved + report.mutual_destruction + report.unresolved,
++            2
++        );
++    }
+ }
+-- 
+2.47.3
+
+
+From 33e8eaef54d9f3baab93d07364de065aacf4ad9b Mon Sep 17 00:00:00 2001
+From: E-Vex <raiedaleve@gmail.com>
+Date: Fri, 9 Oct 2026 08:29:55 +0000
+Subject: [PATCH 2/3] fix(ci): the nightly's evidence contract - the aggregate
+ runs on tier failure, and a dev-profile tier sweeps the A12 checker at soak
+ scale
+
+Two gaps in the A7 nightly's evidence chain. (1) The aggregate job's
+own comment claimed it 'runs even when a shard failed', but a plain
+needs: skips dependents on failure - the evidence concatenation, the
+upload, and the crashed gate were dropped on exactly the failure paths
+they exist for; job-level !cancelled() makes the comment true. (2) A7
+names 'no invariant violations', but the A12 checker is
+debug_assert-only by design, so the release tiers could never observe
+them at soak scale (soak.rs's own doc claimed they surfaced there).
+The new soak-dev tier runs 16 rotating matches per night in the dev
+profile - the only profile where the checker exists - where the new
+per-match isolation counts each violation as a crashed match with its
+seed instead of aborting the night. The aggregate now gates on both
+tiers' crashed counts and sums the win totals across tiers; the
+header documents the tier semantics. CI-only: GitHub Actions
+semantics, not runnable locally - the YAML parses and the job graph
+(soak, soak-dev -> aggregate with !cancelled(), bench) verified by
+inspection.
+---
+ .github/workflows/nightly.yml | 76 +++++++++++++++++++++++++++++++----
+ 1 file changed, 68 insertions(+), 8 deletions(-)
+
+diff --git a/.github/workflows/nightly.yml b/.github/workflows/nightly.yml
+index 4be7f99..a04f7f6 100644
+--- a/.github/workflows/nightly.yml
++++ b/.github/workflows/nightly.yml
+@@ -4,10 +4,21 @@ name: nightly
+ # matches — no panics, no stuck matches, no invariant violations, win-rate
+ # telemetry — plus the plan §15 performance budgets in release.
+ #
++# The tier semantics (the A12 checker is debug-only by design, plan §13):
++#   * The release tiers (smoke + the 1000-match shards) are the
++#     panics/stuck/resolution/throughput sweep — `tools soak` isolates a
++#     panicking match per-match (counts it, attributes the seed, keeps the
++#     report) and exits non-zero at the end when anything crashed.
++#   * The dev tier (soak-dev) is the invariant sweep: a dev-profile soak
++#     runs the A12 checker inside every tick, and the same per-match
++#     isolation turns a violation into a counted crash with its seed
++#     instead of an aborted run — the only way a violation is observable
++#     at soak scale at all.
++#
+ # The 1000-match count from A7 runs nightly rather than per-push: at Alpha
+ # sizes a full sweep takes hours, and CI-per-push is the green gate's job
+ # (ci.yml). Crashes fail the workflow (`tools soak` exits non-zero when any
+-# match crashes).
++# match crashes or panics).
+ #
+ # M10.1 — sharding, timeouts, and evidence artifacts (plan §12's "in parallel
+ # processes" is satisfied at the process level, exactly as the plan words it:
+@@ -133,12 +144,59 @@ jobs:
+           name: soak-${{ matrix.tier }}
+           path: soak-${{ matrix.tier }}.txt
+ 
++  # The dev tier: the A12 invariant sweep. The A12 checker is
++  # #[cfg(debug_assertions)] (plan §13's letter — it runs inside every
++  # Sim::step in debug builds), so only this tier observes invariant
++  # violations at soak scale. The per-match panic isolation in `tools soak`
++  # is what makes this tier possible at all: pre-isolation, the first
++  # violation aborted the run and destroyed the night's evidence. Sixteen
++  # rotating matches a night (dev is an order of magnitude slower than
++  # release; 16 keeps the job comfortably inside its timeout while
++  # sweeping ~240 fresh seeds a month through the checker).
++  soak-dev:
++    name: soak-dev (A12 invariant sweep, dev profile)
++    runs-on: ubuntu-latest
++    # A hang must fail loudly, not consume the runner day.
++    timeout-minutes: 45
++    steps:
++      - uses: actions/checkout@v4
++      - name: Install the pinned toolchain
++        run: |
++          rustup toolchain install 1.98.1 --profile minimal
++          rustup default 1.98.1
++      - name: Cache cargo registry + target
++        uses: Swatinem/rust-cache@v2
++        with:
++          key: soak-dev-${{ hashFiles('Cargo.lock') }}
++      - name: Build (dev — the A12 checker is debug-only)
++        run: cargo build -p pandemonium-tools
++      - name: Soak (16 AI-vs-AI matches under the A12 checker)
++        run: |
++          set -o pipefail
++          BASE=$(( $(date +%s) / 86400 * 1000 ))
++          cargo run -p pandemonium-tools -- soak \
++            --matches 16 \
++            --seed-base $BASE \
++            --content content \
++            | tee soak-dev.txt
++      - name: Upload the dev-tier summary (evidence)
++        # Upload even on failure — a crashing tier's summary is exactly
++        # the evidence the aggregate and the declaration want to see.
++        if: always()
++        uses: actions/upload-artifact@v4
++        with:
++          name: soak-dev
++          path: soak-dev.txt
++
+   aggregate:
+     name: aggregate (evidence + crashed gate)
+-    # Needs every shard (matrix jobs complete as one job name; this waits
+-    # for all 11 entries) — and runs even when a shard failed, so the
+-    # concatenated evidence lands regardless.
+-    needs: soak
++    # Needs every tier (the release shards and the dev invariant sweep)
++    # and runs even when one of them failed — `!cancelled()` keeps the
++    # evidence landing on exactly the failure paths it exists for (a
++    # plain `needs:` skips dependents on failure, which would drop the
++    # concatenation and the crashed gate precisely when a tier crashed).
++    if: ${{ !cancelled() }}
++    needs: [soak, soak-dev]
+     runs-on: ubuntu-latest
+     timeout-minutes: 5
+     steps:
+@@ -165,10 +223,12 @@ jobs:
+             total_crashed=$(( total_crashed + crashed ))
+           done
+           if [ "$total_crashed" -ne 0 ]; then
+-            echo "::error::soak shards reported $total_crashed crashed match(es)"
++            echo "::error::soak tiers reported $total_crashed crashed match(es)"
+             exit 1
+           fi
+-          # Win-rate totals, summed across the shards' `resolved:` lines.
++          # Win-rate totals, summed across the tiers' `resolved:` lines
++          # (the dev tier's 16 matches included — the label says tiers,
++          # not shards, because the dev sweep adds its own sample).
+           # Each line carries five numbers: resolved, "0", wins0, "1", wins1.
+           grep -h '^  resolved:' * | grep -oE '[0-9]+' | awk '
+             NR % 5 == 1 { resolved += $1 }
+@@ -178,7 +238,7 @@ jobs:
+               printf "  matches resolved: %d (player 0: %d, player 1: %d)\n", \
+                 resolved, wins0, wins1
+             }'
+-          echo "aggregate: 0 crashed across all shards"
++          echo "aggregate: 0 crashed across all tiers (release shards + dev invariant sweep)"
+       - name: Upload the concatenated evidence
+         if: always()
+         uses: actions/upload-artifact@v4
+-- 
+2.47.3
+
+
+From c736041214c101a5577fc94f4b647d45b8b9474f Mon Sep 17 00:00:00 2001
+From: E-Vex <raiedaleve@gmail.com>
+Date: Fri, 9 Oct 2026 08:30:03 +0000
+Subject: [PATCH 3/3] docs(registers): A-127 and DEBT-018 - the honest tier
+ semantics, the isolation-is-not-recovery rule, and the counts catch up
+
+A-127 (ASSUMPTIONS) records the isolation contract: catch_unwind is
+observability, never recovery; the exit code stays non-zero;
+AssertUnwindSafe's soundness argument; the panic hook's stderr stays
+on as the debugging evidence; a panic=abort profile would make the
+isolation a no-op by construction (none exists in this workspace);
+and the tier semantics - release soaks observe panics/stuck/
+resolution/throughput, only dev-profile soaks observe A12 violations,
+which the nightly's soak-dev tier now sweeps over 16 rotating seeds a
+night. DEBT-018 registers a found-but-deliberately-not-fixed
+robustness gap from the same investigation: ReplayFile::decode
+pre-allocates from untrusted length prefixes (a crafted valid-
+checksum file can OOM-abort the process instead of erroring) - out of
+the declared threat model (SECURITY.md: no untrusted input in the
+Alpha), repay-when replays are ever exchanged between parties. The
+handoff (verification commands, tools inventory, the new gotcha
+section), ARCHITECTURE's tools paragraph, the CHANGELOG entry, and
+the test counts everywhere (553 dev / 548 release, from 546/541) all
+catch up to the code.
+---
+ AI-Handoff.md        | 15 +++++++++----
+ CHANGELOG.md         | 53 ++++++++++++++++++++++++++++++++++++++++++++
+ README.md            |  6 ++---
+ docs/ARCHITECTURE.md | 11 ++++++++-
+ docs/ASSUMPTIONS.md  | 27 ++++++++++++++++++++++
+ docs/DEBT.md         |  1 +
+ 6 files changed, 105 insertions(+), 8 deletions(-)
+
+diff --git a/AI-Handoff.md b/AI-Handoff.md
+index 0a3d6d9..d33b79b 100644
+--- a/AI-Handoff.md
++++ b/AI-Handoff.md
+@@ -30,8 +30,8 @@
+ | Presentation | **3D perspective over the 2D logical ground plane** — the sim stays 2D fixed-point; 3D is presentation-only ([ADR-0001](docs/adr/0001-3d-presentation.md)) |
+ | Status | **M10.2 (playtest-1 findings): COMPLETE — all five phases.** Phase 4 (audio) delivered and re-tested **clean on real hardware** (A-126, 2026-10-09); Phase 5 (verification & handoff) closed the milestone: full gate green in dev and release, the three goldens bit-identical, the Xvfb+XTEST machine pass re-ran the M10.2 paths (controls, menus/settings, the audio evidence lines), and the A14 playtest is scheduled — five first-time tester slots in `docs/PLAYTEST.md` §7. Next: the A14 human playtest → Alpha declaration |
+ | Goldens (never move) | demo `0xb6fff6659cfb7709` (seed 7, 300 ticks) · flagship `0x6e9a18bd7c5f699f` (seed 7, 7200 ticks AI-vs-AI; tick-0 `0x71a924ad5799e4b3`) · content `0x9bc18c521107b262` (map id `0xd38136401ab02ff1`) |
+-| Tests | 546 dev / 541 release (5 should-panic invariant tests are debug-only) |
+-| Registers | ASSUMPTIONS last = A-126. Key open debt: DEBT-008 (the human visual pass — the A14 sessions close it), DEBT-013 (client monoliths), DEBT-016, DEBT-017. M10.2 fully repaid DEBT-011 (the audible backend **and** the owner's clean re-test) and closed DEBT-015 (A14's ≥5-tester gate is the owner's, not milestone scope) |
++| Tests | 553 dev / 548 release (5 should-panic invariant tests are debug-only) |
++| Registers | ASSUMPTIONS last = A-127. Key open debt: DEBT-008 (the human visual pass — the A14 sessions close it), DEBT-013 (client monoliths), DEBT-016, DEBT-017, DEBT-018 (replay decode pre-allocation, out of the declared threat model). M10.2 fully repaid DEBT-011 (the audible backend **and** the owner's clean re-test) and closed DEBT-015 (A14's ≥5-tester gate is the owner's, not milestone scope) |
+ | Spirit | The Alpha is judged by system properties (plan §13), not content volume. Do not add what no acceptance test requires |
+ 
+ M10.2 in one paragraph: **Phase 1** controls (Generals ZH-style right-button state machine, middle-drag rotate, edge scroll, Escape ladder) re-tested pass-with-notes (A-101). **Phase 2** visual legibility (per-kind silhouettes, blue/orange teams, health bars, tooltips, minimap markers) re-tested pass (A-107). **Phase 3** menus/settings — pure state machine `client/src/screens.rs`, host built on Start (game opens at the menu), `client/src/config.rs` settings file (no serde), pause menu, end screen with Rematch/Main Menu — Xvfb+XTEST machine-verified, re-tested (A-119). **Phase 4** audio — rodio 0.22.2 playback-only behind the `AudioSink` seam (ADR-0002), `client/src/sound.rs`'s two-arm sink (a silent null fallback when there is no device), nine synthesized cues (six event-mapped + three client-side through `on_cue`), per-cue 80 ms rate limiter, live volume + `muted` eighth key — machine-verified on Xvfb (the null arm; evidence lines count cues). Registers A-107..A-125. **Phase 5** (verification & handoff) closed the milestone out: the full gate green in dev **and** release (546/541), the three goldens bit-identical, a five-session Xvfb+XTEST machine pass over the M10.2 paths (29 checks, all green — the match session, the menu-only session, the settings persistence pair, the Esc-discard run), the owner's audio re-test clean (A-126), and the A14 playtest scheduled. Registers A-107..A-126.
+@@ -54,13 +54,15 @@ cargo test --workspace --release             # determinism must hold in release
+ cargo run -p pandemonium-tools -- headless --seed 7 --ticks 300                    # ends 0xb6fff6659cfb7709
+ cargo run -p pandemonium-tools -- headless --seed 7 --ticks 7200 --p1 ai --p2 ai   # ends 0x6e9a18bd7c5f699f
+ cargo run -p pandemonium-tools -- content-validate content                         # PASS, content hash above
++cargo run -p pandemonium-tools -- soak --matches 4 --ticks 900                # dev: the A12 invariant sweep, crash-isolated per match
++cargo run --release -p pandemonium-tools -- soak --matches 8 --ticks 4000     # release: the panics/stuck/resolution tier
+ cargo run -p pandemonium-client                    # window on a desktop; headless smoke without a display
+ cargo run -p pandemonium-client -- --frames 900    # windowed smoke: auto-exit + evidence summary
+ cargo run -p pandemonium-client -- --seed 42 --record run.pdrp && \
+ cargo run -p pandemonium-tools -- replay-verify run.pdrp                           # A2
+ ```
+ 
+-Expected: everything succeeds; 546 tests pass in dev (541 release); all three goldens bit-identical.
++Expected: everything succeeds; 553 tests pass in dev (548 release); all three goldens bit-identical.
+ `--p1 ai --p2 ai --ticks 27000` shows a full match resolving naturally. The headless smoke drives the
+ windowed path's exact hosting seam (AI opponent included) and, since M10.2 Phase 4, constructs the real audio sink — the exit evidence says what audio did (the arm: active or null fallback; the cues' fed/voiced/dropped fates) alongside the feedback-wiring line. The same run that is silent under Xvfb/CI is audible on real hardware.
+ The windowed path is verified on Xvfb + llvmpipe (recipe in §9 / DEBT-008); the *human* visual pass is the
+@@ -78,7 +80,7 @@ owner's. CI runs fmt + clippy + tests on Linux/Windows/macOS in dev and release,
+ | `replay` | Canonical LE byte codec + checksummed replay record/validate |
+ | `engine` | FixedTimestep, Interpolator, `MatchHost` (+ pause/step, AI controllers, log, outcome), `RtsCamera`, terrain mesh, Renderer trait, `ai_host`, **`audio.rs`** (`AudioSink` + `on_cue`, `cue_for`, the nine-cue enum with ALL/index/name, `NullAudioSink` — also the client-cue oracle) |
+ | `client` | winit + wgpu 3D renderer, fontdue text, HUD/overlay, input (`input.rs`, `orders.rs`), `feedback.rs`, `ui.rs`, `report.rs` (F8 bug report), `silhouette.rs`, `screens.rs`, `config.rs`, `sound.rs` (two-arm audio sink). `main.rs`/`render.rs` are monoliths (DEBT-013) |
+-| `tools` | `headless`, `replay-verify`, `content-validate`, `soak`, `bench` (clap CLI) |
++| `tools` | `headless`, `replay-verify`, `content-validate`, `soak` (A7: per-match panic-isolated crash telemetry — a panic is counted with its seed instead of aborting the run; a *dev-profile* soak is the only tier that observes A12 violations), `bench` (clap CLI) |
+ | `tests/` | `pandemonium-tests` package: architecture_law (A13), determinism, content_pipeline, movement, economy, combat, vision, ai, match_rules, alpha_loop. New acceptance tests need an explicit `[[test]]` entry in `tests/Cargo.toml` |
+ 
+ The dependency law is **enforced by tests**: `tests/architecture_law.rs` checks the internal edge
+@@ -122,6 +124,11 @@ types, wall-clock reads, and floating-point type names.
+ 
+ ## 9. Sharp edges and gotchas
+ 
++**Sim, tools, and the A7 instrument**
++- **The soak's crash telemetry is real since the post-M10.2 instrument pass**: every match runs inside `catch_unwind`, a panic becomes `crashed: N` with the seed and panic message in the report (the `panic:` prefix marks it), the sweep continues, and `main` exits non-zero at the end. Isolation is observability, never recovery (A-127) — never widen it into "keep going with suspect state".
++- **Tier semantics matter**: the A12 checker is `debug_assert`-only, so a *release* soak observes panics/stuck/resolution/throughput, and only a *dev* soak observes invariant violations (each violation is one isolated, counted crash). The nightly's release tiers are the 1000-match sweep; `soak-dev` (16 rotating matches) is the invariant tier; the aggregate job runs on tier failure (`!cancelled()`).
++- `cargo test --workspace` runs the tests in dev — the A12 checker is live in every dev-profile match the suites drive.
++
+ **Determinism and the sim**
+ - **Presentation direction is invisible to the sim's test wall** (M9.1): hashes pin behavior, not feel — the camera's right axis was negated from M3 until a human pressed D. Camera/feel primitives need direction-pinned tests (yaw 0 and 90°) AND the human pass.
+ - **Fog and match outcome stay out of the hash** (A-059, A-066). Adding them breaks A10 and every golden.
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index a830242..d4c7c6e 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -7,6 +7,59 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); this project
+ does not use SemVer yet (the Alpha is undeclared), so each entry is keyed to
+ its milestone tag.
+ 
++## [Post-M10.2] — the soak instrument: A7's crash telemetry made real
++
++An engineering pass between milestones (the A14 playtest is scheduled and
++remains the owner's; nothing here touches the simulation, the content, or
++the goldens — the tree under `crates/sim`, `sim_api`, `fx`, `ai`, and
++`content/` is byte-identical, and all three golden hashes re-verified
++bit-identical). The target: the soak runner's module docs promised crash
++telemetry that did not exist — "panics surface as `Err` per match" was
++false (no `catch_unwind` anywhere: one panic aborted the whole run, took
++the report and every later match's telemetry with it, and left the
++`crashed: N` line reachable only by pre-simulation load errors), and the
++claim that the A12 checker's invariant violations surface in the
++`--release` soak was self-contradictory (the checker is `debug_assert`-only,
++compiled out of exactly the profile the docs told you to run).
++
++- **the fix (tools)**: every soak match now runs inside
++  `catch_unwind` (`soak.rs::isolate_panic`, with the written soundness
++  argument for `AssertUnwindSafe`): a panic becomes one `crashed` count
++  attributed to its seed, the panic message lands in the report behind a
++  `panic:` prefix (the default hook's stderr backtrace stays on — that is
++  the debugging evidence), the sweep continues, the report prints, and
++  `main` still exits non-zero at the end. Isolation is observability,
++  never recovery (A-127). The report gained a `crashes` field (seed +
++  reason per crash) and a capped crash list so a systematic storm cannot
++  bury the summary.
++- **the regression proof**: seven new tools tests (24 total, from 17) —
++  the sweep-seam test injects a panicking match and asserts it is
++  counted, attributed, and *survived*; run against the pre-fix loop
++  (temporarily reverted locally, not in the tree), that test aborts —
++  the exact original defect. Payload extraction, error-chain passthrough,
++  the crash-list cap, and an end-to-end real-content soak are pinned
++  alongside.
++- **the nightly's evidence contract (CI)**: the aggregate job now carries
++  job-level `!cancelled()` — its own comment always claimed it "runs even
++  when a shard failed", but a plain `needs:` skips dependents on failure,
++  which dropped the evidence concatenation and the crashed gate on
++  precisely the failure paths they exist for. A new `soak-dev` tier runs
++  16 rotating matches per night in the **dev profile** — the only profile
++  where the A12 checker exists, so "no invariant violations" is finally
++  *measured* at soak scale (~240 fresh seeds a month) instead of resting
++  on the per-push fixed-seed suites alone.
++- **the registers**: A-127 (the isolation contract and tier semantics),
++  DEBT-018 (a found-but-deliberately-not-fixed robustness gap:
++  `ReplayFile::decode` pre-allocates from untrusted length prefixes — out
++  of the declared threat model today, repay when replays are ever
++  exchanged between parties), AI-Handoff/ARCHITECTURE/README caught up.
++- **the gate**: fmt and clippy `-D warnings` clean; **553 dev / 548
++  release tests green**; demo `0xb6fff6659cfb7709`, flagship
++  `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262` all bit-identical;
++  the replay round-trip PASS; real soaks green through the isolation
++  boundary in both profiles (dev 4×900 ticks at 1118 t/s with the A12
++  checker live; release 8×4000 ticks at 5497 t/s).
++
+ ## [M10.2 Phase 5] — verification and handoff (the closeout)
+ 
+ The final phase of the milestone: prove it, don't extend it. Delivered as
+diff --git a/README.md b/README.md
+index 2fcab56..ad61374 100644
+--- a/README.md
++++ b/README.md
+@@ -274,9 +274,9 @@ Built and verified through M9:
+   law holds.
+ - **CI** — fmt, clippy with `-D warnings`, and the test suite in dev *and*
+   release on Linux, Windows, and macOS, plus the replay round-trip and a
+-  binaries-run check. **546 tests green in dev, 541 in release** at the
+-  M10.2 closeout (5 should-panic invariant-checker tests are debug-only by
+-  nature).
++  binaries-run check. **553 tests green in dev, 548 in release** at the
++  post-M10.2 instrument pass (5 should-panic invariant-checker tests are
++  debug-only by nature).
+ 
+ Not built yet — on purpose, in milestone order:
+ 
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 255bd07..892ea3b 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -395,7 +395,16 @@ budget)") — plus `replay-verify` — re-simulation with checkpoint comparison
+ directory). M2 added `content-validate` — strict validation of a content
+ directory plus its content identity. The AI match driver and the
+ re-simulation both run through the engine's hosting and
+-`sim::run_command_log` respectively.
++`sim::run_command_log` respectively. M10 added `soak` and `bench`; the
++post-M10.2 instrument pass hardened the soak's A7 crash telemetry: every
++match runs inside `catch_unwind`, a panic becomes a `crashed` count with
++its seed and message in the report instead of an aborted run (the exit code
++stays non-zero — isolation is observability, never recovery; A-127), and
++the report's crash list names the seeds. The A12 checker being
++debug-only means a *release* soak observes panics/stuck/resolution while
++only a *dev-profile* soak observes invariant violations — the nightly runs
++both tiers (release shards + the 16-match `soak-dev` invariant sweep), and
++its aggregate job concatenates the evidence even when a tier fails.
+ 
+ `tests/determinism.rs` carries the A1/A2 suite with pinned golden hashes
+ (encoding v4 — A-056); `tests/content_pipeline.rs` carries the M2 suite
+diff --git a/docs/ASSUMPTIONS.md b/docs/ASSUMPTIONS.md
+index 3487c9a..e03861a 100644
+--- a/docs/ASSUMPTIONS.md
++++ b/docs/ASSUMPTIONS.md
+@@ -1106,3 +1106,30 @@ confirms or rejects it.
+   slots now live in `docs/PLAYTEST.md` §7, and the audio probe there
+   stays armed as a regression guard for the A14 sessions rather than an
+   open question.
++
++- **A-127 (plan §13 A7/A12, post-M10.2 instrument pass).** The soak
++  runner's crash telemetry is observability, never recovery: each match
++  runs inside `catch_unwind` (`tools/src/soak.rs::isolate_panic`), a
++  panic becomes one `crashed` count carrying its seed and panic message
++  (the `panic:` prefix distinguishes it from a load-stage anyhow error),
++  the sweep continues, the report prints, and `main` still exits
++  non-zero at the end — the isolation must never become a license to
++  run a broken sim green. `AssertUnwindSafe` is sound here because every
++  mutable value a match owns (host, sim, world, controllers) is
++  constructed inside the isolated call and dropped while unwinding, so
++  no half-updated state crosses the boundary; the caught panic's
++  evidence (count, seed, message, and the default hook's stderr
++  backtrace) is the product, not the surviving state. The panic hook's
++  stderr output stays enabled deliberately — it is the debugging
++  evidence; the report's reason line is the summary. A `panic =
++  "abort"` profile would make the isolation a no-op by construction
++  (the process aborts as before); no such profile exists in this
++  workspace. Tier semantics: the release nightly observes panics,
++  stuck matches, resolution, and throughput; only a *dev-profile* soak
++  observes A12 invariant violations (the checker is `debug_assert`-only
++  by plan §13's letter), which the nightly's new `soak-dev` tier sweeps
++  over 16 rotating seeds per night. The dev tier's count (16) balances
++  dev-profile cost (an order of magnitude slower than release) against
++  coverage (~240 fresh seeds a month) — a calibration guess, revisitable
++  by evidence if the tier's runtime lands far from its 45-minute
++  timeout.
+diff --git a/docs/DEBT.md b/docs/DEBT.md
+index 3abca97..59e56d5 100644
+--- a/docs/DEBT.md
++++ b/docs/DEBT.md
+@@ -26,3 +26,4 @@ repay-when trigger | status |`
+ | DEBT-015 | ~~PLAN-M10.2's Phases 2–4 are deferred~~ closed (M10.2 Phase 4): Phase 2 (visual legibility), Phase 3 (menu and settings), and Phase 4 (audio — DEBT-011's repayment, rodio behind the seam, volume/mute live) are all built, each delivered on the standing plan with its owner re-test in the chain. What remains of this row is not milestone scope but the A14 declaration gate itself: the owner's Phase 4 re-test (sounds play, distinct, volume/mute live and persist) and then the full A14 >=5-tester playtest — the declaration's own bar, outside any phase's deliverables | scope deferral | every phase's re-test gated the next (A-101, A-107, A-119); Phase 4 was the last deferred scope | — | the owner's Phase 4 re-test on real hardware, then the A14 >=5-tester pass | closed (M10.2 — the A14 playtest gate is the owner's, not a debt) |
+ | DEBT-016 | The nine hand-tuned silhouettes (`client/src/silhouette.rs`) hardcode part sizes matched to the *authored* footprints (Command Center 4×4, Barracks 3×3, Depot/Turret 2×2) and the name table lists exactly the nine authored kind ids; a content change to a footprint or a kind id leaves the named spec stale (the capability fallback still renders it, just not hand-tuned) | simplification | Phase 2's bar is legibility of the shipped nine kinds, not a general auto-art system; the client owns presentation data (A-103) and content files stay untouched | when a footprint or kind id changes in `content/entities/`, re-tune (or drop to the fallback for) the matching `silhouette::named` entry in the same commit; the fallback paths are tested | any content footprint/kind-id edit (the content hash moving is the tripwire) | open (M10.2 Phase 2) |
+ | DEBT-017 | The renderer's terrain mesh (and the camera's map bounds) is built once at window creation from the content tree's **first** map — a match started on any *other* map would render the wrong terrain (the Alpha ships exactly one authored map, Crossroads, so the case is unreachable today) | simplification | the New Match screen lists the tree's maps generically (PLAN §3.3: "supports more maps later"), but the wgpu renderer has no terrain-mesh update path and rebuilding the whole renderer per match is riskier than the debt | add a `WgpuRenderer::update_terrain(&TerrainMesh)` (or rebuild the renderer) when a second map lands, and re-derive the camera's map bounds per match | a second map file in `content/maps/` (the map list rendering more than one row is the tripwire) | open (M10.2 Phase 3) |
++| DEBT-018 | `ReplayFile::decode` pre-allocates from untrusted length prefixes (`player_count`, `command_count`, `checkpoint_count`, and each command's `units` count come straight from the file into `Vec::with_capacity`) — a hand-crafted replay with a valid checksum and a huge count aborts the process on an OOM allocation instead of returning a typed error (found in the post-M10.2 instrument pass, registered rather than fixed to keep that pass focused) | robustness | the Alpha's declared threat model has no untrusted input (`SECURITY.md`: replays are the workspace's own recordings; user-supplied content is not a supported configuration), and the FNV checksum gate means only a deliberately re-checksummed file reaches the counts — corruption alone cannot | bound every pre-allocation by the reader's remaining bytes divided by the record's minimum encoded size, then let the existing truncation errors fire on the shortfall | the first feature that exchanges replays between parties (a replay browser, `tools replay-verify` on downloaded files, or lockstep netcode) — the moment a replay stops being "a file this process wrote" | open (post-M10.2) |
+-- 
+2.47.3
+

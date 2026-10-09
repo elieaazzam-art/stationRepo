@@ -1,5 +1,18 @@
 # Changelog
 
+## 2026-10-09 — Delivery 018: post-M10.2 soak-instrument patch
+
+- **`patches/018-post-m10.2-soak-instrument.patch`** — 3 commits on
+  master `f23e7cc`: the A7 soak instrument's crash telemetry made real
+  (per-match `catch_unwind` panic isolation with seed attribution, the
+  report survives the crash, exit stays non-zero), the nightly's
+  evidence contract (aggregate runs on tier failure; a dev-profile
+  `soak-dev` tier sweeps the A12 checker at soak scale), and the
+  registers (A-127, DEBT-018).
+- Zero sim movement: no diffs under `crates/sim`, `sim_api`, `fx`, `ai`,
+  `content/`; goldens bit-identical; **553 dev / 548 release** green.
+- Full note and apply instructions in [`NOTES.md`](NOTES.md).
+
 ## 2026-10-08 — Repo update (sync with working branch)
 
 - Synced the repository with the latest local working state (`master`).

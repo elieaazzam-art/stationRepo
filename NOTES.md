@@ -739,3 +739,72 @@ the three goldens, the headless smoke).
 The fx proptest `checked_div_agrees_in_range` flake (~1-in-250,
 pre-existing, noted with 016-v2) did not fire in either gate run this
 phase; the standing advice stays "re-run, don't fix".
+
+## Post-M10.2 patch note (the soak instrument)
+
+`patches/018-post-m10.2-soak-instrument.patch` is an engineering pass
+between milestones — the A14 playtest stays scheduled and the owner's;
+nothing here touches `crates/sim`, `sim_api`, `fx`, `ai`, `content/`, or
+`content/` (the diff is tools + CI + docs only), and all three goldens
+re-verified bit-identical. Three commits on `f23e7cc` (master's M10.2
+Phase 5 closeout).
+
+The defect: the soak runner's own module docs promised A7 crash
+telemetry the code did not deliver. "Panics surface as `Err` per match"
+was false — no `catch_unwind` existed anywhere, so one panic aborted the
+whole run, took the report and every later match's telemetry with it,
+and the `crashed: N` line was reachable only by pre-simulation load
+errors. And the claim that A12 invariant violations surface in the
+`--release` soak was self-contradictory — the checker is
+`debug_assert`-only, compiled out of exactly the profile the docs told
+you to run; A7's third signal had no instrument at nightly scale at all.
+
+What landed:
+
+- **tools**: every soak match runs inside `catch_unwind`
+  (`soak.rs::isolate_panic`, with the written `AssertUnwindSafe`
+  soundness argument): a panic becomes one `crashed` count attributed to
+  its seed, the panic message lands in the report behind a `panic:`
+  prefix, the sweep continues, the report prints, and `main` still exits
+  non-zero — isolation is observability, never recovery (A-127). The
+  report gained a `crashes` field and a capped crash list.
+- **CI**: the nightly aggregate job now carries job-level
+  `!cancelled()` (its own comment always claimed it ran on shard
+  failure; a plain `needs:` skips dependents, dropping the evidence on
+  exactly the failure paths), and a new `soak-dev` tier runs 16 rotating
+  matches per night in the **dev profile** — the only profile where the
+  A12 checker exists — so "no invariant violations" is finally measured
+  at soak scale instead of resting on the per-push fixed-seed suites.
+- **registers**: A-127 (the isolation contract and tier semantics) and
+  DEBT-018 (a found-but-not-fixed robustness gap: `ReplayFile::decode`
+  pre-allocates from untrusted length prefixes — out of the declared
+  threat model, repay when replays are ever exchanged).
+
+The evidence (the full gate ran on the working branch *and* on a fresh
+`git am` clone):
+
+- fmt + clippy `-D warnings` clean; **553 dev / 548 release tests green**
+  (seven new tools tests, 17 → 24: the sweep-seam test injects a
+  panicking match and asserts it is counted, attributed, and *survived*
+  — against the pre-fix loop, temporarily reverted locally, that test
+  aborts: the exact original defect);
+- the three goldens bit-identical: demo `0xb6fff6659cfb7709`, flagship
+  `0x6e9a18bd7c5f699f`, content `0x9bc18c521107b262`;
+- the replay round-trip (A2) PASS; the headless client smoke PASS;
+- real soaks green through the isolation boundary in both profiles
+  (dev 4×900 ticks at 1118 t/s with the A12 checker live; release
+  8×4000 ticks at 5497 t/s).
+
+Apply on a fresh clone:
+
+```
+git clone https://github.com/E-Vex/pandemonium-bd.git
+cd pandemonium-bd
+git checkout f23e7cc6a338736d1a463e310bcb76a8395ac2da
+git am /path/to/018-post-m10.2-soak-instrument.patch
+```
+
+Verified end to end: `git am` applies all three commits cleanly (the
+authors read E-Vex <raiedaleve@gmail.com>), the am'ed tree is identical
+to the branch tree, and fmt, the 24 tools tests, and the demo golden
+re-ran green on the am'ed clone.
